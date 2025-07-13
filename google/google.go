@@ -3,11 +3,13 @@ package google
 import (
 	"cloud-drives-sync/config"
 	"cloud-drives-sync/database"
+	"cloud-drives-sync/retry"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -35,15 +37,121 @@ func getClient(creds config.ClientCreds, refreshToken string) (*drive.Service, e
 }
 
 func AddMainAccount(cfg *config.Config, pw, configPath string) {
-	// Full OAuth2 flow: prompt user, start local server, get code, exchange for refresh token, get email, save
-	// ...implementation omitted for brevity...
-	fmt.Println("Google main account added. (Full OAuth2 flow implemented)")
+	fmt.Println("Starting Google main account OAuth2 flow...")
+	oauthCfg := &oauth2.Config{
+		ClientID:     cfg.GoogleClient.ID,
+		ClientSecret: cfg.GoogleClient.Secret,
+		Scopes:       []string{drive.DriveScope, "email", "profile"},
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://accounts.google.com/o/oauth2/auth",
+			TokenURL: "https://oauth2.googleapis.com/token",
+		},
+		RedirectURL: "http://localhost:8080/oauth2callback",
+	}
+	codeCh := make(chan string)
+	srv := &http.Server{Addr: ":8080"}
+	http.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		fmt.Fprintf(w, "Authorization received. You can close this window.")
+		codeCh <- code
+	})
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("Server error: %v\n", err)
+		}
+	}()
+	authURL := oauthCfg.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+	fmt.Printf("Visit the following URL in your browser to authorize:\n%s\n", authURL)
+	code := <-codeCh
+	ctx := context.Background()
+	token, err := oauthCfg.Exchange(ctx, code)
+	if err != nil {
+		fmt.Printf("Token exchange error: %v\n", err)
+		return
+	}
+	srv.Close()
+	ts := oauthCfg.TokenSource(ctx, token)
+	driveSrv, err := drive.NewService(ctx, option.WithTokenSource(ts))
+	if err != nil {
+		fmt.Printf("Drive service error: %v\n", err)
+		return
+	}
+	about, err := driveSrv.About.Get().Fields("user(emailAddress)").Do()
+	if err != nil {
+		fmt.Printf("Failed to get user info: %v\n", err)
+		return
+	}
+	user := config.User{
+		Provider:     "Google",
+		Email:        about.User.EmailAddress,
+		IsMain:       true,
+		RefreshToken: token.RefreshToken,
+	}
+	cfg.Users = append(cfg.Users, user)
+	if err := config.EncryptAndSaveConfig(*cfg, configPath, pw); err != nil {
+		fmt.Printf("Failed to save config: %v\n", err)
+		return
+	}
+	fmt.Println("Google main account added.")
 }
 
 func AddBackupAccount(cfg *config.Config, pw, configPath string) {
-	// Full OAuth2 flow: prompt user, start local server, get code, exchange for refresh token, get email, save
-	// ...implementation omitted for brevity...
-	fmt.Println("Google backup account added. (Full OAuth2 flow implemented)")
+	fmt.Println("Starting Google backup account OAuth2 flow...")
+	oauthCfg := &oauth2.Config{
+		ClientID:     cfg.GoogleClient.ID,
+		ClientSecret: cfg.GoogleClient.Secret,
+		Scopes:       []string{drive.DriveScope, "email", "profile"},
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://accounts.google.com/o/oauth2/auth",
+			TokenURL: "https://oauth2.googleapis.com/token",
+		},
+		RedirectURL: "http://localhost:8080/oauth2callback",
+	}
+	codeCh := make(chan string)
+	srv := &http.Server{Addr: ":8080"}
+	http.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		fmt.Fprintf(w, "Authorization received. You can close this window.")
+		codeCh <- code
+	})
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("Server error: %v\n", err)
+		}
+	}()
+	authURL := oauthCfg.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+	fmt.Printf("Visit the following URL in your browser to authorize:\n%s\n", authURL)
+	code := <-codeCh
+	ctx := context.Background()
+	token, err := oauthCfg.Exchange(ctx, code)
+	if err != nil {
+		fmt.Printf("Token exchange error: %v\n", err)
+		return
+	}
+	srv.Close()
+	ts := oauthCfg.TokenSource(ctx, token)
+	driveSrv, err := drive.NewService(ctx, option.WithTokenSource(ts))
+	if err != nil {
+		fmt.Printf("Drive service error: %v\n", err)
+		return
+	}
+	about, err := driveSrv.About.Get().Fields("user(emailAddress)").Do()
+	if err != nil {
+		fmt.Printf("Failed to get user info: %v\n", err)
+		return
+	}
+	user := config.User{
+		Provider:     "Google",
+		Email:        about.User.EmailAddress,
+		IsMain:       false,
+		RefreshToken: token.RefreshToken,
+	}
+	cfg.Users = append(cfg.Users, user)
+	if err := config.EncryptAndSaveConfig(*cfg, configPath, pw); err != nil {
+		fmt.Printf("Failed to save config: %v\n", err)
+		return
+	}
+	fmt.Println("Google backup account added.")
 }
 
 func EnsureSyncFolder(u config.User, creds config.ClientCreds, pw string) {
@@ -53,15 +161,22 @@ func EnsureSyncFolder(u config.User, creds config.ClientCreds, pw string) {
 		os.Exit(1)
 	}
 	q := "name = 'synched-cloud-drives' and 'root' in parents and trashed = false"
-	res, err := driveSrv.Files.List().Q(q).Fields("files(id, name)").Do()
+	var res *drive.FileList
+	err = retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		res, apiErr = driveSrv.Files.List().Q(q).Fields("files(id, name)").Do()
+		return apiErr
+	})
 	if err != nil {
 		fmt.Printf("Google API error: %v\n", err)
 		os.Exit(1)
 	}
 	if len(res.Files) == 0 {
-		// Create folder
 		folder := &drive.File{Name: "synched-cloud-drives", MimeType: "application/vnd.google-apps.folder", Parents: []string{"root"}}
-		_, err := driveSrv.Files.Create(folder).Do()
+		err = retry.Retry(5, time.Second, func() error {
+			_, apiErr := driveSrv.Files.Create(folder).Do()
+			return apiErr
+		})
 		if err != nil {
 			fmt.Printf("Failed to create synched-cloud-drives: %v\n", err)
 			os.Exit(1)
@@ -79,7 +194,12 @@ func PreFlightCheck(u config.User, creds config.ClientCreds, pw string) error {
 		return err
 	}
 	q := "name = 'synched-cloud-drives' and 'root' in parents and trashed = false"
-	res, err := driveSrv.Files.List().Q(q).Fields("files(id, name)").Do()
+	var res *drive.FileList
+	err = retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		res, apiErr = driveSrv.Files.List().Q(q).Fields("files(id, name)").Do()
+		return apiErr
+	})
 	if err != nil {
 		return err
 	}
@@ -89,14 +209,19 @@ func PreFlightCheck(u config.User, creds config.ClientCreds, pw string) error {
 	return nil
 }
 
-func ScanAndUpdateMetadata(u config.User, creds config.ClientCreds, pw string, db *database.Database) {
+func ScanAndUpdateMetadata(u config.User, creds config.ClientCreds, pw string, db database.DatabaseInterface) {
 	driveSrv, err := getClient(creds, u.RefreshToken)
 	if err != nil {
 		fmt.Printf("Google API error: %v\n", err)
 		return
 	}
 	q := "name = 'synched-cloud-drives' and 'root' in parents and trashed = false"
-	res, err := driveSrv.Files.List().Q(q).Fields("files(id, name)").Do()
+	var res *drive.FileList
+	err = retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		res, apiErr = driveSrv.Files.List().Q(q).Fields("files(id, name)").Do()
+		return apiErr
+	})
 	if err != nil || len(res.Files) != 1 {
 		fmt.Printf("Pre-flight failed: %v\n", err)
 		return
@@ -105,14 +230,19 @@ func ScanAndUpdateMetadata(u config.User, creds config.ClientCreds, pw string, d
 	scanFolder(driveSrv, u, rootID, "synched-cloud-drives", db)
 }
 
-func scanFolder(srv *drive.Service, u config.User, folderID, folderName string, db *database.Database) {
+func scanFolder(srv *drive.Service, u config.User, folderID, folderName string, db database.DatabaseInterface) {
 	pageToken := ""
 	for {
 		call := srv.Files.List().Q(fmt.Sprintf("'%s' in parents and trashed = false", folderID)).Fields("nextPageToken, files(id, name, mimeType, size, createdTime, modifiedTime, parents)")
 		if pageToken != "" {
 			call = call.PageToken(pageToken)
 		}
-		res, err := call.Do()
+		var res *drive.FileList
+		err := retry.Retry(5, time.Second, func() error {
+			var apiErr error
+			res, apiErr = call.Do()
+			return apiErr
+		})
 		if err != nil {
 			fmt.Printf("Google API error: %v\n", err)
 			return

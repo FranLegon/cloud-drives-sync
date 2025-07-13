@@ -3,6 +3,7 @@ package microsoft
 import (
 	"cloud-drives-sync/config"
 	"cloud-drives-sync/database"
+	"cloud-drives-sync/retry"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,7 +43,12 @@ func getTokenDeviceCode(clientID, clientSecret string) (string, string, error) {
 	data := url.Values{}
 	data.Set("client_id", clientID)
 	data.Set("scope", scope)
-	resp, err := http.PostForm(deviceCodeEndpoint, data)
+	var resp *http.Response
+	err := retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		resp, apiErr = http.PostForm(deviceCodeEndpoint, data)
+		return apiErr
+	})
 	if err != nil {
 		return "", "", err
 	}
@@ -59,7 +65,12 @@ func getTokenDeviceCode(clientID, clientSecret string) (string, string, error) {
 		tokenData.Set("client_id", clientID)
 		tokenData.Set("device_code", dc.DeviceCode)
 		tokenData.Set("client_secret", clientSecret)
-		respToken, err := http.PostForm(tokenEndpoint, tokenData)
+		var respToken *http.Response
+		err := retry.Retry(5, time.Second, func() error {
+			var apiErr error
+			respToken, apiErr = http.PostForm(tokenEndpoint, tokenData)
+			return apiErr
+		})
 		if err != nil {
 			return "", "", err
 		}
@@ -84,7 +95,12 @@ func getAccessToken(clientID, clientSecret, refreshToken string) (string, error)
 	data.Set("refresh_token", refreshToken)
 	data.Set("grant_type", "refresh_token")
 	data.Set("scope", scope)
-	resp, err := http.PostForm(tokenEndpoint, data)
+	var resp *http.Response
+	err := retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		resp, apiErr = http.PostForm(tokenEndpoint, data)
+		return apiErr
+	})
 	if err != nil {
 		return "", err
 	}
@@ -189,7 +205,12 @@ func EnsureSyncFolder(u config.User, creds config.ClientCreds, pw string) {
 	// Check if folder exists
 	req, _ := http.NewRequest("GET", graphAPIBase+"/me/drive/root/children", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	resp, err := client.Do(req)
+	var resp *http.Response
+	err = retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		resp, apiErr = client.Do(req)
+		return apiErr
+	})
 	if err != nil {
 		fmt.Println("Failed to list root children:", err)
 		return
@@ -217,13 +238,18 @@ func EnsureSyncFolder(u config.User, creds config.ClientCreds, pw string) {
 		req, _ := http.NewRequest("POST", graphAPIBase+"/me/drive/root/children", body)
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 		req.Header.Set("Content-Type", "application/json")
-		resp, err := client.Do(req)
+		var resp2 *http.Response
+		err = retry.Retry(5, time.Second, func() error {
+			var apiErr error
+			resp2, apiErr = client.Do(req)
+			return apiErr
+		})
 		if err != nil {
 			fmt.Println("Failed to create folder:", err)
 			return
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 201 {
+		defer resp2.Body.Close()
+		if resp2.StatusCode != 201 {
 			fmt.Println("Failed to create synched-cloud-drives folder.")
 			return
 		}
@@ -240,7 +266,12 @@ func PreFlightCheck(u config.User, creds config.ClientCreds, pw string) error {
 	}
 	req, _ := http.NewRequest("GET", graphAPIBase+"/me/drive/root/children", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	resp, err := client.Do(req)
+	var resp *http.Response
+	err = retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		resp, apiErr = client.Do(req)
+		return apiErr
+	})
 	if err != nil {
 		return err
 	}
@@ -266,7 +297,7 @@ func PreFlightCheck(u config.User, creds config.ClientCreds, pw string) error {
 	return nil
 }
 
-func ScanAndUpdateMetadata(u config.User, creds config.ClientCreds, pw string, db *database.Database) {
+func ScanAndUpdateMetadata(u config.User, creds config.ClientCreds, pw string, db database.DatabaseInterface) {
 	client, accessToken, err := getAuthClient(creds, u.RefreshToken)
 	if err != nil {
 		fmt.Println("Auth error:", err)
@@ -275,7 +306,12 @@ func ScanAndUpdateMetadata(u config.User, creds config.ClientCreds, pw string, d
 	// Find synched-cloud-drives folder
 	req, _ := http.NewRequest("GET", graphAPIBase+"/me/drive/root/children", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	resp, err := client.Do(req)
+	var resp *http.Response
+	err = retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		resp, apiErr = client.Do(req)
+		return apiErr
+	})
 	if err != nil {
 		fmt.Println("Failed to list root children:", err)
 		return
@@ -304,10 +340,15 @@ func ScanAndUpdateMetadata(u config.User, creds config.ClientCreds, pw string, d
 	scanFolder(client, accessToken, u, rootID, "synched-cloud-drives", db)
 }
 
-func scanFolder(client *http.Client, accessToken string, u config.User, folderID, folderName string, db *database.Database) {
+func scanFolder(client *http.Client, accessToken string, u config.User, folderID, folderName string, db database.DatabaseInterface) {
 	req, _ := http.NewRequest("GET", graphAPIBase+"/me/drive/items/"+folderID+"/children", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	resp, err := client.Do(req)
+	var resp *http.Response
+	err := retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		resp, apiErr = client.Do(req)
+		return apiErr
+	})
 	if err != nil {
 		fmt.Println("Failed to list children:", err)
 		return
@@ -333,7 +374,12 @@ func scanFolder(client *http.Client, accessToken string, u config.User, folderID
 			// Download file content to hash
 			req, _ := http.NewRequest("GET", graphAPIBase+"/me/drive/items/"+item.Id+"/content", nil)
 			req.Header.Set("Authorization", "Bearer "+accessToken)
-			resp2, err := client.Do(req)
+			var resp2 *http.Response
+			err := retry.Retry(5, time.Second, func() error {
+				var apiErr error
+				resp2, apiErr = client.Do(req)
+				return apiErr
+			})
 			if err != nil {
 				fmt.Println("Failed to download file:", err)
 				continue
@@ -382,7 +428,12 @@ func DeleteFile(f database.FileRecord) {
 	}
 	req, _ := http.NewRequest("DELETE", graphAPIBase+"/me/drive/items/"+f.FileID, nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	resp, err := client.Do(req)
+	var resp *http.Response
+	err = retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		resp, apiErr = client.Do(req)
+		return apiErr
+	})
 	if err != nil {
 		fmt.Println("Failed to delete file:", err)
 		return
@@ -405,7 +456,12 @@ func ShareSyncFolderWith(main, backup *config.User, creds config.ClientCreds, pw
 	// Find folder ID
 	req, _ := http.NewRequest("GET", graphAPIBase+"/me/drive/root/children", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	resp, err := client.Do(req)
+	var resp *http.Response
+	err = retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		resp, apiErr = client.Do(req)
+		return apiErr
+	})
 	if err != nil {
 		fmt.Println("Failed to list root children:", err)
 		return
@@ -436,7 +492,12 @@ func ShareSyncFolderWith(main, backup *config.User, creds config.ClientCreds, pw
 	req, _ = http.NewRequest("POST", graphAPIBase+"/me/drive/items/"+folderID+"/invite", body)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
-	resp2, err := client.Do(req)
+	var resp2 *http.Response
+	err = retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		resp2, apiErr = client.Do(req)
+		return apiErr
+	})
 	if err != nil {
 		fmt.Println("Failed to share folder:", err)
 		return
@@ -463,7 +524,12 @@ func GetQuota(u config.User, creds config.ClientCreds, pw string) float64 {
 	}
 	req, _ := http.NewRequest("GET", graphAPIBase+"/me/drive", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	resp, err := client.Do(req)
+	var resp *http.Response
+	err = retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		resp, apiErr = client.Do(req)
+		return apiErr
+	})
 	if err != nil {
 		fmt.Println("Failed to get drive info:", err)
 		return 0
@@ -492,7 +558,12 @@ func CheckToken(u config.User, creds config.ClientCreds, pw string) bool {
 	}
 	req, _ := http.NewRequest("GET", graphAPIBase+"/me", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	resp, err := client.Do(req)
+	var resp *http.Response
+	err = retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		resp, apiErr = client.Do(req)
+		return apiErr
+	})
 	if err != nil {
 		return false
 	}

@@ -32,6 +32,16 @@ type FileRecord struct {
 	LastSynced       string
 }
 
+type DatabaseInterface interface {
+	Close() error
+	UpsertFile(f FileRecord) error
+	DeleteFileRecord(fileID, provider string) error
+	FindDuplicates() (map[string][]FileRecord, error)
+	GetFilesByProvider(provider, owner string) ([]FileRecord, error)
+	GetLargestFilesNotInOtherAccounts(provider, email string) ([]FileRecord, error)
+	UpdateOwnerEmail(fileID, provider, newEmail string) error
+}
+
 type Database struct {
 	db *sql.DB
 }
@@ -61,7 +71,7 @@ CREATE TABLE IF NOT EXISTS files (
 	return err
 }
 
-func OpenDB(path string) (*Database, error) {
+func OpenDB(path string) (DatabaseInterface, error) {
 	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, err
