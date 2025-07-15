@@ -4,6 +4,10 @@ import (
 	"cloud-drives-sync/config"
 	"cloud-drives-sync/database"
 	"cloud-drives-sync/retry"
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,25 +15,18 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"time"
 )
 
 const (
-	graphAPIBase       = "https://graph.microsoft.com/v1.0"
-	deviceCodeEndpoint = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode"
-	tokenEndpoint      = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-	scope              = "offline_access Files.ReadWrite.All User.Read"
+	graphAPIBase  = "https://graph.microsoft.com/v1.0"
+	authEndpoint  = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+	tokenEndpoint = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+	scope         = "offline_access Files.ReadWrite.All User.Read"
+	redirectURI   = "http://localhost:8080/oauth2callback"
 )
-
-type deviceCodeResp struct {
-	DeviceCode      string `json:"device_code"`
-	UserCode        string `json:"user_code"`
-	VerificationURI string `json:"verification_uri"`
-	ExpiresIn       int    `json:"expires_in"`
-	Interval        int    `json:"interval"`
-	Message         string `json:"message"`
-}
 
 type tokenResp struct {
 	TokenType    string `json:"token_type"`
@@ -39,53 +36,92 @@ type tokenResp struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-func getTokenDeviceCode(clientID, clientSecret string) (string, string, error) {
+// --- PKCE helpers ---
+
+func genCodeVerifier() (string, string) {
+	b := make([]byte, 32)
+	rand.Read(b)
+	verifier := base64.RawURLEncoding.EncodeToString(b)
+	h := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(h[:])
+	return verifier, challenge
+}
+
+func openBrowser(url string) {
+	// Windows
+	exec.Command("rundll32", "url.dll,FileProtocolHandler", url).Start()
+}
+
+// --- Authorization Code Grant with PKCE ---
+func getTokenAuthCode(clientID, clientSecret string) (string, string, error) {
+	verifier, challenge := genCodeVerifier()
+	state := fmt.Sprintf("st%d", time.Now().UnixNano())
+	authURL := fmt.Sprintf("%s?client_id=%s&response_type=code&redirect_uri=%s&response_mode=query&scope=%s&state=%s&code_challenge=%s&code_challenge_method=S256", authEndpoint, url.QueryEscape(clientID), url.QueryEscape(redirectURI), url.QueryEscape(scope), url.QueryEscape(state), url.QueryEscape(challenge))
+
+	codeCh := make(chan string)
+	srv := &http.Server{Addr: ":8080"}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("state") != state {
+			http.Error(w, "State mismatch", http.StatusBadRequest)
+			return
+		}
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			http.Error(w, "No code", http.StatusBadRequest)
+			return
+		}
+		fmt.Fprintf(w, "Authentication complete. You may close this window.")
+		codeCh <- code
+	})
+	srv.Handler = mux
+
+	go func() {
+		srv.ListenAndServe()
+	}()
+
+	go func() {
+		openBrowser(authURL)
+	}()
+
+	var code string
+
+	select {
+	case code = <-codeCh:
+		srv.Shutdown(context.TODO())
+	case <-time.After(180 * time.Second):
+		srv.Shutdown(context.TODO())
+		return "", "", errors.New("timeout waiting for auth code")
+	}
+
+	// Exchange code for tokens
 	data := url.Values{}
 	data.Set("client_id", clientID)
 	data.Set("scope", scope)
+	data.Set("code", code)
+	data.Set("redirect_uri", redirectURI)
+	data.Set("grant_type", "authorization_code")
+	data.Set("code_verifier", verifier)
+	if clientSecret != "" {
+		data.Set("client_secret", clientSecret)
+	}
 	var resp *http.Response
 	err := retry.Retry(5, time.Second, func() error {
 		var apiErr error
-		resp, apiErr = http.PostForm(deviceCodeEndpoint, data)
+		resp, apiErr = http.PostForm(tokenEndpoint, data)
 		return apiErr
 	})
 	if err != nil {
 		return "", "", err
 	}
 	defer resp.Body.Close()
-	var dc deviceCodeResp
-	if err := json.NewDecoder(resp.Body).Decode(&dc); err != nil {
-		return "", "", err
+	var tr tokenResp
+	body, _ := io.ReadAll(resp.Body)
+	json.Unmarshal(body, &tr)
+	if tr.AccessToken != "" && tr.RefreshToken != "" {
+		return tr.AccessToken, tr.RefreshToken, nil
 	}
-	fmt.Println(dc.Message)
-	for {
-		time.Sleep(time.Duration(dc.Interval) * time.Second)
-		tokenData := url.Values{}
-		tokenData.Set("grant_type", "urn:ietf:params:oauth:grant-type:device_code")
-		tokenData.Set("client_id", clientID)
-		tokenData.Set("device_code", dc.DeviceCode)
-		tokenData.Set("client_secret", clientSecret)
-		var respToken *http.Response
-		err := retry.Retry(5, time.Second, func() error {
-			var apiErr error
-			respToken, apiErr = http.PostForm(tokenEndpoint, tokenData)
-			return apiErr
-		})
-		if err != nil {
-			return "", "", err
-		}
-		defer respToken.Body.Close()
-		var tr tokenResp
-		body, _ := io.ReadAll(respToken.Body)
-		json.Unmarshal(body, &tr)
-		if tr.AccessToken != "" && tr.RefreshToken != "" {
-			return tr.AccessToken, tr.RefreshToken, nil
-		}
-		if strings.Contains(string(body), "authorization_pending") {
-			continue
-		}
-		return "", "", errors.New("Failed to get token: " + string(body))
-	}
+	return "", "", errors.New("Failed to get token: " + string(body))
 }
 
 func getAccessToken(clientID, clientSecret, refreshToken string) (string, error) {
@@ -110,7 +146,7 @@ func getAccessToken(clientID, clientSecret, refreshToken string) (string, error)
 		return "", err
 	}
 	if tr.AccessToken == "" {
-		return "", errors.New("No access token returned")
+		return "", errors.New("no access token returned")
 	}
 	return tr.AccessToken, nil
 }
@@ -143,10 +179,10 @@ func getUserEmail(client *http.Client, accessToken string) (string, error) {
 }
 
 func AddMainAccount(cfg *config.Config, pw, configPath string) {
-	fmt.Println("Starting Microsoft main account OAuth2 device flow...")
-	accessToken, refreshToken, err := getTokenDeviceCode(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret)
+	fmt.Println("Starting Microsoft main account OAuth2 authorization code flow...")
+	accessToken, refreshToken, err := getTokenAuthCode(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret)
 	if err != nil {
-		fmt.Println("Error during device code flow:", err)
+		fmt.Println("Error during authorization code flow:", err)
 		return
 	}
 	client := &http.Client{}
@@ -170,10 +206,10 @@ func AddMainAccount(cfg *config.Config, pw, configPath string) {
 }
 
 func AddBackupAccount(cfg *config.Config, pw, configPath string) {
-	fmt.Println("Starting Microsoft backup account OAuth2 device flow...")
-	accessToken, refreshToken, err := getTokenDeviceCode(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret)
+	fmt.Println("Starting Microsoft backup account OAuth2 authorization code flow...")
+	accessToken, refreshToken, err := getTokenAuthCode(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret)
 	if err != nil {
-		fmt.Println("Error during device code flow:", err)
+		fmt.Println("Error during authorization code flow:", err)
 		return
 	}
 	client := &http.Client{}
@@ -292,7 +328,7 @@ func PreFlightCheck(u config.User, creds config.ClientCreds, pw string) error {
 		}
 	}
 	if count != 1 {
-		return fmt.Errorf("Expected exactly one synched-cloud-drives folder, found %d", count)
+		return fmt.Errorf("expected exactly one synched-cloud-drives folder, found %d", count)
 	}
 	return nil
 }
