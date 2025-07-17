@@ -7,6 +7,7 @@ import (
 	"cloud-drives-sync/microsoft"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,13 +18,20 @@ var freeMainCmd = &cobra.Command{
 	Short: "Transfer all files in synched-cloud-drives owned by main account to backup account with most free space.",
 	Run: func(cmd *cobra.Command, args []string) {
 		pw, cfg, db := getConfigAndDB()
+		if cfg == nil {
+			fmt.Println("Config is nil. Cannot continue.")
+			return
+		}
+		ranAny := false
 		for _, provider := range []string{"Google", "Microsoft"} {
 			main, backups := getMainAndBackups(cfg, provider)
-			if main == nil || len(backups) == 0 {
-				fmt.Printf("No main or backup accounts for %s.\n", provider)
-				continue
+			if main != nil && len(backups) > 0 {
+				freeMainForProvider(provider, main, backups, cfg, pw, db)
+				ranAny = true
 			}
-			freeMainForProvider(provider, main, backups, cfg, pw, db)
+		}
+		if !ranAny {
+			fmt.Println("No main or backup accounts configured for either provider.")
 		}
 	},
 }
@@ -33,6 +41,14 @@ func init() {
 }
 
 func freeMainForProvider(provider string, main *config.User, backups []*config.User, cfg *config.Config, pw string, db database.DatabaseInterface) {
+	if main == nil {
+		fmt.Printf("No main account found for %s provider.\n", provider)
+		return
+	}
+	if len(backups) == 0 {
+		fmt.Printf("No backup accounts found for %s provider.\n", provider)
+		return
+	}
 	// Pre-flight check
 	if err := preFlightCheckProvider(provider, main, backups, cfg, pw); err != nil {
 		fmt.Println("Pre-flight check failed:", err)
@@ -109,6 +125,9 @@ func transferMicrosoftFileToBackup(f database.FileRecord, main, backup *config.U
 }
 
 func getMainAndBackups(cfg *config.Config, provider string) (*config.User, []*config.User) {
+	if cfg == nil || cfg.Users == nil {
+		return nil, nil
+	}
 	var main *config.User
 	var backups []*config.User
 	for i := range cfg.Users {
@@ -124,6 +143,14 @@ func getMainAndBackups(cfg *config.Config, provider string) (*config.User, []*co
 }
 
 func preFlightCheckProvider(provider string, main *config.User, backups []*config.User, cfg *config.Config, pw string) error {
+	if main == nil {
+		return fmt.Errorf("main account is nil for provider %s", provider)
+	}
+	for _, b := range backups {
+		if b == nil {
+			return fmt.Errorf("one of the backup accounts is nil for provider %s", provider)
+		}
+	}
 	if provider == "Google" {
 		if err := google.PreFlightCheck(*main, cfg.GoogleClient, pw); err != nil {
 			return err
@@ -149,6 +176,20 @@ func preFlightCheckProvider(provider string, main *config.User, backups []*confi
 // Removed nowRFC3339, use time.Now().Format(time.RFC3339) instead
 
 func getConfigAndDB() (string, *config.Config, database.DatabaseInterface) {
-	// ...existing code to load config and db...
-	return "", nil, nil // Replace with actual implementation
+	exeDir, _ := os.Executable()
+	exeDir = filepath.Dir(exeDir)
+	configPath := filepath.Join(exeDir, "config.json.enc")
+	dbPath := filepath.Join(exeDir, "metadata.db")
+
+	cfg, pw, err := config.LoadConfigWithPassword(configPath)
+	if err != nil {
+		fmt.Printf("Failed to load config: %v\n", err)
+		return "", nil, nil
+	}
+	db, err := database.OpenDB(dbPath)
+	if err != nil {
+		fmt.Printf("Failed to open DB: %v\n", err)
+		return "", nil, nil
+	}
+	return pw, &cfg, db
 }

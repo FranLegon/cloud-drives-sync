@@ -9,7 +9,7 @@ Your task is to generate the code for a Go binary named `cloud-drives-sync`. Thi
 **This is the most important rule:** The application must **only** interact with files and folders contained within a specific root folder named `synched-cloud-drives` in each account.
 
 *   **Isolation:** The tool must never read, list, modify, or delete any file or folder outside of the `synched-cloud-drives` directory.
-*   **Pre-flight Check:** Before executing any command that interacts with the cloud, the tool must perform a "pre-flight check" on all relevant accounts. This check verifies that exactly one folder named `synched-cloud-drives` exists in the root of the drive. If zero or more than one are found, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
+*   **Pre-flight Check:** Before executing any command that interacts with the cloud, the tool must perform a "pre-flight check" on all relevant accounts. This check verifies that exactly one folder named `synched-cloud-drives` is owned by the main account and it's located in the root of their drive. If zero or more than one are found or the folder is not at root, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
 
 #### **3. Architecture & Design Principles**
 
@@ -17,13 +17,17 @@ Your task is to generate the code for a Go binary named `cloud-drives-sync`. Thi
 *   **Configuration Management:** All configuration data (API credentials, user tokens, database settings) will be stored in a single `config.json.enc` file in the same directory as the binary.
 *   **Security:**
     *   The `config.json.enc` file will be encrypted using AES-256 GCM.
-    *   **Do not hardcode the encryption key in the binary.** On first run (`init`), prompt the user to create a master password. This password will be used to derive the encryption key using a key derivation function like Argon2id. The binary will require this password every time it is executed to decrypt the configuration.
+    *   **Do not hardcode the encryption key in the binary.** On first run (command `init`), prompt the user to create a master password. This password will be used to derive the encryption key using a key derivation function like Argon2id. The binary will require this password every time it is executed to decrypt the configuration. SQL Database password will also be derived from master password.
 *   **API Interaction:**
     *   Use streaming for all file uploads and downloads to minimize memory consumption.
     *   Implement exponential backoff and retry mechanisms for all API calls to handle transient network errors and rate limiting gracefully. Log these events to standard output.
 *   **Database:**
     *   Use SQLite for the local metadata database, located at `metadata.db`.
     *   All database operations must be performed through a `Database` interface.
+*   **Loging and debuging:**
+    *   Always log to console what is about to be done and a success message when its achieved.
+    *   On errors, log detailed error messages.
+    *   Add tags to logs when apropiate, such as [Google], [Microsoft] or [user@gmail.com]. Tags can be combined.
 
 #### **4. Configuration & Database Schema**
 
@@ -78,28 +82,29 @@ Your task is to generate the code for a Go binary named `cloud-drives-sync`. Thi
 
 ---
 
-#### **5. Detailed Functionality (Command-Line Flags)**
+#### **5A. Detailed Functionality (Command-Line commands)**
 
-The binary will execute different functions based on flags. If no flags are provided, it should default to `help`.
+The binary will execute different functions based on commands. If no commands are provided, it should default to `help`.
 
 *   **`init`**
     *   If `config.json.enc` does not exist, prompt the user to create a master password.
     *   Prompt for the GCP and Azure client credentials and create the initial `config.json` file.
     *   Encrypt the file to `config.json.enc` and exit.
     *   If `metadata.db` does not exist, create it and the `files` table.
-    *   If run subsequently, this command can be used to add the initial "main" accounts if they are not yet configured.
+    *   If run subsequently, this command can be used to add the initial "main" accounts if they are not yet configured. Adding these should be optional, as the binary could work with only one provider configured.
     *   Crucially, after the user has added the "main" account for each provider, this command will create the `synched-cloud-drives` folder in the root of that main account's drive if it doesn't already exist.
+    *   Can be run raw to be prompted for everything or with arg --config '{"google_client":{"id":"EXAMPLE_GCP_CLIENT_ID","secret":"EXAMPLE_GCP_CLIENT_SECRET"},"microsoft_client":{"id":"EXAMPLE_AZURE_CLIENT_ID","secret":"EXAMPLE_AZURE_CLIENT_SECRET"}}' to be asked for main accounts only.
 
 *   **`add-account`**
     *   Prompts the user to choose "Google" or "Microsoft".
     *   It must first check if a "main" account for the chosen provider already exists in the config. If not, it should instruct the user to add the main account first and exit.
-    *   Starts a local web server on `http://localhost:8080` to handle the OAuth 2.0 redirect.
+    *   Starts a local web server on `http://localhost:8080/oauth2callback` to handle the OAuth 2.0 redirect.
     *   Prints the authorization URL to the console for the user to visit.
     *   After user authorization, captures the authorization code, exchanges it for a refresh token, and adds a new user entry to the `config.json` file as a non-main account before re-encrypting it.
     *   After adding the account, it automatically triggers a sharing operation: the "main" account for that provider shares its `synched-cloud-drives` folder with the newly added backup account, granting "editor" permissions.
 
 *   **`get-metadata`**
-    *   After passing the pre-flight check, for each account, recursively scan all files and folders **within the `synched-cloud-drives` folder.**
+    *   After passing the pre-flight check, for each account, recursively scan all files and folders within the `synched-cloud-drives` folder.
     *   For each file, calculate its SHA-256 hash.
     *   In the SQLite DB, `INSERT` new file records or `UPDATE` existing ones based on `FileID`. Update the `LastSynced` timestamp.
 
@@ -117,7 +122,7 @@ The binary will execute different functions based on flags. If no flags are prov
     *   For each set of duplicates, it automatically deletes all copies except the one with the oldest `CreatedOn` date. All actions are confined to the `synched-cloud-drives` folder.
 
 *   **`share-with-main`**
-    *   This flag can be used as a utility to "repair" permissions.
+    *   This command can be used as a utility to "repair" permissions.
     *   After passing the pre-flight check, it verifies that all non-main accounts have editor access to the main account's `synched-cloud-drives` folder and re-applies the permission if missing.
 
 *   **`sync-providers`**
@@ -137,24 +142,32 @@ The binary will execute different functions based on flags. If no flags are prov
     *   Ownership of the file is transferred. Update the `OwnerEmail` in the database accordingly.
 
 *   **`free-main`**
-    *   All files in `synched-cloud-drives` owned by main account are tranfered to some backup account.
+    *   All files in `synched-cloud-drives` and subfolders owned by main account are tranfered to some backup account.
     *   To choose where to transfer each file, choose the backup account with the most free space.
-    *   Throw an error if not enough space is available in backup accounts.
+    *   Throw an error message if not enough space is available in backup accounts.
     *   Stream download and reupload files with all of their metadata. If you try to use special methods like Google Drive's "transferOwnership", make sure to have basic download/upload as a fallback.
+    *   If one provider's main account and backup accounts are not configured but the other's is, the command should still run fine for the configured provider.
 
 *   **`check-tokens`**
     *   Iterates through all refresh tokens in the config.
     *   For each token, it attempts a simple, read-only API call (like "get user info").
     *   If a token fails with an authentication error, it informs the user which account needs to be re-authenticated and suggests running `add-account` again for that email.
 
+*   **`help`**
+    *   Lists all available commands, their purpose, and example usage.
+
+#### **5B. Detailed Functionality (Command-Line flags)**
+
 *   **`safe`**
-    *   A modifier flag that can be used with other flags (e.g., `cloud-drives-sync remove-duplicates-unsafe --safe`).
+    *   A modifier flag that can be used with other commands (e.g., `cloud-drives-sync remove-duplicates-unsafe --safe`).
     *   When active, no write, delete, or permission-change operations are sent to the cloud providers.
     *   Instead, the tool should print a detailed log of what actions *would* have been taken. Example: `[DRY RUN] DELETE GDrive file 'duplicate.txt' (FileID: xyz) from account 'backup@gmail.com'`.
     *   Read-only operations (listing files, checking quotas) and local DB modifications are still allowed.
+    *   Can be abbreviated as -s
 
 *   **`help`**
-    *   Lists all available flags, their purpose, and example usage.
+    *   A modifier flag that can be used with other commands (e.g., `cloud-drives-sync free-main --help`) to get more information on how they work.
+    *   Can be abbreviated as -h
 
 #### **6. Expected Response**
-Give me all code for the project. Do not use any placeholders.
+This must be a fully-implemented production ready project. Make sure there are absolutely no TODOs, stubs or placeholders.

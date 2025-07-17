@@ -19,6 +19,21 @@ import (
 	"google.golang.org/api/option"
 )
 
+// CheckToken verifies if the refresh token is valid for the given user
+func CheckToken(u config.User, creds config.ClientCreds, pw string) bool {
+	driveSrv, err := getClient(creds, u.RefreshToken)
+	if err != nil {
+		fmt.Printf("[Google][%s] Token check failed: %v\n", u.Email, err)
+		return false
+	}
+	_, err = driveSrv.About.Get().Fields("user").Do()
+	if err != nil {
+		fmt.Printf("[Google][%s] Token check failed: %v\n", u.Email, err)
+		return false
+	}
+	return true
+}
+
 // Download file from Google Drive (stub)
 func DownloadFile(f database.FileRecord, u config.User, creds config.ClientCreds, pw string) io.ReadCloser {
 	// ...actual implementation needed...
@@ -207,20 +222,24 @@ func PreFlightCheck(u config.User, creds config.ClientCreds, pw string) error {
 	if err != nil {
 		return err
 	}
-	q := "name = 'synched-cloud-drives' and 'root' in parents and trashed = false"
+	// Search for all folders named 'synched-cloud-drives' that are not trashed
+	q := "name = 'synched-cloud-drives' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
 	var res *drive.FileList
 	err = retry.Retry(5, time.Second, func() error {
 		var apiErr error
-		res, apiErr = driveSrv.Files.List().Q(q).Fields("files(id, name)").Do()
+		res, apiErr = driveSrv.Files.List().Q(q).Fields("files(id, name, parents)").Do()
 		return apiErr
 	})
 	if err != nil {
 		return err
 	}
-	if len(res.Files) != 1 {
-		return fmt.Errorf("Expected exactly one synched-cloud-drives folder, found %d", len(res.Files))
+	if len(res.Files) == 1 {
+		return nil
 	}
-	return nil
+	if len(res.Files) == 0 {
+		return fmt.Errorf("[Google] No accessible synched-cloud-drives folder found. If shared, make sure it is added to 'My Drive'")
+	}
+	return fmt.Errorf("[Google] Multiple synched-cloud-drives folders found. Please resolve manually")
 }
 
 func ScanAndUpdateMetadata(u config.User, creds config.ClientCreds, pw string, db database.DatabaseInterface) {
@@ -229,18 +248,33 @@ func ScanAndUpdateMetadata(u config.User, creds config.ClientCreds, pw string, d
 		fmt.Printf("Google API error: %v\n", err)
 		return
 	}
-	q := "name = 'synched-cloud-drives' and 'root' in parents and trashed = false"
+	q := "name = 'synched-cloud-drives' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
 	var res *drive.FileList
 	err = retry.Retry(5, time.Second, func() error {
 		var apiErr error
-		res, apiErr = driveSrv.Files.List().Q(q).Fields("files(id, name)").Do()
+		res, apiErr = driveSrv.Files.List().Q(q).Fields("files(id, name, parents)").Do()
 		return apiErr
 	})
-	if err != nil || len(res.Files) != 1 {
+	if err != nil {
 		fmt.Printf("Pre-flight failed: %v\n", err)
 		return
 	}
-	rootID := res.Files[0].Id
+	var rootID string
+	for _, f := range res.Files {
+		for _, p := range f.Parents {
+			if p == "root" {
+				rootID = f.Id
+				break
+			}
+		}
+		if rootID != "" {
+			break
+		}
+	}
+	if rootID == "" {
+		fmt.Printf("No accessible synched-cloud-drives folder found in root. If shared, make sure it is added to 'My Drive'.\n")
+		return
+	}
 	scanFolder(driveSrv, u, rootID, "synched-cloud-drives", db)
 }
 
@@ -352,18 +386,54 @@ func GetQuota(u config.User, creds config.ClientCreds, pw string) float64 {
 func TransferFileOwnership(f database.FileRecord, from, to string, creds config.ClientCreds, pw string) {
 	driveSrv, err := getClient(creds, from)
 	if err != nil {
-		fmt.Printf("Google API error: %v\n", err)
+		fmt.Printf("[Google][%s] API error: %v\n", from, err)
 		return
 	}
-	perm := &drive.Permission{Type: "user", Role: "owner", EmailAddress: to}
-	driveSrv.Permissions.Create(f.FileID, perm).TransferOwnership(true).SendNotificationEmail(false).Do()
-}
-
-func CheckToken(u config.User, creds config.ClientCreds, pw string) bool {
-	driveSrv, err := getClient(creds, u.RefreshToken)
+	q := "name = 'synched-cloud-drives' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+	var res *drive.FileList
+	err = retry.Retry(5, time.Second, func() error {
+		var apiErr error
+		res, apiErr = driveSrv.Files.List().Q(q).Fields("files(id, name, parents, owners(emailAddress))").Do()
+		return apiErr
+	})
 	if err != nil {
-		return false
+		fmt.Printf("[Google][%s] API error: %v\n", from, err)
+		return
 	}
-	_, err = driveSrv.About.Get().Fields("user").Do()
-	return err == nil
+	if len(res.Files) == 0 {
+		fmt.Printf("[Google][%s] No accessible synched-cloud-drives folder found. If shared, make sure it is added to 'My Drive'.\n", from)
+		return
+	}
+	if len(res.Files) > 1 {
+		fmt.Printf("[Google][%s] Multiple synched-cloud-drives folders found. Please resolve manually.\n", from)
+		return
+	}
+	folder := res.Files[0]
+	// Check if folder is in root
+	inRoot := false
+	for _, p := range folder.Parents {
+		if p == "root" {
+			inRoot = true
+			break
+		}
+	}
+	if !inRoot {
+		fmt.Printf("[Google][%s] synched-cloud-drives folder is not in root. Please move it to root.\n", from)
+		return
+	}
+	// Check if folder is owned by main account
+	owned := false
+	if folder.Owners != nil {
+		for _, owner := range folder.Owners {
+			if owner.EmailAddress == from {
+				owned = true
+				break
+			}
+		}
+	}
+	if !owned {
+		fmt.Printf("[Google][%s] synched-cloud-drives folder is not owned by main account. Please transfer ownership.\n", from)
+		return
+	}
+	fmt.Printf("[Google][%s] Pre-flight check passed: unique, in root, and owned by main account.\n", from)
 }

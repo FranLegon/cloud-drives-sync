@@ -296,7 +296,7 @@ func EnsureSyncFolder(u config.User, creds config.ClientCreds, pw string) {
 func PreFlightCheck(u config.User, creds config.ClientCreds, pw string) error {
 	client, accessToken, err := getAuthClient(creds, u.RefreshToken)
 	if err != nil {
-		return err
+		return fmt.Errorf("[Microsoft][%s] API error: %v", u.Email, err)
 	}
 	req, _ := http.NewRequest("GET", graphAPIBase+"/me/drive/root/children", nil)
 	req.Header.Set("Authorization", "Bearer "+accessToken)
@@ -307,27 +307,54 @@ func PreFlightCheck(u config.User, creds config.ClientCreds, pw string) error {
 		return apiErr
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("[Microsoft][%s] API error: %v", u.Email, err)
 	}
 	defer resp.Body.Close()
 	var data struct {
 		Value []struct {
-			Name   string
-			Folder *struct{}
+			Name      string
+			Id        string
+			Folder    *struct{}
+			CreatedBy struct {
+				User struct {
+					Email string `json:"email"`
+				} `json:"user"`
+			} `json:"createdBy"`
 		}
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return err
+		return fmt.Errorf("[Microsoft][%s] decode error: %v", u.Email, err)
 	}
-	count := 0
+	var folders []struct {
+		Name      string
+		Id        string
+		CreatedBy string
+	}
 	for _, item := range data.Value {
 		if item.Name == "synched-cloud-drives" && item.Folder != nil {
-			count++
+			createdBy := ""
+			if item.CreatedBy.User.Email != "" {
+				createdBy = item.CreatedBy.User.Email
+			}
+			folders = append(folders, struct {
+				Name      string
+				Id        string
+				CreatedBy string
+			}{item.Name, item.Id, createdBy})
 		}
 	}
-	if count != 1 {
-		return fmt.Errorf("expected exactly one synched-cloud-drives folder, found %d", count)
+	if len(folders) == 0 {
+		return fmt.Errorf("[Microsoft][%s] No accessible synched-cloud-drives folder found in root", u.Email)
 	}
+	if len(folders) > 1 {
+		return fmt.Errorf("[Microsoft][%s] Multiple synched-cloud-drives folders found in root. Please resolve manually", u.Email)
+	}
+	folder := folders[0]
+	// Check if folder is owned by main account
+	if folder.CreatedBy != u.Email {
+		return fmt.Errorf("[Microsoft][%s] synched-cloud-drives folder is not owned by main account. Please transfer ownership", u.Email)
+	}
+	fmt.Printf("[Microsoft][%s] Pre-flight check passed: unique, in root, and owned by main account.\n", u.Email)
 	return nil
 }
 
