@@ -38,6 +38,7 @@ type DatabaseInterface interface {
 	DeleteFileRecord(fileID, provider string) error
 	FindDuplicates() (map[string][]FileRecord, error)
 	GetFilesByProvider(provider, owner string) ([]FileRecord, error)
+	GetFilesByOwner(email, provider string) []FileRecord
 	GetLargestFilesNotInOtherAccounts(provider, email string) ([]FileRecord, error)
 	UpdateOwnerEmail(fileID, provider, newEmail string) error
 }
@@ -77,6 +78,12 @@ func OpenDB(path string) (DatabaseInterface, error) {
 		return nil, err
 	}
 	return &Database{db: db}, nil
+}
+
+// GetFilesByOwner returns all files owned by the given email and provider
+func (d *Database) GetFilesByOwner(email, provider string) []FileRecord {
+	files, _ := d.GetFilesByProvider(provider, email)
+	return files
 }
 
 func (d *Database) Close() error {

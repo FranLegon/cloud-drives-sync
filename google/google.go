@@ -19,6 +19,20 @@ import (
 	"google.golang.org/api/option"
 )
 
+// Download file from Google Drive (stub)
+func DownloadFile(f database.FileRecord, u config.User, creds config.ClientCreds, pw string) io.ReadCloser {
+	// ...actual implementation needed...
+	return nil
+}
+
+// Upload file to Google Drive (stub)
+func UploadFile(r io.Reader, f database.FileRecord, u config.User, creds config.ClientCreds, pw string) string {
+	// ...actual implementation needed...
+	return "new-file-id"
+}
+
+// Delete file from Google Drive
+
 func getClient(creds config.ClientCreds, refreshToken string) (*drive.Service, error) {
 	ctx := context.Background()
 	conf := &oauth2.Config{

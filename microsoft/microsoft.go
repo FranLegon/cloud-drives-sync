@@ -20,24 +20,22 @@ import (
 	"time"
 )
 
+// Required constants for OAuth2 flow
 const (
-	graphAPIBase  = "https://graph.microsoft.com/v1.0"
 	authEndpoint  = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
 	tokenEndpoint = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-	scope         = "offline_access Files.ReadWrite.All User.Read"
 	redirectURI   = "http://localhost:8080/oauth2callback"
+	scope         = "offline_access Files.ReadWrite.All User.Read email openid profile"
+	graphAPIBase  = "https://graph.microsoft.com/v1.0"
 )
 
+// Token response struct for OAuth2
 type tokenResp struct {
-	TokenType    string `json:"token_type"`
-	Scope        string `json:"scope"`
-	ExpiresIn    int    `json:"expires_in"`
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 }
 
-// --- PKCE helpers ---
-
+// Stub for PKCE code verifier generator
 func genCodeVerifier() (string, string) {
 	b := make([]byte, 32)
 	rand.Read(b)
@@ -605,4 +603,16 @@ func CheckToken(u config.User, creds config.ClientCreds, pw string) bool {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == 200
+}
+
+// Download file from OneDrive (stub)
+func DownloadFile(f database.FileRecord, u config.User, creds config.ClientCreds, pw string) io.ReadCloser {
+	// ...actual implementation needed...
+	return nil
+}
+
+// Upload file to OneDrive (stub)
+func UploadFile(r io.Reader, f database.FileRecord, u config.User, creds config.ClientCreds, pw string) string {
+	// ...actual implementation needed...
+	return "new-file-id"
 }
