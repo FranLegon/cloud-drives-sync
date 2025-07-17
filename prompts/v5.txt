@@ -9,7 +9,7 @@ Your task is to generate the code for a Go binary named `cloud-drives-sync`. Thi
 **This is the most important rule:** The application must **only** interact with files and folders contained within a specific root folder named `synched-cloud-drives` in each account.
 
 *   **Isolation:** The tool must never read, list, modify, or delete any file or folder outside of the `synched-cloud-drives` directory.
-*   **Pre-flight Check:** Before executing any command that interacts with the cloud, the tool must perform a "pre-flight check" on all relevant accounts. This check verifies that exactly one folder named `synched-cloud-drives` is owned by the main account and it's located in the root of their drive. If zero or more than one are found or the folder is not at root, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
+*   **Pre-flight Check:** Before executing any command that interacts with the cloud, the tool must perform a "pre-flight check" on all relevant accounts. This check verifies that exactly one folder named `synched-cloud-drives` is owned by the main account and moves it to the root of their drive if it isn't already there. If zero or more than one are found the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
 
 #### **3. Architecture & Design Principles**
 
@@ -145,8 +145,8 @@ The binary will execute different functions based on commands. If no commands ar
     *   All files in `synched-cloud-drives` and subfolders owned by main account are tranfered to some backup account.
     *   To choose where to transfer each file, choose the backup account with the most free space.
     *   Throw an error message if not enough space is available in backup accounts.
-    *   Stream download and reupload files with all of their metadata. If you try to use special methods like Google Drive's "transferOwnership", make sure to have basic download/upload as a fallback.
-    *   If one provider's main account and backup accounts are not configured but the other's is, the command should still run fine for the configured provider.
+    *   Use ownership transfer if possible, falling back to download/re-upload. The re-uploaded file should retain its metadata and be placed in the identical folder path.
+    *   Should work if a provider has a main account and at least one backup account configured, not all providers need to be configured.
 
 *   **`check-tokens`**
     *   Iterates through all refresh tokens in the config.
