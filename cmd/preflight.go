@@ -1,9 +1,9 @@
 package cmd
 
 import (
-	"fmt"
 	"cloud-drives-sync/google"
 	"cloud-drives-sync/microsoft"
+	"fmt"
 )
 
 // PreFlightCheck enforces the 'synched-cloud-drives' folder constraint for all accounts.

@@ -2,8 +2,12 @@ package cmd
 
 import (
 	"bufio"
+	"cloud-drives-sync/google"
+	"cloud-drives-sync/microsoft"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -43,6 +47,42 @@ func init() {
 	rootCmd.AddCommand(removeDuplicatesCmd)
 }
 
-// Helper stub
-func parseIndices(input string) []int   { return []int{} }
-func deleteFileFromCloud(f interface{}) {}
+// Helper implementations
+
+func parseIndices(input string) []int {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return nil
+	}
+	parts := strings.Split(input, ",")
+	var indices []int
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if n, err := strconv.Atoi(p); err == nil {
+			indices = append(indices, n)
+		}
+	}
+	return indices
+}
+
+func deleteFileFromCloud(f interface{}) {
+	file, ok := f.(struct {
+		FileID     string
+		Provider   string
+		OwnerEmail string
+	})
+	if !ok {
+		return
+	}
+	cfg, err := LoadConfig("")
+	if err != nil {
+		return
+	}
+	if file.Provider == "Google" {
+		gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, getRefreshToken(cfg, file.Provider, file.OwnerEmail))
+		_ = gd.DeleteFile(file.OwnerEmail, file.FileID)
+	} else if file.Provider == "Microsoft" {
+		ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, getRefreshToken(cfg, file.Provider, file.OwnerEmail))
+		_ = ms.DeleteFile(file.OwnerEmail, file.FileID)
+	}
+}

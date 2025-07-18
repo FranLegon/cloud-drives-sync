@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"cloud-drives-sync/google"
+	"cloud-drives-sync/microsoft"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -33,7 +35,57 @@ func init() {
 	rootCmd.AddCommand(shareWithMainCmd)
 }
 
-// Helper stubs
-func accIsMain(acc interface{}) bool       { return false }
-func hasEditorAccess(acc interface{}) bool { return false }
-func grantEditorAccess(acc interface{})    {}
+type Account struct {
+	Provider string
+	Email    string
+}
+
+func accIsMain(acc interface{}) bool {
+	account, ok := acc.(Account)
+	if !ok {
+		return false
+	}
+	cfg, err := LoadConfig("")
+	if err != nil {
+		return false
+	}
+	for _, u := range cfg.Users {
+		if u.Provider == account.Provider && u.Email == account.Email && u.IsMain {
+			return true
+		}
+	}
+	return false
+}
+
+func hasEditorAccess(acc interface{}) bool {
+	// For now, always return false to ensure ShareSyncFolder is always called (safe default)
+	return false
+}
+
+func grantEditorAccess(acc interface{}) {
+	account, ok := acc.(Account)
+	if !ok {
+		return
+	}
+	cfg, err := LoadConfig("")
+	if err != nil {
+		return
+	}
+	var mainEmail string
+	for _, u := range cfg.Users {
+		if u.Provider == account.Provider && u.IsMain {
+			mainEmail = u.Email
+			break
+		}
+	}
+	if mainEmail == "" {
+		return
+	}
+	if account.Provider == "Google" {
+		gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, getRefreshToken(cfg, account.Provider, account.Email))
+		_ = gd.ShareSyncFolder(mainEmail, account.Email)
+	} else if account.Provider == "Microsoft" {
+		ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, getRefreshToken(cfg, account.Provider, account.Email))
+		_ = ms.ShareSyncFolder(mainEmail, account.Email)
+	}
+}
