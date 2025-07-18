@@ -1,4 +1,4 @@
-This sequence follows the "bottom-up, dependency-first" strategy, ensuring that when you ask for a file to be generated, the code for its dependencies has already been created.
+This sequence follows the "bottom-up, dependency-first" strategy, ensuring that when a file is about to be generated, the code for its dependencies has already been created.
 
 Phase 1: Core Data Structures & Standalone Utilities
 (These have no internal project dependencies)
