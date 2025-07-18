@@ -4,6 +4,7 @@ import (
 	gdrive "cloud-drives-sync/google"
 	msdrive "cloud-drives-sync/microsoft"
 	"fmt"
+	"net/http"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -72,15 +73,40 @@ var initCmd = &cobra.Command{
 				}
 			}
 			if !mainExists {
-				var email, refreshToken string
 				fmt.Printf("Add main account for %s? (y/n): ", provider)
 				var yn string
 				fmt.Scanln(&yn)
 				if yn == "y" || yn == "Y" {
-					fmt.Printf("Enter main %s email: ", provider)
-					fmt.Scanln(&email)
-					fmt.Printf("Enter refresh token for %s: ", email)
-					fmt.Scanln(&refreshToken)
+					fmt.Println("Starting local server on http://localhost:8080/oauth2callback ...")
+					codeCh := make(chan string)
+					server := &http.Server{Addr: ":8080"}
+					http.HandleFunc("/oauth2callback", func(w http.ResponseWriter, r *http.Request) {
+						code := r.URL.Query().Get("code")
+						fmt.Fprintf(w, "Authorization received. You may close this window.")
+						codeCh <- code
+					})
+					go func() { server.ListenAndServe() }()
+					var authURL string
+					switch provider {
+					case "Google":
+						gd, _ := gdrive.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, "")
+						authURL = gd.GetAuthURL()
+					case "Microsoft":
+						ms, _ := msdrive.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, "")
+						authURL = ms.GetAuthURL()
+					}
+					fmt.Printf("Visit this URL to authorize: %s\n", authURL)
+					code := <-codeCh
+					server.Close()
+					var refreshToken, email string
+					switch provider {
+					case "Google":
+						gd, _ := gdrive.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, "")
+						refreshToken, email, _ = gd.ExchangeCodeForToken(code)
+					case "Microsoft":
+						ms, _ := msdrive.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, "")
+						refreshToken, email, _ = ms.ExchangeCodeForToken(code)
+					}
 					cfg.Users = append(cfg.Users, struct {
 						Provider     string `json:"provider"`
 						Email        string `json:"email"`

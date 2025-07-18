@@ -51,7 +51,11 @@ func init() {
 }
 
 func getMainAccounts() []struct{ Provider, Email string } {
-	cfg, _ := LoadConfig("")
+	cfg, err := LoadConfig(promptForPassword())
+	if err != nil || cfg == nil {
+		fmt.Println("[Free-Main] Error loading config:", err)
+		return nil
+	}
 	var mains []struct{ Provider, Email string }
 	for _, u := range cfg.Users {
 		if u.IsMain {
@@ -77,7 +81,7 @@ func getFilesOwnedByMain(main struct{ Provider, Email string }) []database.FileR
 }
 
 func enoughSpace(backup struct{ Provider, Email string }, f database.FileRecord) bool {
-	cfg, _ := LoadConfig("")
+	cfg, _ := LoadConfig(promptForPassword())
 	var used, total int64
 	switch backup.Provider {
 	case "Google":
@@ -106,7 +110,7 @@ func transferOwnership(f database.FileRecord, main, backup struct{ Provider, Ema
 }
 
 func downloadAndReupload(f database.FileRecord, main, backup struct{ Provider, Email string }) {
-	cfg, _ := LoadConfig("")
+	cfg, _ := LoadConfig(promptForPassword())
 	var content []byte
 	switch main.Provider {
 	case "Google":
