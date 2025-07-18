@@ -1,0 +1,24 @@
+# For building the command-line interface structure (commands, flags)
+go get github.com/spf13/cobra@v1.8.1
+
+# For creating interactive user prompts (e.g., password input, selections)
+go get github.com/manifoldco/promptui@v0.9.0
+
+# The core Go client for Google APIs
+go get google.golang.org/api@v0.187.0
+
+# Handles the OAuth 2.0 authentication flow
+go get golang.org/x/oauth2@v0.21.0
+
+# The official Microsoft Graph SDK for Go (used for OneDrive)
+go get github.com/microsoftgraph/msgraph-sdk-go@v1.41.0
+
+# Provides Microsoft Entra ID (Azure AD) token authentication credentials
+go get github.com/Azure/azure-sdk-for-go/sdk/azidentity@v1.7.0
+
+# The SQLite driver for Go (with SQLCipher support via build tags)
+go get github.com/mattn/go-sqlite3@v1.14.22
+
+# Provides cryptographic functions, including Argon2id for key derivation
+go get golang.org/x/crypto@v0.24.0
+

@@ -1,0 +1,174 @@
+
+#### **1. Project Overview & Persona**
+
+You are an expert Go developer specializing in building robust, command-line tools that interact with cloud storage APIs.
+
+Your task is to generate the code for a Go binary named `cloud-drives-sync`. This tool will manage and synchronize files across a user's multiple Google Drive and OneDrive accounts. The tool is architected around the concept of a single **main account** per provider, which acts as the primary sync target, and one or more **backup accounts** per provider, used for storage expansion and data redundancy.
+
+The primary goals are to de-duplicate files, ensure data is mirrored across providers, and balance storage usage between a main account and its associated backup accounts.
+
+#### **2. Core Operational Constraint: The "Sync Folder"**
+
+The application must only interact with files and folders contained within a specific root folder named `synched-cloud-drives`. This folder resides in each provider's **main account**.
+
+*   **Isolation:** The tool must never read, list, modify, or delete any file or folder outside of the `synched-cloud-drives` directory.
+*   **Pre-flight Check:** Before executing any command that interacts with the cloud, the tool must perform a "pre-flight check". This check verifies that exactly one folder named `synched-cloud-drives` is owned by the main account for each configured provider. It will search all active folders and explicitly ignore any folders that are marked as trashed/in the recycle bin. If the folder is found but is not in the root directory, it will be moved there. If zero or more than one active folder with this name are found, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
+
+#### **3. Architecture & Design Principles**
+
+*   **Modularity:** Structure the code into logical packages (e.g., `cmd`, `google`, `microsoft`, `database`, `crypto`). All database and cloud provider interactions shall be implemented behind interfaces to allow for future extensions.
+*   **Concurrency:** Use concurrency where it provides a performance benefit without risk, such as making independent, read-only API calls to multiple accounts simultaneously. All database write operations must be performed sequentially from a single thread or goroutine to prevent race conditions and ensure data integrity.
+*   **Configuration Management:** All configuration data (API credentials, user tokens) will be stored in a single encrypted file: `config.json.enc`, located in the same directory as the binary.
+*   **Security:**
+    *   The `config.json.enc` file will be encrypted using AES-256 GCM.
+    *   The encryption key will be derived from a user-provided master password using the Argon2id key derivation function. The binary will require this master password on every execution to decrypt the configuration.
+    *   A unique, cryptographically secure salt will be generated on the first run and stored in a file named `config.salt`. If this file already exists, it will be used for all subsequent key derivations.
+*   **API Interaction:**
+    *   Use streaming for all file uploads and downloads to minimize memory consumption.
+    *   Implement exponential backoff and retry mechanisms for all API calls to handle transient network errors and rate limiting gracefully.
+*   **Database:**
+    *   Use an encrypted SQLite database located at `metadata.db`. The database file itself will be encrypted using a library like SQLCipher.
+    *   **Direct Access:** The decryption password for the database will be the user's raw master password. This allows the user to access and query the database outside of the CLI using a compatible database tool. The database login user will be `owner`.
+*   **Logging and Exit Codes:**
+    *   Log all major actions, successes, and detailed errors to the console. Logs should be prefixed with tags when appropriate (e.g., `[Google]`, `[Microsoft]`, `[main.user@gmail.com]`).
+    *   The application will exit with a status code of `0` on success and a non-zero status code on any error, making it suitable for scripting.
+
+#### **4. Configuration & Database Schema**
+
+*`config.json` (before encryption):*
+```json
+{
+  "google_client": {
+    "id": "YOUR_GCP_CLIENT_ID",
+    "secret": "YOUR_GCP_CLIENT_SECRET"
+  },
+  "microsoft_client": {
+    "id": "YOUR_AZURE_CLIENT_ID",
+    "secret": "YOUR_AZURE_CLIENT_SECRET"
+  },
+  "users": [
+    {
+      "provider": "Google",
+      "email": "main.user@gmail.com",
+      "is_main": true,
+      "refresh_token": "..."
+    },
+    {
+      "provider": "Google",
+      "email": "backup1@gmail.com",
+      "is_main": false,
+      "refresh_token": "..."
+    },
+    {
+      "provider": "Microsoft",
+      "email": "main.user@outlook.com",
+      "is_main": true,
+      "refresh_token": "..."
+    },
+    {
+      "provider": "Microsoft",
+      "email": "work.backup@company.com",
+      "is_main": false,
+      "refresh_token": "..."
+    }
+  ]
+}
+```
+
+*Encrypted SQLite `files` Table Schema:*
+*   `FileID` (TEXT): The internal ID from Google Drive or OneDrive.
+*   `Provider` (TEXT): "Google" or "Microsoft".
+*   `OwnerEmail` (TEXT): The email of the account that owns the file.
+*   `FileHash` (TEXT, NOT NULL): The hash of the file content.
+*   `HashAlgorithm` (TEXT, NOT NULL): The algorithm used for the `FileHash` (e.g., "MD5", "quickXorHash", "SHA256"). This field must not be empty.
+*   `FileName` (TEXT)
+*   `FileSize` (INTEGER)
+*   `ParentFolderID` (TEXT)
+*   `CreatedOn` (DATETIME)
+*   `LastModified` (DATETIME)
+*   `LastSynced` (DATETIME): Timestamp of the last time this record was updated from the cloud.
+*   `PRIMARY KEY` (`FileID`, `Provider`)
+
+*Encrypted SQLite `folders` Table Schema:*
+*   `FolderID` (TEXT): The unique ID from the provider.
+*   `Provider` (TEXT): "Google" or "Microsoft".
+*   `OwnerEmail` (TEXT): The email of the account that owns the folder.
+*   `FolderName` (TEXT)
+*   `ParentFolderID` (TEXT): The provider's ID for the parent folder.
+*   `Path` (TEXT, NOT NULL): The original case-sensitive path from the sync root (e.g., `/Work/Reports`).
+*   `NormalizedPath` (TEXT, NOT NULL): The path, normalized to lowercase with forward slashes, used for cross-provider matching (e.g., `/work/reports`).
+*   `LastSynced` (DATETIME)
+*   `PRIMARY KEY` (`FolderID`, `Provider`)
+
+---
+
+#### **5A. Detailed Functionality (Command-Line commands)**
+
+*   **`init`**
+    *   Handles first-time setup: prompts for a master password, generates `config.salt` (if absent), creates the encrypted `config.json.enc` after prompting for client credentials, and creates the encrypted `metadata.db`.
+    *   Can be used subsequently to add **main accounts**. When doing so, it initiates an OAuth 2.0 flow by starting a local web server.
+    *   **OAuth Scopes:** Requests `https://www.googleapis.com/auth/drive` and `https://www.googleapis.com/auth/userinfo.email` for Google. Requests `files.readwrite.all`, `user.read`, and `offline_access` for Microsoft.
+    *   **Microsoft Account Types:** The Azure App Registration must be configured to support "Accounts in any organizational directory (Any Azure AD directory - Multitenant) and personal Microsoft accounts (e.g. Skype, Xbox)" to handle both personal and organizational account types seamlessly.
+    *   After adding a main account, it creates the `synched-cloud-drives` folder in that account's root if it doesn't exist.
+
+*   **`add-account`**
+    *   Adds a **backup account** to a provider that already has a configured main account. Exits with an error if no main account exists for the provider.
+    *   Initiates the same OAuth 2.0 flow as `init`.
+    *   Upon successful authorization, the main account for that provider shares its `synched-cloud-drives` folder with the new backup account, granting "editor" permissions.
+
+*   **`get-metadata`**
+    *   After passing the pre-flight checks, it recursively scans the `synched-cloud-drives` folder and all shared content within it for every account.
+    *   For each file, it first attempts to get the provider-native hash from the API.
+    *   **Hashing Fallback:** If a provider-native hash is not available (e.g., for Google Docs, Sheets, or other proprietary types), the tool **must** download a standard export of the file (e.g., PDF for Docs, XLSX for Sheets) and calculate its SHA-256 hash locally. The `FileHash` and `HashAlgorithm` fields must always be populated. This fallback action will be logged to the console.
+    *   Updates the `files` and `folders` tables in the local encrypted database, populating both `Path` and `NormalizedPath` for folders.
+
+*   **`check-for-duplicates`**
+    *   First, runs the `get-metadata` logic to ensure the local DB is up-to-date.
+    *   Then, queries the DB to find records with identical `FileHash` and `HashAlgorithm` values *within the same provider*.
+    *   Prints a list of duplicate files grouped by hash.
+
+*   **`remove-duplicates`**
+    *   Performs the `check-for-duplicates` action. For each set of duplicates, it prompts the user to select which file(s) to delete.
+
+*   **`remove-duplicates-unsafe`**
+    *   Performs the `check-for-duplicates` action. For each set of duplicates, it automatically deletes all copies except the one with the oldest `CreatedOn` date.
+
+*   **`share-with-main`**
+    *   A utility command to repair permissions. After passing the pre-flight check, it verifies that every backup account has "editor" access to its provider's main account `synched-cloud-drives` folder and re-applies the permission if it is missing.
+
+*   **`sync-providers`**
+    *   Ensures metadata is current by running the `get-metadata` logic.
+    *   **Goal:** Make file content within `synched-cloud-drives` identical between the main Google and Microsoft accounts.
+    *   **Logic:** Compares file sets using `NormalizedPath` and `FileHash`. If a file is missing on one side, it's uploaded, replicating the directory structure. If a file exists at the same path but with a different hash, it's treated as a conflict, and the incoming file is renamed with a `_conflict_YYYY-MM-DD` suffix before upload.
+
+*   **`balance-storage`**
+    *   After passing the pre-flight check, it checks the storage quota for every configured account.
+    *   If any single account (main or backup) of a provider is over 95% full, it identifies the largest files in that account's `synched-cloud-drives` folder.
+    *   It then moves these files, one by one, to a backup account of the **same provider** with the most available free space until the source account is below the 90% threshold.
+    *   It will first attempt a native API ownership transfer. If that fails or is unsupported, it will fall back to a download/re-upload/delete process, ensuring metadata is preserved. The fallback is logged.
+
+*   **`free-main`**
+    *   Transfers all files from a main account's `synched-cloud-drives` folder to its associated backup accounts (of the same provider).
+    *   For each file, it chooses the backup account with the most available free space. It will throw an error if the backup accounts lack sufficient combined space.
+    *   Uses the same ownership transfer/fallback logic as `balance-storage`.
+
+*   **`check-tokens`**
+    *   Iterates through all refresh tokens in the config. For each, it attempts a simple, read-only API call. It reports any tokens that have expired or been revoked, indicating which account needs re-authentication.
+
+*   **`help`**
+    *   Lists all available commands, their purpose, and example usage.
+
+#### **5B. Detailed Functionality (Command-Line flags)**
+
+*   **`--safe`, `-s`**
+    *   A modifier flag that can be used with any state-changing command (e.g., `remove-duplicates-unsafe --safe`).
+    *   When active, no write, delete, or permission-change operations are sent to the cloud providers.
+    *   Instead, the tool will print a detailed log of what actions *would* have been taken. Example: `[DRY RUN] DELETE GDrive file 'duplicate.txt' (FileID: xyz) from account 'backup@gmail.com'`.
+    *   Read-only operations and local DB modifications are still allowed.
+
+*   **`--help`, `-h`**
+    *   A modifier flag that can be used with any command (e.g., `cloud-drives-sync free-main --help`) to get more information on how it works.
+
+#### **6. Expected Response**
+
+This must be a fully-implemented, production-ready project based on these `v8.txt` requirements. There must be absolutely no TODOs, stubs, or placeholders. I will now generate the complete Go project based on this definitive specification.
