@@ -15,7 +15,7 @@ func PreFlightCheck(googleSvc google.GoogleDrive, msSvc microsoft.OneDrive, main
 			return fmt.Errorf("[Google][%s] Error listing folders: %v", mainGoogleEmail, err)
 		}
 		if len(folders) != 1 {
-			return fmt.Errorf("[Google][%s] Pre-flight failed: found %d 'synched-cloud-drives' folders. Resolve manually.", mainGoogleEmail, len(folders))
+			return fmt.Errorf("[Google][%s] Pre-flight failed: found %d 'synched-cloud-drives' folders. Resolve manually", mainGoogleEmail, len(folders))
 		}
 		if !folders[0].IsRoot {
 			if err := googleSvc.MoveFolderToRoot(mainGoogleEmail, folders[0].ID); err != nil {
@@ -30,7 +30,7 @@ func PreFlightCheck(googleSvc google.GoogleDrive, msSvc microsoft.OneDrive, main
 			return fmt.Errorf("[Microsoft][%s] Error listing folders: %v", mainMicrosoftEmail, err)
 		}
 		if len(folders) != 1 {
-			return fmt.Errorf("[Microsoft][%s] Pre-flight failed: found %d 'synched-cloud-drives' folders. Resolve manually.", mainMicrosoftEmail, len(folders))
+			return fmt.Errorf("[Microsoft][%s] Pre-flight failed: found %d 'synched-cloud-drives' folders. Resolve manually", mainMicrosoftEmail, len(folders))
 		}
 		if !folders[0].IsRoot {
 			if err := msSvc.MoveFolderToRoot(mainMicrosoftEmail, folders[0].ID); err != nil {

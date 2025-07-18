@@ -26,6 +26,8 @@ type OneDrive interface {
 	GetQuota(email string) (used, total int64, err error)
 	TransferOwnership(fileID, fromEmail, toEmail string) error
 	CheckToken(email string) error
+	GetAuthURL() string
+	ExchangeCodeForToken(code string) (string, string, error)
 }
 
 type OneDriveFolder struct {
@@ -46,8 +48,10 @@ type OneDriveFile struct {
 }
 
 type oneDriveImpl struct {
-	client *http.Client
-	email  string
+	client       *http.Client
+	email        string
+	clientID     string
+	clientSecret string
 }
 
 // NewOneDrive returns a OneDrive implementation (stub for now)
@@ -64,7 +68,7 @@ func NewOneDrive(clientID, clientSecret, refreshToken string) (OneDrive, error) 
 	}
 	tok := &oauth2.Token{RefreshToken: refreshToken, Expiry: time.Now().Add(-time.Hour)}
 	client := conf.Client(ctx, tok)
-	return &oneDriveImpl{client: client}, nil
+	return &oneDriveImpl{client: client, clientID: clientID, clientSecret: clientSecret}, nil
 }
 
 func (o *oneDriveImpl) PreFlightCheck(mainEmail string) error {
@@ -311,4 +315,55 @@ func (o *oneDriveImpl) GetQuota(email string) (used, total int64, err error) {
 		return 0, 0, err
 	}
 	return data.Quota.Used, data.Quota.Total, nil
+}
+
+// GetAuthURL returns the Microsoft OAuth2 authorization URL
+func (o *oneDriveImpl) GetAuthURL() string {
+	conf := &oauth2.Config{
+		ClientID:     o.clientID,
+		ClientSecret: o.clientSecret,
+		Scopes:       []string{"Files.ReadWrite.All", "offline_access"},
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+			TokenURL: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+		},
+		RedirectURL: "http://localhost:8080/oauth2callback",
+	}
+	return conf.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+}
+
+// ExchangeCodeForToken exchanges an auth code for a refresh token and user email
+func (o *oneDriveImpl) ExchangeCodeForToken(code string) (string, string, error) {
+	conf := &oauth2.Config{
+		ClientID:     o.clientID,
+		ClientSecret: o.clientSecret,
+		Scopes:       []string{"Files.ReadWrite.All", "offline_access"},
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+			TokenURL: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+		},
+		RedirectURL: "http://localhost:8080/oauth2callback",
+	}
+	tok, err := conf.Exchange(context.Background(), code)
+	if err != nil {
+		return "", "", err
+	}
+	client := conf.Client(context.Background(), tok)
+	resp, err := client.Get("https://graph.microsoft.com/v1.0/me")
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	var user struct {
+		Mail              string `json:"mail"`
+		UserPrincipalName string `json:"userPrincipalName"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return "", "", err
+	}
+	email := user.Mail
+	if email == "" {
+		email = user.UserPrincipalName
+	}
+	return tok.RefreshToken, email, nil
 }

@@ -64,13 +64,14 @@ func preFlightCheckAllAccounts() bool {
 		return false
 	}
 	for _, u := range cfg.Users {
-		if u.Provider == "Google" {
+		switch u.Provider {
+		case "Google":
 			gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, u.RefreshToken)
 			if err := gd.PreFlightCheck(u.Email); err != nil {
 				fmt.Println(err)
 				return false
 			}
-		} else if u.Provider == "Microsoft" {
+		case "Microsoft":
 			ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, u.RefreshToken)
 			if err := ms.PreFlightCheck(u.Email); err != nil {
 				fmt.Println(err)
@@ -108,7 +109,8 @@ func listFilesInSyncFolder(acc struct{ Provider, Email string }) []struct {
 	Size                                  int64
 } {
 	cfg, _ := LoadConfig(promptForPassword())
-	if acc.Provider == "Google" {
+	switch acc.Provider {
+	case "Google":
 		gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, getRefreshToken(cfg, acc.Provider, acc.Email))
 		files, _ := gd.ListFilesInSyncFolder(acc.Email)
 		var out []struct {
@@ -122,7 +124,7 @@ func listFilesInSyncFolder(acc struct{ Provider, Email string }) []struct {
 			}{ID: f.ID, Name: f.Name, ParentID: f.ParentID, Created: f.Created, Modified: f.Modified, Size: f.Size})
 		}
 		return out
-	} else if acc.Provider == "Microsoft" {
+	case "Microsoft":
 		ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, getRefreshToken(cfg, acc.Provider, acc.Email))
 		files, _ := ms.ListFilesInSyncFolder(acc.Email)
 		var out []struct {

@@ -3,6 +3,9 @@ package cmd
 import (
 	"fmt"
 
+	"cloud-drives-sync/google"
+	"cloud-drives-sync/microsoft"
+
 	"github.com/spf13/cobra"
 )
 
@@ -26,4 +29,15 @@ func init() {
 }
 
 // Helper stub
-func tokenIsValid(acc interface{}) bool { return true }
+func tokenIsValid(acc struct{ Provider, Email string }) bool {
+	cfg, _ := LoadConfig("")
+	switch acc.Provider {
+	case "Google":
+		gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, getRefreshToken(cfg, acc.Provider, acc.Email))
+		return gd.CheckToken(acc.Email) == nil
+	case "Microsoft":
+		ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, getRefreshToken(cfg, acc.Provider, acc.Email))
+		return ms.CheckToken(acc.Email) == nil
+	}
+	return false
+}

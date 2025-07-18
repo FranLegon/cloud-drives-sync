@@ -26,5 +26,6 @@ type Database interface {
 	GetFilesByHash(hash string) ([]FileRecord, error)
 	GetLargestFiles(provider, ownerEmail string, limit int) ([]FileRecord, error)
 	UpdateOwner(fileID, provider, newOwner string) error
+	GetAllFiles(provider string) ([]FileRecord, error)
 	Close() error
 }
