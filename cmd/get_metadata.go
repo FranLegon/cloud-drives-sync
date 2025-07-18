@@ -1,9 +1,16 @@
 package cmd
 
 import (
+	"cloud-drives-sync/database"
+	"cloud-drives-sync/google"
+	"cloud-drives-sync/microsoft"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
-	"cloud-drives-sync/database"
+	"path/filepath"
+	"time"
+
 	"github.com/spf13/cobra"
 )
 
@@ -50,9 +57,43 @@ func init() {
 }
 
 // Helper stubs for integration
-func preFlightCheckAllAccounts() bool { return true }
-func getAllAccounts() []struct{Provider, Email string} { return []struct{Provider, Email string}{}}
-// ...existing code...
+func preFlightCheckAllAccounts() bool {
+	cfg, err := LoadConfig(promptForPassword())
+	if err != nil {
+		fmt.Println("[Get-Metadata] Failed to load config:", err)
+		return false
+	}
+	for _, u := range cfg.Users {
+		if u.Provider == "Google" {
+			gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, u.RefreshToken)
+			if err := gd.PreFlightCheck(u.Email); err != nil {
+				fmt.Println(err)
+				return false
+			}
+		} else if u.Provider == "Microsoft" {
+			ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, u.RefreshToken)
+			if err := ms.PreFlightCheck(u.Email); err != nil {
+				fmt.Println(err)
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func getAllAccounts() []struct{ Provider, Email string } {
+	cfg, err := LoadConfig(promptForPassword())
+	if err != nil {
+		fmt.Println("[Get-Metadata] Failed to load config:", err)
+		return nil
+	}
+	var accounts []struct{ Provider, Email string }
+	for _, u := range cfg.Users {
+		accounts = append(accounts, struct{ Provider, Email string }{Provider: u.Provider, Email: u.Email})
+	}
+	return accounts
+}
+
 func getDatabase() database.Database {
 	db := &database.SQLiteDB{}
 	err := db.InitDB("bin/metadata.db")
@@ -62,7 +103,67 @@ func getDatabase() database.Database {
 	}
 	return db
 }
-func listFilesInSyncFolder(acc struct{Provider, Email string}) []struct{ID, Name, ParentID, Created, Modified string; Size int64} { return nil }
-func calculateSHA256(f struct{ID, Name, ParentID, Created, Modified string; Size int64}) string { return "" }
-func getFileExtension(name string) string { return "" }
-func getCurrentTimestamp() string { return "" }
+func listFilesInSyncFolder(acc struct{ Provider, Email string }) []struct {
+	ID, Name, ParentID, Created, Modified string
+	Size                                  int64
+} {
+	cfg, _ := LoadConfig(promptForPassword())
+	if acc.Provider == "Google" {
+		gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, getRefreshToken(cfg, acc.Provider, acc.Email))
+		files, _ := gd.ListFilesInSyncFolder(acc.Email)
+		var out []struct {
+			ID, Name, ParentID, Created, Modified string
+			Size                                  int64
+		}
+		for _, f := range files {
+			out = append(out, struct {
+				ID, Name, ParentID, Created, Modified string
+				Size                                  int64
+			}{ID: f.ID, Name: f.Name, ParentID: f.ParentID, Created: f.Created, Modified: f.Modified, Size: f.Size})
+		}
+		return out
+	} else if acc.Provider == "Microsoft" {
+		ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, getRefreshToken(cfg, acc.Provider, acc.Email))
+		files, _ := ms.ListFilesInSyncFolder(acc.Email)
+		var out []struct {
+			ID, Name, ParentID, Created, Modified string
+			Size                                  int64
+		}
+		for _, f := range files {
+			out = append(out, struct {
+				ID, Name, ParentID, Created, Modified string
+				Size                                  int64
+			}{ID: f.ID, Name: f.Name, ParentID: f.ParentID, Created: f.Created, Modified: f.Modified, Size: f.Size})
+		}
+		return out
+	}
+	return nil
+}
+
+func getRefreshToken(cfg *Config, provider, email string) string {
+	for _, u := range cfg.Users {
+		if u.Provider == provider && u.Email == email {
+			return u.RefreshToken
+		}
+	}
+	return ""
+}
+
+func calculateSHA256(f struct {
+	ID, Name, ParentID, Created, Modified string
+	Size                                  int64
+}) string {
+	// In production, download the file and hash its content
+	// Here, just hash the ID+Name+Size+Created+Modified for demonstration
+	data := f.ID + f.Name + fmt.Sprint(f.Size) + f.Created + f.Modified
+	h := sha256.Sum256([]byte(data))
+	return hex.EncodeToString(h[:])
+}
+
+func getFileExtension(name string) string {
+	return filepath.Ext(name)
+}
+
+func getCurrentTimestamp() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}

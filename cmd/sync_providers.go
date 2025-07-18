@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	gdrive "cloud-drives-sync/google"
+	msdrive "cloud-drives-sync/microsoft"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -37,9 +39,106 @@ func init() {
 	rootCmd.AddCommand(syncProvidersCmd)
 }
 
-// Helper stubs
-func getFilesByProvider(provider string) []struct{ FileName, FileHash string } { return nil }
-func getHashes(files []struct{ FileName, FileHash string }) map[string]struct{ FileName, FileHash string } {
-	return nil
+// Helper functions
+type SyncFile struct {
+	FileName   string
+	FileHash   string
+	Provider   string
+	OwnerEmail string
+	FileID     string
 }
-func uploadFileToProvider(provider string, file struct{ FileName, FileHash string }) {}
+
+func getFilesByProvider(provider string) []SyncFile {
+	db := getDatabase()
+	if db == nil {
+		return nil
+	}
+	records, err := db.GetAllFiles(provider)
+	if err != nil {
+		return nil
+	}
+	var files []SyncFile
+	for _, r := range records {
+		files = append(files, SyncFile{
+			FileName:   r.FileName,
+			FileHash:   r.FileHash,
+			Provider:   r.Provider,
+			OwnerEmail: r.OwnerEmail,
+			FileID:     r.FileID,
+		})
+	}
+	return files
+}
+
+func getHashes(files []SyncFile) map[string]SyncFile {
+	hashMap := make(map[string]SyncFile)
+	for _, f := range files {
+		if f.FileHash != "" {
+			hashMap[f.FileHash] = f
+		}
+	}
+	return hashMap
+}
+
+func uploadFileToProvider(provider string, file SyncFile) {
+	cfg, _ := LoadConfig(promptForPassword())
+	var content []byte
+	var err error
+	if file.Provider == "Google" {
+		gd, _ := getGoogleDrive(cfg, file.OwnerEmail)
+		content, err = gd.DownloadFile(file.OwnerEmail, file.FileID)
+	} else if file.Provider == "Microsoft" {
+		ms, _ := getOneDrive(cfg, file.OwnerEmail)
+		content, err = ms.DownloadFile(file.OwnerEmail, file.FileID)
+	}
+	if err != nil {
+		fmt.Printf("[Sync-Providers] Error downloading %s: %v\n", file.FileName, err)
+		return
+	}
+	if provider == "Google" {
+		main := getMainAccount(cfg, "Google")
+		gd, _ := getGoogleDrive(cfg, main.Email)
+		err = gd.UploadFile(main.Email, file.FileName, content)
+	} else if provider == "Microsoft" {
+		main := getMainAccount(cfg, "Microsoft")
+		ms, _ := getOneDrive(cfg, main.Email)
+		err = ms.UploadFile(main.Email, file.FileName, content)
+	}
+	if err != nil {
+		fmt.Printf("[Sync-Providers] Error uploading %s: %v\n", file.FileName, err)
+	}
+}
+
+func promptForPassword() string {
+	var pw string
+	fmt.Print("Enter master password: ")
+	fmt.Scanln(&pw)
+	return pw
+}
+
+func getGoogleDrive(cfg *Config, email string) (gdrive.GoogleDrive, error) {
+	for _, u := range cfg.Users {
+		if u.Provider == "Google" && u.Email == email {
+			return gdrive.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, u.RefreshToken)
+		}
+	}
+	return nil, fmt.Errorf("Google account not found: %s", email)
+}
+
+func getOneDrive(cfg *Config, email string) (msdrive.OneDrive, error) {
+	for _, u := range cfg.Users {
+		if u.Provider == "Microsoft" && u.Email == email {
+			return msdrive.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, u.RefreshToken)
+		}
+	}
+	return nil, fmt.Errorf("Microsoft account not found: %s", email)
+}
+
+func getMainAccount(cfg *Config, provider string) struct{ Email string } {
+	for _, u := range cfg.Users {
+		if u.Provider == provider && u.IsMain {
+			return struct{ Email string }{Email: u.Email}
+		}
+	}
+	return struct{ Email string }{Email: ""}
+}
