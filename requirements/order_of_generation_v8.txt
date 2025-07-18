@@ -1,0 +1,53 @@
+This sequence follows the "bottom-up, dependency-first" strategy, ensuring that when you ask for a file to be generated, the code for its dependencies has already been created.
+
+Phase 1: Core Data Structures & Standalone Utilities
+(These have no internal project dependencies)
+
+internal/model/model.go
+internal/logger/logger.go
+internal/crypto/crypto.go
+
+Phase 2: Configuration & Core Interfaces
+(These depend only on Phase 1 files)
+
+internal/config/config.go
+internal/api/client.go
+
+Phase 3: Data Persistence & Authentication
+(These depend on previously defined models, configs, and interfaces)
+
+internal/database/database.go
+internal/auth/token.go
+internal/auth/oauth.go
+
+Phase 4: Concrete API Client Implementations
+(These implement the CloudClient interface from Phase 2)
+
+internal/google/client.go
+internal/microsoft/client.go
+
+Phase 5: High-Level Business Logic
+(This orchestrates all the internal components)
+
+internal/task/task_runner.go
+
+Phase 6: Command-Line Interface (CLI) Commands
+(These are the user-facing entry points that call the task runner)
+
+cmd/root.go
+cmd/init.go
+cmd/addAccount.go
+cmd/getMetadata.go
+cmd/checkTokens.go
+cmd/shareWithMain.go
+cmd/checkForDuplicates.go
+cmd/removeDuplicates.go
+cmd/syncProviders.go
+cmd/balanceStorage.go
+cmd/freeMain.go
+
+Phase 7: Final Project Assembly
+(The final files to complete the project)
+
+go.mod
+main.go
