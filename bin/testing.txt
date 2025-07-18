@@ -15,8 +15,9 @@ MS backup 2:
 francisco.legon@hotmail.com
 */
 
-go build -o bin/cloud-drives-sync.exe cloud-drives-sync
 $env:CGO_ENABLED=1
+go build -o bin/cloud-drives-sync.exe cloud-drives-sync
+
 
 . bin\cloud-drives-sync.exe init
 . bin\cloud-drives-sync.exe add-account
