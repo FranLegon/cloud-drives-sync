@@ -4,7 +4,6 @@ import (
 	"cloud-drives-sync/crypto"
 	"crypto/rand"
 	"encoding/json"
-	"io/ioutil"
 	"os"
 )
 
@@ -27,7 +26,7 @@ type Config struct {
 
 func LoadConfig(masterPassword string) (*Config, error) {
 	encPath := "bin/config.json.enc"
-	encData, err := ioutil.ReadFile(encPath)
+	encData, err := os.ReadFile(encPath)
 	if err != nil {
 		return nil, err
 	}
@@ -66,5 +65,5 @@ func SaveConfig(cfg *Config, masterPassword string) error {
 	}
 	out := append(salt, nonce...)
 	out = append(out, ciphertext...)
-	return ioutil.WriteFile("bin/config.json.enc", out, 0600)
+	return os.WriteFile("bin/config.json.enc", out, 0600)
 }
