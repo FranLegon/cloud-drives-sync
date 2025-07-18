@@ -78,10 +78,11 @@ func deleteFileFromCloud(f interface{}) {
 	if err != nil {
 		return
 	}
-	if file.Provider == "Google" {
+	switch file.Provider {
+	case "Google":
 		gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, getRefreshToken(cfg, file.Provider, file.OwnerEmail))
 		_ = gd.DeleteFile(file.OwnerEmail, file.FileID)
-	} else if file.Provider == "Microsoft" {
+	case "Microsoft":
 		ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, getRefreshToken(cfg, file.Provider, file.OwnerEmail))
 		_ = ms.DeleteFile(file.OwnerEmail, file.FileID)
 	}

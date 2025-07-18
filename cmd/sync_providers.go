@@ -84,10 +84,11 @@ func uploadFileToProvider(provider string, file SyncFile) {
 	cfg, _ := LoadConfig(promptForPassword())
 	var content []byte
 	var err error
-	if file.Provider == "Google" {
+	switch file.Provider {
+	case "Google":
 		gd, _ := getGoogleDrive(cfg, file.OwnerEmail)
 		content, err = gd.DownloadFile(file.OwnerEmail, file.FileID)
-	} else if file.Provider == "Microsoft" {
+	case "Microsoft":
 		ms, _ := getOneDrive(cfg, file.OwnerEmail)
 		content, err = ms.DownloadFile(file.OwnerEmail, file.FileID)
 	}
@@ -95,11 +96,12 @@ func uploadFileToProvider(provider string, file SyncFile) {
 		fmt.Printf("[Sync-Providers] Error downloading %s: %v\n", file.FileName, err)
 		return
 	}
-	if provider == "Google" {
+	switch provider {
+	case "Google":
 		main := getMainAccount(cfg, "Google")
 		gd, _ := getGoogleDrive(cfg, main.Email)
 		err = gd.UploadFile(main.Email, file.FileName, content)
-	} else if provider == "Microsoft" {
+	case "Microsoft":
 		main := getMainAccount(cfg, "Microsoft")
 		ms, _ := getOneDrive(cfg, main.Email)
 		err = ms.UploadFile(main.Email, file.FileName, content)
@@ -122,7 +124,7 @@ func getGoogleDrive(cfg *Config, email string) (gdrive.GoogleDrive, error) {
 			return gdrive.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, u.RefreshToken)
 		}
 	}
-	return nil, fmt.Errorf("Google account not found: %s", email)
+	return nil, fmt.Errorf("[getGoogleDrive] Google account not found: %s", email)
 }
 
 func getOneDrive(cfg *Config, email string) (msdrive.OneDrive, error) {
@@ -131,7 +133,7 @@ func getOneDrive(cfg *Config, email string) (msdrive.OneDrive, error) {
 			return msdrive.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, u.RefreshToken)
 		}
 	}
-	return nil, fmt.Errorf("Microsoft account not found: %s", email)
+	return nil, fmt.Errorf("[getOneDrive] Microsoft account not found: %s", email)
 }
 
 func getMainAccount(cfg *Config, provider string) struct{ Email string } {

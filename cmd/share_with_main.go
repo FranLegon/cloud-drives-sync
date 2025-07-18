@@ -59,6 +59,7 @@ func accIsMain(acc interface{}) bool {
 
 func hasEditorAccess(acc interface{}) bool {
 	// For now, always return false to ensure ShareSyncFolder is always called (safe default)
+	fmt.Printf("[hasEditorAccess] Assuming %v has no editor access", acc)
 	return false
 }
 
@@ -81,10 +82,11 @@ func grantEditorAccess(acc interface{}) {
 	if mainEmail == "" {
 		return
 	}
-	if account.Provider == "Google" {
+	switch account.Provider {
+	case "Google":
 		gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, getRefreshToken(cfg, account.Provider, account.Email))
 		_ = gd.ShareSyncFolder(mainEmail, account.Email)
-	} else if account.Provider == "Microsoft" {
+	case "Microsoft":
 		ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, getRefreshToken(cfg, account.Provider, account.Email))
 		_ = ms.ShareSyncFolder(mainEmail, account.Email)
 	}

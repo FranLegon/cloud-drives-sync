@@ -1,3 +1,4 @@
+// GetAllFiles returns all files for a given provider
 package database
 
 import (
@@ -102,4 +103,23 @@ func (db *SQLiteDB) UpdateOwner(fileID, provider, newOwner string) error {
 
 func (db *SQLiteDB) Close() error {
 	return db.conn.Close()
+}
+
+// GetAllFiles returns all files for a given provider
+func (db *SQLiteDB) GetAllFiles(provider string) ([]FileRecord, error) {
+	rows, err := db.conn.Query(`SELECT FileID, Provider, OwnerEmail, FileHash, FileName, FileSize, FileExtension, ParentFolderID, ParentFolderName, CreatedOn, LastModified, LastSynced FROM files WHERE Provider=?`, provider)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var files []FileRecord
+	for rows.Next() {
+		var file FileRecord
+		err := rows.Scan(&file.FileID, &file.Provider, &file.OwnerEmail, &file.FileHash, &file.FileName, &file.FileSize, &file.FileExtension, &file.ParentFolderID, &file.ParentFolderName, &file.CreatedOn, &file.LastModified, &file.LastSynced)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+	return files, nil
 }

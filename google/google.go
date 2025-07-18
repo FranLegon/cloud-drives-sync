@@ -28,6 +28,8 @@ type GoogleDrive interface {
 	GetQuota(email string) (used, total int64, err error)
 	TransferOwnership(fileID, fromEmail, toEmail string) error
 	CheckToken(email string) error
+	GetAuthURL() string
+	ExchangeCodeForToken(code string) (string, string, error)
 }
 
 type GoogleFolder struct {
@@ -59,12 +61,14 @@ func NewGoogleDrive(clientID, clientSecret, refreshToken string) (GoogleDrive, e
 	}
 	tok := &oauth2.Token{RefreshToken: refreshToken, Expiry: time.Now().Add(-time.Hour)}
 	client := conf.Client(ctx, tok)
-	return &googleDriveImpl{client: client}, nil
+	return &googleDriveImpl{client: client, clientID: clientID, clientSecret: clientSecret}, nil
 }
 
 type googleDriveImpl struct {
-	client *http.Client
-	email  string
+	client       *http.Client
+	email        string
+	clientID     string
+	clientSecret string
 }
 
 func (g *googleDriveImpl) PreFlightCheck(mainEmail string) error {
@@ -395,4 +399,44 @@ func (g *googleDriveImpl) MoveFolderToRoot(email, folderID string) error {
 		return fmt.Errorf("Google API error: %s", resp2.Status)
 	}
 	return nil
+}
+
+// GetAuthURL returns the Google OAuth2 authorization URL
+func (g *googleDriveImpl) GetAuthURL() string {
+	conf := &oauth2.Config{
+		ClientID:     g.clientID,
+		ClientSecret: g.clientSecret,
+		Scopes:       []string{"https://www.googleapis.com/auth/drive"},
+		Endpoint:     google.Endpoint,
+		RedirectURL:  "http://localhost:8080/oauth2callback",
+	}
+	return conf.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+}
+
+// ExchangeCodeForToken exchanges an auth code for a refresh token and user email
+func (g *googleDriveImpl) ExchangeCodeForToken(code string) (string, string, error) {
+	conf := &oauth2.Config{
+		ClientID:     g.clientID,
+		ClientSecret: g.clientSecret,
+		Scopes:       []string{"https://www.googleapis.com/auth/drive"},
+		Endpoint:     google.Endpoint,
+		RedirectURL:  "http://localhost:8080/oauth2callback",
+	}
+	tok, err := conf.Exchange(context.Background(), code)
+	if err != nil {
+		return "", "", err
+	}
+	client := conf.Client(context.Background(), tok)
+	resp, err := client.Get("https://www.googleapis.com/oauth2/v2/userinfo")
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+	var user struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return "", "", err
+	}
+	return tok.RefreshToken, user.Email, nil
 }

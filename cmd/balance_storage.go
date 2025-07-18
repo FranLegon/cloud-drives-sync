@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"cloud-drives-sync/database"
+	"cloud-drives-sync/google"
+	"cloud-drives-sync/microsoft"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -29,7 +32,7 @@ var balanceStorageCmd = &cobra.Command{
 							fmt.Println("No backup account with enough space.")
 							break
 						}
-						transferOwnershipOrMove(f, acc, backup)
+						transferOwnershipOrMove(f, acc, *backup)
 						fmt.Printf("Moved %s to %s\n", f.FileName, backup.Email)
 					}
 					used2, total2 := getQuota(acc)
@@ -47,9 +50,81 @@ func init() {
 	rootCmd.AddCommand(balanceStorageCmd)
 }
 
-// Helper stubs
-func getQuota(acc interface{}) (int64, int64)                        { return 0, 0 }
-func getLargestFiles(acc interface{}) []struct{ FileName string }    { return nil }
-func fileInOtherAccounts(f interface{}, acc interface{}) bool        { return false }
-func getBackupWithMostSpace(provider string) *struct{ Email string } { return nil }
-func transferOwnershipOrMove(f, from, to interface{})                {}
+func getQuota(acc struct{ Provider, Email string }) (int64, int64) {
+	cfg, _ := LoadConfig("")
+	switch acc.Provider {
+	case "Google":
+		gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, getRefreshToken(cfg, acc.Provider, acc.Email))
+		used, total, _ := gd.GetQuota(acc.Email)
+		return used, total
+	case "Microsoft":
+		ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, getRefreshToken(cfg, acc.Provider, acc.Email))
+		used, total, _ := ms.GetQuota(acc.Email)
+		return used, total
+	}
+	return 0, 0
+}
+
+func getLargestFiles(acc struct{ Provider, Email string }) []database.FileRecord {
+	db := getDatabase()
+	if db == nil {
+		return nil
+	}
+	files, _ := db.GetLargestFiles(acc.Provider, acc.Email, 10)
+	return files
+}
+
+func fileInOtherAccounts(f database.FileRecord, acc struct{ Provider, Email string }) bool {
+	db := getDatabase()
+	if db == nil {
+		return false
+	}
+	files, _ := db.GetFilesByHash(f.FileHash)
+	for _, file := range files {
+		if file.Provider == acc.Provider && file.OwnerEmail != acc.Email {
+			return true
+		}
+	}
+	return false
+}
+
+func getBackupWithMostSpace(provider string) *struct{ Provider, Email string } {
+	cfg, _ := LoadConfig("")
+	var maxFree int64
+	var backup struct{ Provider, Email string }
+	found := false
+	for _, u := range cfg.Users {
+		if u.Provider == provider && !u.IsMain {
+			var used, total int64
+			switch provider {
+			case "Google":
+				gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, u.RefreshToken)
+				used, total, _ = gd.GetQuota(u.Email)
+			case "Microsoft":
+				ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, u.RefreshToken)
+				used, total, _ = ms.GetQuota(u.Email)
+			}
+			free := total - used
+			if !found || free > maxFree {
+				maxFree = free
+				backup = struct{ Provider, Email string }{Provider: provider, Email: u.Email}
+				found = true
+			}
+		}
+	}
+	if !found {
+		return nil
+	}
+	return &backup
+}
+
+func transferOwnershipOrMove(f database.FileRecord, from, to struct{ Provider, Email string }) {
+	switch from.Provider {
+	case "Google":
+		gd, _ := google.NewGoogleDrive("", "", "")
+		_ = gd.TransferOwnership(f.FileID, from.Email, to.Email)
+	case "Microsoft":
+		ms, _ := microsoft.NewOneDrive("", "", "")
+		_ = ms.TransferOwnership(f.FileID, from.Email, to.Email)
+	}
+}

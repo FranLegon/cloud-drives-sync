@@ -99,7 +99,8 @@ var initCmd = &cobra.Command{
 		// For each main account, create synched-cloud-drives folder if not present
 		for _, u := range cfg.Users {
 			if u.IsMain {
-				if u.Provider == "Google" {
+				switch u.Provider {
+				case "Google":
 					fmt.Printf("[Init][Google][%s] Ensuring synched-cloud-drives folder exists...\n", u.Email)
 					err := ensureGoogleSyncFolder(u.Email, cfg.GoogleClient.ID, cfg.GoogleClient.Secret, u.RefreshToken)
 					if err != nil {
@@ -107,7 +108,7 @@ var initCmd = &cobra.Command{
 						os.Exit(1)
 					}
 					fmt.Printf("[Init][Google][%s] synched-cloud-drives folder ready.\n", u.Email)
-				} else if u.Provider == "Microsoft" {
+				case "Microsoft":
 					fmt.Printf("[Init][Microsoft][%s] Ensuring synched-cloud-drives folder exists...\n", u.Email)
 					err := ensureMicrosoftSyncFolder(u.Email, cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, u.RefreshToken)
 					if err != nil {

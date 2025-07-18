@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"cloud-drives-sync/google"
+	"cloud-drives-sync/microsoft"
 	"fmt"
 	"net/http"
 	"os"
@@ -70,24 +72,100 @@ func normalizeProvider(p string) string {
 }
 
 func checkMainAccountExists(provider string) bool {
-	// ...existing code to check config...
-	return true // stub
+	cfg, err := LoadConfig(promptForPassword())
+	if err != nil {
+		return false
+	}
+	for _, u := range cfg.Users {
+		if u.Provider == provider && u.IsMain {
+			return true
+		}
+	}
+	return false
 }
 
 func getAuthURL(provider string) string {
-	// ...existing code to get auth URL...
-	return "http://example.com/auth"
+	cfg, err := LoadConfig(promptForPassword())
+	if err != nil {
+		return ""
+	}
+	switch provider {
+	case "Google":
+		gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, "")
+		return gd.GetAuthURL()
+	case "Microsoft":
+		ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, "")
+		return ms.GetAuthURL()
+	}
+	return ""
 }
 
 func exchangeCodeForToken(provider, code string) (string, string) {
-	// ...existing code to exchange code for token...
-	return "refresh_token", "backup@example.com"
+	cfg, err := LoadConfig(promptForPassword())
+	if err != nil {
+		return "", ""
+	}
+	switch provider {
+	case "Google":
+		gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, "")
+		refreshToken, email, err := gd.ExchangeCodeForToken(code)
+		if err != nil {
+			fmt.Println("[Add-Account] Google token exchange failed:", err)
+			return "", ""
+		}
+		return refreshToken, email
+	case "Microsoft":
+		ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, "")
+		refreshToken, email, err := ms.ExchangeCodeForToken(code)
+		if err != nil {
+			fmt.Println("[Add-Account] Microsoft token exchange failed:", err)
+			return "", ""
+		}
+		return refreshToken, email
+	}
+	return "", ""
 }
 
 func addBackupAccountToConfig(provider, email, refreshToken string) {
-	// ...existing code to update config...
+	cfg, err := LoadConfig(promptForPassword())
+	if err != nil {
+		fmt.Println("[Add-Account] Failed to load config:", err)
+		return
+	}
+	cfg.Users = append(cfg.Users, struct {
+		Provider     string `json:"provider"`
+		Email        string `json:"email"`
+		IsMain       bool   `json:"is_main"`
+		RefreshToken string `json:"refresh_token"`
+	}{Provider: provider, Email: email, IsMain: false, RefreshToken: refreshToken})
+	if err := SaveConfig(cfg, promptForPassword()); err != nil {
+		fmt.Println("[Add-Account] Failed to update config:", err)
+	}
 }
 
 func shareSyncFolderWithBackup(provider, backupEmail string) {
-	// ...existing code to share folder...
+	cfg, err := LoadConfig(promptForPassword())
+	if err != nil {
+		fmt.Println("[Add-Account] Failed to load config:", err)
+		return
+	}
+	var mainEmail string
+	for _, u := range cfg.Users {
+		if u.Provider == provider && u.IsMain {
+			mainEmail = u.Email
+			break
+		}
+	}
+	if mainEmail == "" {
+		fmt.Println("[Add-Account] No main account found for sharing.")
+		return
+	}
+	switch provider {
+	case "Google":
+		gd, _ := google.NewGoogleDrive(cfg.GoogleClient.ID, cfg.GoogleClient.Secret, getRefreshToken(cfg, provider, mainEmail))
+		_ = gd.ShareSyncFolder(mainEmail, backupEmail)
+	case "Microsoft":
+		ms, _ := microsoft.NewOneDrive(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret, getRefreshToken(cfg, provider, mainEmail))
+		_ = ms.ShareSyncFolder(mainEmail, backupEmail)
+	}
 }
