@@ -12,14 +12,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/api"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/auth"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/config"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/database"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/google"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/logger"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/microsoft"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/model"
+	"cloud-drives-sync/internal/api"
+	"cloud-drives-sync/internal/auth"
+	"cloud-drives-sync/internal/config"
+	"cloud-drives-sync/internal/database"
+	"cloud-drives-sync/internal/google"
+	"cloud-drives-sync/internal/logger"
+	"cloud-drives-sync/internal/microsoft"
+	"cloud-drives-sync/internal/model"
+
 	"golang.org/x/oauth2"
 )
 

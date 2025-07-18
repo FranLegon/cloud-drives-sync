@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/config"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/logger"
+	"cloud-drives-sync/internal/config"
+	"cloud-drives-sync/internal/logger"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )

@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"sort"
 
+	"cloud-drives-sync/internal/config"
+	"cloud-drives-sync/internal/model"
+	"cloud-drives-sync/internal/task"
+
+	"cloud-drives-sync/internal/logger"
+
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/config"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/model"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/task"
-	"github.comcom/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/logger"
 )
 
 // removeDuplicatesCmd represents the remove-duplicates command
