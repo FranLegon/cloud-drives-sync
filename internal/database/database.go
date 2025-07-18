@@ -7,8 +7,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"cloud-drives-sync/internal/model"
+
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/model"
 )
 
 const dbFile = "metadata.db"

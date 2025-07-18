@@ -6,8 +6,9 @@ import (
 	"os"
 
 	"github.com/manifoldco/promptui"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/crypto"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/model"
+
+	"cloud-drives-sync/internal/crypto"
+	"cloud-drives-sync/internal/model"
 )
 
 const (

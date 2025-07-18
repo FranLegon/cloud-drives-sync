@@ -4,7 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/config"
+	"cloud-drives-sync/internal/config"
+
 	"golang.org/x/oauth2"
 )
 

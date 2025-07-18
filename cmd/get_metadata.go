@@ -4,10 +4,11 @@ import (
 	"context"
 	"time"
 
+	"cloud-drives-sync/internal/config"
+	"cloud-drives-sync/internal/logger"
+	"cloud-drives-sync/internal/task"
+
 	"github.com/spf13/cobra"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/config"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/logger"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/task"
 )
 
 // getMetadataCmd represents the get-metadata command

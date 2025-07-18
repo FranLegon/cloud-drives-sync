@@ -7,8 +7,9 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/api"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/logger"
+	"cloud-drives-sync/internal/api"
+	"cloud-drives-sync/internal/logger"
+
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/option"
 )

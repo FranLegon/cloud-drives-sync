@@ -5,16 +5,17 @@ import (
 	"fmt"
 	"os"
 
+	"cloud-drives-sync/internal/auth"
+	"cloud-drives-sync/internal/config"
+	"cloud-drives-sync/internal/crypto"
+	"cloud-drives-sync/internal/database"
+	"cloud-drives-sync/internal/google"
+	"cloud-drives-sync/internal/logger"
+	"cloud-drives-sync/internal/microsoft"
+	"cloud-drives-sync/internal/model"
+
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/auth"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/config"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/crypto"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/database"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/google"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/logger"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/microsoft"
-	"github.com/sujipallapothu/go-sqlcipher/v4/cloud-drives-sync/internal/model"
 	"golang.org/x/oauth2"
 )
 
