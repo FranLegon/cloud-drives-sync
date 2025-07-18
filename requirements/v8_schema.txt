@@ -1,0 +1,49 @@
+cloud-drives-sync/
+├── go.mod
+├── go.sum
+├── main.go
+│
+├── cmd/
+│   ├── root.go             // Initializes cobra and the root command
+│   ├── init.go             // Implements the 'init' command
+│   ├── addAccount.go       // Implements the 'add-account' command
+│   ├── getMetadata.go      // Implements the 'get-metadata' command
+│   ├── checkForDuplicates.go // Implements the 'check-for-duplicates' command
+│   ├── removeDuplicates.go   // Implements the 'remove-duplicates' command
+│   ├── syncProviders.go    // Implements the 'sync-providers' command
+│   ├── balanceStorage.go   // Implements the 'balance-storage' command
+│   ├── freeMain.go         // Implements the 'free-main' command
+│   ├── checkTokens.go      // Implements the 'check-tokens' command
+│   └── shareWithMain.go    // Implements the 'share-with-main' command
+│
+└── internal/
+    ├── api/
+    │   └── client.go         // Defines the common CloudClient interface
+    │
+    ├── auth/
+    │   ├── oauth.go          // Handles the OAuth2 flow, token exchange, and local callback server
+    │   └── token.go          // Manages token sources and refreshes
+    │
+    ├── config/
+    │   └── config.go         // Defines config structs and handles loading/saving config.json.enc
+    │
+    ├── crypto/
+    │   └── crypto.go         // Handles Argon2id key derivation and AES-256 GCM encryption/decryption
+    │
+    ├── database/
+    │   └── database.go       // Defines the Database interface and implementation for encrypted SQLite
+    │
+    ├── google/
+    │   └── client.go         // Implements the CloudClient interface for Google Drive
+    │
+    ├── logger/
+    │   └── logger.go         // Provides a standardized logger for console output with tags
+    │
+    ├── microsoft/
+    │   └── client.go         // Implements the CloudClient interface for Microsoft Graph (OneDrive)
+    │
+    ├── model/
+    │   └── model.go          // Defines the core data structures (File, Folder, User)
+    │
+    └── task/
+        └── task_runner.go    // Contains the business logic for complex operations (sync, balance, etc.)
