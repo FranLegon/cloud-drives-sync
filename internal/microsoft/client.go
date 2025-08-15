@@ -48,7 +48,6 @@ func NewClient(ctx context.Context, ts azcore.TokenCredential, ownerEmail string
 }
 
 // getDefaultDriveId fetches and caches the ID of the user's default OneDrive.
-// This is necessary because most modern Graph API calls are scoped to a Drive ID.
 func (c *microsoftClient) getDefaultDriveId(ctx context.Context) (string, error) {
 	var err error
 	c.driveIdOnce.Do(func() {
@@ -266,7 +265,7 @@ func (c *microsoftClient) DownloadFile(fileID string) (io.ReadCloser, int64, err
 	if err != nil {
 		return nil, 0, handleGraphError(err)
 	}
-	return stream, *item.GetSize(), nil
+	return io.NopCloser(bytes.NewReader(stream)), *item.GetSize(), nil
 }
 
 func (c *microsoftClient) ExportFile(fileID, mimeType string) (io.ReadCloser, int64, error) {
@@ -361,8 +360,7 @@ func (c *microsoftClient) DeleteFile(fileID string) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.graphClient.Drives().ByDriveId(driveId).Items().ByDriveItemId(fileID).Delete(context.Background(), nil)
-	return handleGraphError(err)
+	return c.graphClient.Drives().ByDriveId(driveId).Items().ByDriveItemId(fileID).Delete(context.Background(), nil)
 }
 
 func (c *microsoftClient) Share(folderID, emailAddress string) (string, error) {
