@@ -17,8 +17,10 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	azauthentication "github.com/microsoft/kiota-authentication-azure-go"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
+	"github.com/microsoftgraph/msgraph-sdk-go/drives"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/models/odataerrors"
+	"github.com/microsoftgraph/msgraph-sdk-go/users"
 )
 
 // microsoftClient implements the api.CloudClient interface for Microsoft OneDrive.
@@ -27,6 +29,8 @@ type microsoftClient struct {
 	ownerEmail  string
 	userEmail   string
 	emailOnce   sync.Once
+	driveId     string
+	driveIdOnce sync.Once
 }
 
 // NewClient creates a new, fully functional Microsoft Graph client for OneDrive.
@@ -43,6 +47,21 @@ func NewClient(ctx context.Context, ts azcore.TokenCredential, ownerEmail string
 	return &microsoftClient{graphClient: client, ownerEmail: ownerEmail}, nil
 }
 
+// getDefaultDriveId fetches and caches the ID of the user's default OneDrive.
+// This is necessary because most modern Graph API calls are scoped to a Drive ID.
+func (c *microsoftClient) getDefaultDriveId(ctx context.Context) (string, error) {
+	var err error
+	c.driveIdOnce.Do(func() {
+		drive, getErr := c.graphClient.Me().Drive().Get(ctx, nil)
+		if getErr != nil {
+			err = handleGraphError(getErr)
+			return
+		}
+		c.driveId = *drive.GetId()
+	})
+	return c.driveId, err
+}
+
 func (c *microsoftClient) GetProviderName() string {
 	return "Microsoft"
 }
@@ -50,10 +69,10 @@ func (c *microsoftClient) GetProviderName() string {
 func (c *microsoftClient) GetUserEmail() (string, error) {
 	var err error
 	c.emailOnce.Do(func() {
-		requestParameters := &msgraphsdk.MeRequestBuilderGetQueryParameters{
+		requestParameters := &users.MeRequestBuilderGetQueryParameters{
 			Select: []string{"userPrincipalName", "mail"},
 		}
-		reqConf := &msgraphsdk.MeRequestBuilderGetRequestConfiguration{
+		reqConf := &users.MeRequestBuilderGetRequestConfiguration{
 			QueryParameters: requestParameters,
 		}
 		user, getErr := c.graphClient.Me().Get(context.Background(), reqConf)
@@ -89,14 +108,18 @@ func (c *microsoftClient) GetAbout() (*model.StorageQuota, error) {
 }
 
 func (c *microsoftClient) PreFlightCheck() (string, error) {
+	driveId, err := c.getDefaultDriveId(context.Background())
+	if err != nil {
+		return "", err
+	}
 	filter := "name eq 'synched-cloud-drives' and folder ne null"
-	requestParameters := &msgraphsdk.DrivesItemRootChildrenRequestBuilderGetQueryParameters{
+	requestParameters := &drives.ItemRootChildrenRequestBuilderGetQueryParameters{
 		Filter: &filter,
 	}
-	reqConf := &msgraphsdk.DrivesItemRootChildrenRequestBuilderGetRequestConfiguration{
+	reqConf := &drives.ItemRootChildrenRequestBuilderGetRequestConfiguration{
 		QueryParameters: requestParameters,
 	}
-	res, err := c.graphClient.Me().Drive().Root().Children().Get(context.Background(), reqConf)
+	res, err := c.graphClient.Drives().ByDriveId(driveId).Root().Children().Get(context.Background(), reqConf)
 	if err != nil {
 		return "", handleGraphError(err)
 	}
@@ -111,13 +134,17 @@ func (c *microsoftClient) PreFlightCheck() (string, error) {
 }
 
 func (c *microsoftClient) CreateRootSyncFolder() (string, error) {
+	driveId, err := c.getDefaultDriveId(context.Background())
+	if err != nil {
+		return "", err
+	}
 	folder := models.NewDriveItem()
 	name := "synched-cloud-drives"
 	folder.SetName(&name)
 	folder.SetFolder(models.NewFolder())
 	conflictBehavior := "fail"
 	folder.SetAdditionalData(map[string]interface{}{"@microsoft.graph.conflictBehavior": &conflictBehavior})
-	created, err := c.graphClient.Me().Drive().Root().Children().Post(context.Background(), folder, nil)
+	created, err := c.graphClient.Drives().ByDriveId(driveId).Root().Children().Post(context.Background(), folder, nil)
 	if err != nil {
 		return "", handleGraphError(err)
 	}
@@ -125,13 +152,17 @@ func (c *microsoftClient) CreateRootSyncFolder() (string, error) {
 }
 
 func (c *microsoftClient) listChildren(itemID string, parentPath string, folderCallback func(model.Folder) error, fileCallback func(model.File) error) error {
-	requestParameters := &msgraphsdk.DrivesItemItemsItemChildrenRequestBuilderGetQueryParameters{
+	driveId, err := c.getDefaultDriveId(context.Background())
+	if err != nil {
+		return err
+	}
+	requestParameters := &drives.ItemItemsItemChildrenRequestBuilderGetQueryParameters{
 		Select: []string{"id", "name", "size", "folder", "file", "parentReference", "createdDateTime", "lastModifiedDateTime", "hashes"},
 	}
-	reqConf := &msgraphsdk.DrivesItemItemsItemChildrenRequestBuilderGetRequestConfiguration{
+	reqConf := &drives.ItemItemsItemChildrenRequestBuilderGetRequestConfiguration{
 		QueryParameters: requestParameters,
 	}
-	pages, err := c.graphClient.Me().Drive().Items().ByDriveItemId(itemID).Children().Get(context.Background(), reqConf)
+	pages, err := c.graphClient.Drives().ByDriveId(driveId).Items().ByDriveItemId(itemID).Children().Get(context.Background(), reqConf)
 	if err != nil {
 		return handleGraphError(err)
 	}
@@ -198,13 +229,17 @@ func (c *microsoftClient) ListFiles(folderID, parentPath string, callback func(m
 }
 
 func (c *microsoftClient) CreateFolder(parentFolderID, name string) (*model.Folder, error) {
+	driveId, err := c.getDefaultDriveId(context.Background())
+	if err != nil {
+		return nil, err
+	}
 	folder := models.NewDriveItem()
 	folder.SetName(&name)
 	folder.SetFolder(models.NewFolder())
 	conflictBehavior := "rename"
 	folder.SetAdditionalData(map[string]interface{}{"@microsoft.graph.conflictBehavior": &conflictBehavior})
 
-	created, err := c.graphClient.Me().Drive().Items().ByDriveItemId(parentFolderID).Children().Post(context.Background(), folder, nil)
+	created, err := c.graphClient.Drives().ByDriveId(driveId).Items().ByDriveItemId(parentFolderID).Children().Post(context.Background(), folder, nil)
 	if err != nil {
 		return nil, handleGraphError(err)
 	}
@@ -219,11 +254,15 @@ func (c *microsoftClient) CreateFolder(parentFolderID, name string) (*model.Fold
 }
 
 func (c *microsoftClient) DownloadFile(fileID string) (io.ReadCloser, int64, error) {
-	item, err := c.graphClient.Me().Drive().Items().ByDriveItemId(fileID).Get(context.Background(), nil)
+	driveId, err := c.getDefaultDriveId(context.Background())
+	if err != nil {
+		return nil, 0, err
+	}
+	item, err := c.graphClient.Drives().ByDriveId(driveId).Items().ByDriveItemId(fileID).Get(context.Background(), nil)
 	if err != nil {
 		return nil, 0, handleGraphError(err)
 	}
-	stream, err := c.graphClient.Me().Drive().Items().ByDriveItemId(fileID).Content().Get(context.Background(), nil)
+	stream, err := c.graphClient.Drives().ByDriveId(driveId).Items().ByDriveItemId(fileID).Content().Get(context.Background(), nil)
 	if err != nil {
 		return nil, 0, handleGraphError(err)
 	}
@@ -238,12 +277,15 @@ func (c *microsoftClient) UploadFile(parentFolderID, name string, content io.Rea
 	if size > 4*1024*1024 {
 		return c.resumableUpload(parentFolderID, name, content, size)
 	}
+	driveId, err := c.getDefaultDriveId(context.Background())
+	if err != nil {
+		return nil, err
+	}
 	data, err := io.ReadAll(content)
 	if err != nil {
 		return nil, err
 	}
-	// Note: ItemWithPath is used to upload by filename.
-	item, err := c.graphClient.Me().Drive().Items().ByDriveItemId(parentFolderID).ItemWithPath(name).Content().Put(context.Background(), data, nil)
+	item, err := c.graphClient.Drives().ByDriveId(driveId).Items().ByDriveItemId(parentFolderID).ItemWithPath(name).Content().Put(context.Background(), data, nil)
 	if err != nil {
 		return nil, handleGraphError(err)
 	}
@@ -252,6 +294,10 @@ func (c *microsoftClient) UploadFile(parentFolderID, name string, content io.Rea
 }
 
 func (c *microsoftClient) resumableUpload(parentFolderID, name string, content io.Reader, size int64) (*model.File, error) {
+	driveId, err := c.getDefaultDriveId(context.Background())
+	if err != nil {
+		return nil, err
+	}
 	uploadSessionReq := models.NewCreateUploadSessionPostRequestBody()
 	itemInfo := models.NewDriveItemUploadableProperties()
 	itemInfo.SetName(&name)
@@ -259,14 +305,13 @@ func (c *microsoftClient) resumableUpload(parentFolderID, name string, content i
 	itemInfo.SetAdditionalData(map[string]interface{}{"@microsoft.graph.conflictBehavior": &conflictBehavior})
 	uploadSessionReq.SetItem(itemInfo)
 
-	// Create the session based on the intended final path of the file.
-	session, err := c.graphClient.Me().Drive().Items().ByDriveItemId(parentFolderID).ItemWithPath(name).CreateUploadSession().Post(context.Background(), uploadSessionReq, nil)
+	session, err := c.graphClient.Drives().ByDriveId(driveId).Items().ByDriveItemId(parentFolderID).ItemWithPath(name).CreateUploadSession().Post(context.Background(), uploadSessionReq, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create upload session: %w", handleGraphError(err))
 	}
 
 	uploadURL := *session.GetUploadUrl()
-	chunkSize := 320 * 1024 * 10 // 3.2 MB chunks
+	chunkSize := 320 * 1024 * 10
 	buffer := make([]byte, chunkSize)
 	var bytesUploaded int64
 
@@ -312,11 +357,19 @@ func (c *microsoftClient) resumableUpload(parentFolderID, name string, content i
 }
 
 func (c *microsoftClient) DeleteFile(fileID string) error {
-	_, err := c.graphClient.Me().Drive().Items().ByDriveItemId(fileID).Delete(context.Background(), nil)
+	driveId, err := c.getDefaultDriveId(context.Background())
+	if err != nil {
+		return err
+	}
+	_, err = c.graphClient.Drives().ByDriveId(driveId).Items().ByDriveItemId(fileID).Delete(context.Background(), nil)
 	return handleGraphError(err)
 }
 
 func (c *microsoftClient) Share(folderID, emailAddress string) (string, error) {
+	driveId, err := c.getDefaultDriveId(context.Background())
+	if err != nil {
+		return "", err
+	}
 	req := models.NewInvitePostRequestBody()
 	sendInvite := false
 	requireSignin := true
@@ -327,7 +380,7 @@ func (c *microsoftClient) Share(folderID, emailAddress string) (string, error) {
 	recipient.SetEmail(&emailAddress)
 	req.SetRecipients([]models.DriveRecipientable{recipient})
 
-	perms, err := c.graphClient.Me().Drive().Items().ByDriveItemId(folderID).Invite().Post(context.Background(), req, nil)
+	perms, err := c.graphClient.Drives().ByDriveId(driveId).Items().ByDriveItemId(folderID).Invite().Post(context.Background(), req, nil)
 	if err != nil {
 		return "", handleGraphError(err)
 	}
@@ -338,9 +391,13 @@ func (c *microsoftClient) Share(folderID, emailAddress string) (string, error) {
 }
 
 func (c *microsoftClient) CheckShare(folderID, permissionID string) (bool, error) {
-	_, err := c.graphClient.Me().Drive().Items().ByDriveItemId(folderID).Permissions().ByPermissionId(permissionID).Get(context.Background(), nil)
+	driveId, err := c.getDefaultDriveId(context.Background())
 	if err != nil {
-		if odataErr, ok := err.(*odataerrors.ODataError); ok && odataErr.GetMainError() != nil && odataErr.GetMainError().GetCode() != nil && *odataErr.GetMainError().GetCode() == "itemNotFound" {
+		return false, err
+	}
+	_, err = c.graphClient.Drives().ByDriveId(driveId).Items().ByDriveItemId(folderID).Permissions().ByPermissionId(permissionID).Get(context.Background(), nil)
+	if err != nil {
+		if odataErr, ok := err.(*odataerrors.ODataError); ok && odataErr.GetError() != nil && odataErr.GetError().GetCode() != nil && *odataErr.GetError().GetCode() == "itemNotFound" {
 			return false, nil
 		}
 		return false, handleGraphError(err)
@@ -353,11 +410,15 @@ func (c *microsoftClient) TransferOwnership(fileID, emailAddress string) (bool, 
 }
 
 func (c *microsoftClient) MoveFile(fileID, currentParentID, newParentFolderID string) error {
+	driveId, err := c.getDefaultDriveId(context.Background())
+	if err != nil {
+		return err
+	}
 	req := models.NewDriveItem()
 	parentRef := models.NewItemReference()
 	parentRef.SetId(&newParentFolderID)
 	req.SetParentReference(parentRef)
-	_, err := c.graphClient.Me().Drive().Items().ByDriveItemId(fileID).Patch(context.Background(), req, nil)
+	_, err = c.graphClient.Drives().ByDriveId(driveId).Items().ByDriveItemId(fileID).Patch(context.Background(), req, nil)
 	return handleGraphError(err)
 }
 
@@ -367,14 +428,12 @@ func handleGraphError(err error) error {
 	}
 	if odataErr, ok := err.(*odataerrors.ODataError); ok {
 		code, message := "unknown", "no message"
-		// *** FIX IS HERE ***
-		// Correct way to access error details in modern SDK
-		if odataErr.GetMainError() != nil {
-			if odataErr.GetMainError().GetCode() != nil {
-				code = *odataErr.GetMainError().GetCode()
+		if odataErr.GetError() != nil {
+			if odataErr.GetError().GetCode() != nil {
+				code = *odataErr.GetError().GetCode()
 			}
-			if odataErr.GetMainError().GetMessage() != nil {
-				message = *odataErr.GetMainError().GetMessage()
+			if odataErr.GetError().GetMessage() != nil {
+				message = *odataErr.GetError().GetMessage()
 			}
 		}
 

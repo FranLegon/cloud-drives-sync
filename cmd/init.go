@@ -47,7 +47,6 @@ func runInit(cmd *cobra.Command, args []string) {
 		logger.Error(err, "Failed to save configuration")
 	}
 
-	// Create/connect to the database to ensure it's set up.
 	db, err := database.Connect(password)
 	if err != nil {
 		logger.Error(err, "Failed to create or connect to the encrypted database")
@@ -126,7 +125,6 @@ func addMainAccount(cfg *config.Config, password string) {
 		logger.Error(err, "Could not verify new account's email")
 	}
 
-	// Check if this user already exists
 	for _, u := range cfg.Users {
 		if u.Email == email {
 			logger.Error(nil, "Account %s is already configured. Cannot add duplicate.", email)
@@ -143,8 +141,7 @@ func addMainAccount(cfg *config.Config, password string) {
 
 	logger.Info("Successfully authorized %s. Now creating the 'synched-cloud-drives' folder...", email)
 
-	// Create a temporary client to set up the root folder.
-	tempClient, err := createTempClient(provider, cfg, newUser)
+	tempClient, err := createClient(provider, cfg, newUser)
 	if err != nil {
 		logger.Error(err, "Failed to create temporary client")
 	}
