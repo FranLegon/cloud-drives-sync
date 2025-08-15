@@ -1,119 +1,118 @@
 package config
 
 import (
-	"errors"
-	"fmt"
-	"os"
-
-	"github.com/manifoldco/promptui"
-
 	"cloud-drives-sync/internal/crypto"
 	"cloud-drives-sync/internal/model"
+	"encoding/json"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 )
 
 const (
-	// configFile is the name of the encrypted configuration file.
-	configFile = "config.json.enc"
+	// ConfigFile is the name of the encrypted configuration file.
+	ConfigFile = "config.json.enc"
+	// SaltFile is the name of the file storing the salt for key derivation.
+	SaltFile = "config.salt"
 )
 
-// AppConfig defines the structure for all configuration data, including client
-// credentials and user accounts. It's the structure that gets serialized to
-// and from the encrypted config file.
-type AppConfig struct {
+// Config holds the application's entire configuration, which is serialized
+// to JSON before being encrypted and saved to disk.
+type Config struct {
 	GoogleClient    ClientCredentials `json:"google_client"`
 	MicrosoftClient ClientCredentials `json:"microsoft_client"`
 	Users           []model.User      `json:"users"`
 }
 
-// ClientCredentials holds the OAuth 2.0 client ID and secret for a cloud provider's API.
+// ClientCredentials holds the OAuth client ID and secret for a cloud provider.
 type ClientCredentials struct {
 	ID     string `json:"id"`
 	Secret string `json:"secret"`
 }
 
-// LoadConfig decrypts and loads the application configuration from `config.json.enc`.
-// It requires the user's master password to derive the decryption key.
-func LoadConfig(masterPassword string) (*AppConfig, error) {
-	salt, err := crypto.GetSalt()
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, errors.New("salt file not found. please run the 'init' command first")
-		}
-		return nil, fmt.Errorf("failed to read salt file: %w", err)
-	}
-
-	key := crypto.DeriveKey(masterPassword, salt)
-
-	ciphertext, err := os.ReadFile(configFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, errors.New("config file not found. please run the 'init' command first")
-		}
-		return nil, fmt.Errorf("failed to read config file: %w", err)
-	}
-
-	var cfg AppConfig
-	if err := crypto.Decrypt(key, ciphertext, &cfg); err != nil {
-		return nil, errors.New("failed to decrypt config: master password may be incorrect")
-	}
-
-	return &cfg, nil
-}
-
-// SaveConfig encrypts the provided AppConfig structure and saves it to `config.json.enc`.
-// It requires the user's master password to derive the encryption key.
-func SaveConfig(masterPassword string, cfg *AppConfig) error {
-	salt, err := crypto.GetSalt()
-	if err != nil {
-		return fmt.Errorf("failed to read salt before saving config: %w", err)
-	}
-
-	key := crypto.DeriveKey(masterPassword, salt)
-
-	ciphertext, err := crypto.Encrypt(key, cfg)
-	if err != nil {
-		return fmt.Errorf("failed to encrypt config for saving: %w", err)
-	}
-
-	// Write with permissions that only allow the current user to read/write.
-	return os.WriteFile(configFile, ciphertext, 0600)
-}
-
-// GetMasterPassword securely prompts the user to enter their master password
-// without echoing the characters to the terminal.
-func GetMasterPassword(confirm bool) (string, error) {
-	validate := func(input string) error {
-		if len(input) < 8 {
-			return errors.New("password must be at least 8 characters long")
-		}
-		return nil
-	}
-
-	prompt := promptui.Prompt{
-		Label:    "Enter Master Password",
-		Mask:     '*',
-		Validate: validate,
-	}
-
-	password, err := prompt.Run()
+// getConfigPath returns the absolute path to a configuration file, assuming
+// it resides in the same directory as the executable.
+func getConfigPath(filename string) (string, error) {
+	exePath, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
+	return filepath.Join(filepath.Dir(exePath), filename), nil
+}
 
-	if confirm {
-		confirmPrompt := promptui.Prompt{
-			Label:    "Confirm Master Password",
-			Mask:     '*',
-			Validate: validate,
-		}
-		confirmation, err := confirmPrompt.Run()
-		if err != nil {
-			return "", err
-		}
-		if password != confirmation {
-			return "", errors.New("passwords do not match")
+// LoadConfig finds, reads, decrypts, and unmarshals the configuration from disk.
+func LoadConfig(password string) (*Config, error) {
+	saltPath, err := getConfigPath(SaltFile)
+	if err != nil {
+		return nil, err
+	}
+	salt, err := ioutil.ReadFile(saltPath)
+	if err != nil {
+		return nil, err
+	}
+
+	configPath, err := getConfigPath(ConfigFile)
+	if err != nil {
+		return nil, err
+	}
+	encData, err := ioutil.ReadFile(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	key := crypto.DeriveKey(password, salt)
+	jsonData, err := crypto.Decrypt(encData, key)
+	if err != nil {
+		return nil, err
+	}
+
+	var config Config
+	if err := json.Unmarshal(jsonData, &config); err != nil {
+		return nil, err
+	}
+	return &config, nil
+}
+
+// SaveConfig marshals the current Config struct to JSON, encrypts it,
+// and writes it back to disk. It handles the initial creation of the salt file.
+func (c *Config) SaveConfig(password string) error {
+	saltPath, err := getConfigPath(SaltFile)
+	if err != nil {
+		return err
+	}
+
+	salt, err := ioutil.ReadFile(saltPath)
+	if err != nil {
+		// If the salt file doesn't exist, this is the first save.
+		if os.IsNotExist(err) {
+			newSalt, genErr := crypto.GenerateSalt()
+			if genErr != nil {
+				return genErr
+			}
+			if writeErr := ioutil.WriteFile(saltPath, newSalt, 0600); writeErr != nil {
+				return writeErr
+			}
+			salt = newSalt
+		} else {
+			// Any other error reading the salt is a problem.
+			return err
 		}
 	}
 
-	return password, nil
+	jsonData, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+
+	key := crypto.DeriveKey(password, salt)
+	encData, err := crypto.Encrypt(jsonData, key)
+	if err != nil {
+		return err
+	}
+
+	configPath, err := getConfigPath(ConfigFile)
+	if err != nil {
+		return err
+	}
+	return ioutil.WriteFile(configPath, encData, 0600)
 }

@@ -1,87 +1,45 @@
 package api
 
 import (
-	"context"
+	"cloud-drives-sync/internal/model"
 	"io"
-	"time"
 )
 
-// SyncFolderName is the required name for the root directory in each main
-// account that the tool is allowed to operate within.
-const SyncFolderName = "synched-cloud-drives"
-
-// FileInfo contains standardized metadata for a file retrieved from a cloud API.
-type FileInfo struct {
-	ID              string
-	Name            string
-	Size            int64
-	ParentFolderIDs []string
-	CreatedTime     time.Time
-	ModifiedTime    time.Time
-	Owner           string
-	Hash            string
-	HashAlgorithm   string            // e.g., "md5", "quickXorHash", "sha256"
-	IsProprietary   bool              // e.g., true for Google Docs, Google Sheets
-	ExportLinks     map[string]string // MimeType -> URL for proprietary files
-}
-
-// FolderInfo contains standardized metadata for a folder retrieved from a cloud API.
-type FolderInfo struct {
-	ID              string
-	Name            string
-	ParentFolderIDs []string
-	Owner           string
-}
-
-// QuotaInfo represents the storage quota for an account.
-type QuotaInfo struct {
-	TotalBytes int64
-	UsedBytes  int64
-	FreeBytes  int64
-}
-
-// CloudClient defines a universal interface for interacting with different cloud
-// storage providers. All provider-specific clients (e.g., Google, Microsoft)
-// must implement this interface.
+// CloudClient defines the common interface for interacting with any cloud storage provider.
+// This abstraction is key to making the business logic in `task_runner` provider-agnostic.
 type CloudClient interface {
-	// PreflightCheck verifies that exactly one 'synched-cloud-drives' folder exists
-	// at the root of the main account. It returns the ID of this folder.
-	PreflightCheck(ctx context.Context) (string, error)
-
-	// GetUserInfo retrieves basic information (email) about the authenticated user.
-	GetUserInfo(ctx context.Context) (string, error)
-
-	// ListAllFilesAndFolders recursively scans and returns all items within the sync folder.
-	ListAllFilesAndFolders(ctx context.Context, rootFolderID string) ([]FileInfo, []FolderInfo, error)
-
-	// CreateFolder creates a new folder within a specified parent folder.
-	CreateFolder(ctx context.Context, parentFolderID, folderName string) (*FolderInfo, error)
-
-	// UploadFile streams a file to the specified parent folder. It requires the file
-	// size for providers that use resumable uploads.
-	UploadFile(ctx context.Context, parentFolderID, fileName string, fileSize int64, content io.Reader) (*FileInfo, error)
-
-	// DownloadFile downloads a standard file's content and returns a reader stream.
-	DownloadFile(ctx context.Context, fileID string) (io.ReadCloser, error)
-
-	// ExportFile downloads a proprietary file (like a Google Doc) by exporting it to
-	// a standard format (e.g., application/pdf).
-	ExportFile(ctx context.Context, fileID, mimeType string) (io.ReadCloser, error)
-
-	// DeleteItem permanently deletes a file or folder. This action is irreversible.
-	DeleteItem(ctx context.Context, itemID string) error
-
-	// ShareFolder grants 'editor' (or equivalent) permissions to a user for a folder.
-	ShareFolder(ctx context.Context, folderID, emailAddress string) error
-
-	// GetStorageQuota returns the storage usage and total capacity for the account.
-	GetStorageQuota(ctx context.Context) (*QuotaInfo, error)
-
-	// MoveFile changes the parent of a file. This is used for moving files within
-	// the same account. Returns the new parent ID if successful.
-	MoveFile(ctx context.Context, fileID, newParentFolderID, oldParentFolderID string) error
-
-	// TransferOwnership attempts to change the owner of a file to another user.
-	// This may not be supported by all providers or account types.
-	TransferOwnership(ctx context.Context, fileID, userEmail string) (bool, error)
+	// GetProviderName returns the name of the provider (e.g., "Google").
+	GetProviderName() string
+	// GetUserEmail retrieves the primary email address of the authenticated user.
+	GetUserEmail() (string, error)
+	// GetAbout retrieves storage quota and usage information.
+	GetAbout() (*model.StorageQuota, error)
+	// PreFlightCheck verifies that the `synched-cloud-drives` folder exists and is correctly configured.
+	// It returns the folder's ID if found, or an empty string if not found. An error is returned for ambiguities.
+	PreFlightCheck() (string, error)
+	// CreateRootSyncFolder creates the `synched-cloud-drives` folder in the account's root.
+	CreateRootSyncFolder() (string, error)
+	// ListFolders recursively lists all subfolders within a given folder ID, invoking the callback for each.
+	ListFolders(folderID string, parentPath string, callback func(model.Folder) error) error
+	// ListFiles recursively lists all files within a given folder ID, invoking the callback for each.
+	ListFiles(folderID string, parentPath string, callback func(model.File) error) error
+	// CreateFolder creates a new folder within a parent folder.
+	CreateFolder(parentFolderID, name string) (*model.Folder, error)
+	// DownloadFile downloads a file's content by its ID.
+	DownloadFile(fileID string) (io.ReadCloser, int64, error)
+	// ExportFile downloads a proprietary file format (like Google Docs) as a standard type.
+	ExportFile(fileID, mimeType string) (io.ReadCloser, int64, error)
+	// UploadFile uploads a file using a streaming approach to minimize memory usage.
+	UploadFile(parentFolderID, name string, content io.Reader, size int64) (*model.File, error)
+	// DeleteFile moves a file to the provider's trash or recycle bin.
+	DeleteFile(fileID string) error
+	// Share grants "editor" (write) permissions to a user for a specific folder.
+	Share(folderID, emailAddress string) (string, error)
+	// CheckShare verifies if a specific permission ID is still valid for a folder.
+	CheckShare(folderID, permissionID string) (bool, error)
+	// TransferOwnership attempts a native API call to transfer file ownership to another user.
+	// Returns true on success, false if the operation is unsupported or fails.
+	TransferOwnership(fileID, emailAddress string) (bool, error)
+	// MoveFile moves a file from one parent folder to another.
+	MoveFile(fileID, currentParentID, newParentFolderID string) error
 }
