@@ -4,129 +4,127 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os/exec"
+	"runtime"
 	"time"
 
 	"cloud-drives-sync/internal/config"
 	"cloud-drives-sync/internal/logger"
+
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+	"golang.org/x/oauth2/microsoft"
 )
 
 const (
-	// redirectURL is the callback endpoint for the OAuth 2.0 flow. It must be
-	// registered in the Google Cloud and Azure application settings.
 	redirectURL = "http://localhost:8080/oauth/callback"
 )
 
-// GetGoogleOAuthConfig builds the OAuth 2.0 configuration for Google Drive. [3, 4]
-func GetGoogleOAuthConfig(cfg *config.AppConfig) *oauth2.Config {
-	return &oauth2.Config{
-		ClientID:     cfg.GoogleClient.ID,
-		ClientSecret: cfg.GoogleClient.Secret,
-		RedirectURL:  redirectURL,
-		// Scopes are requested as per the requirements document.
-		Scopes: []string{
-			"https://www.googleapis.com/auth/drive",
-			"https://www.googleapis.com/auth/userinfo.email",
-		},
-		Endpoint: google.Endpoint,
+// StartOAuthFlow initiates the full OAuth 2.0 authorization code flow for a given provider.
+// It starts a local web server to receive the callback, opens the user's browser,
+// waits for the authorization code, and exchanges it for a refresh token.
+func StartOAuthFlow(provider string, cfg *config.Config) (string, error) {
+	var oauthCfg *oauth2.Config
+
+	switch provider {
+	case "Google":
+		oauthCfg = &oauth2.Config{
+			ClientID:     cfg.GoogleClient.ID,
+			ClientSecret: cfg.GoogleClient.Secret,
+			RedirectURL:  redirectURL,
+			Endpoint:     google.Endpoint,
+			Scopes: []string{
+				"https://www.googleapis.com/auth/drive",
+				"https://www.googleapis.com/auth/userinfo.email",
+			},
+		}
+	case "Microsoft":
+		oauthCfg = &oauth2.Config{
+			ClientID:     cfg.MicrosoftClient.ID,
+			ClientSecret: cfg.MicrosoftClient.Secret,
+			RedirectURL:  redirectURL,
+			Endpoint:     microsoft.LiveConnectEndpoint,
+			Scopes: []string{
+				"files.readwrite.all",
+				"user.read",
+				"offline_access", // This scope is required to get a refresh token.
+			},
+		}
+	default:
+		return "", fmt.Errorf("unknown provider for OAuth flow: %s", provider)
 	}
-}
 
-// GetMicrosoftOAuthConfig builds the OAuth 2.0 configuration for Microsoft Graph.
-func GetMicrosoftOAuthConfig(cfg *config.AppConfig) *oauth2.Config {
-	// The 'common' endpoint supports both personal and organizational accounts.
-	return &oauth2.Config{
-		ClientID:     cfg.MicrosoftClient.ID,
-		ClientSecret: cfg.MicrosoftClient.Secret,
-		RedirectURL:  redirectURL,
-		// Scopes are requested as per the requirements document.
-		Scopes: []string{
-			"files.readwrite.all",
-			"user.read",
-			"offline_access", // This scope is required to get a refresh token.
-		},
-		Endpoint: oauth2.Endpoint{
-			AuthURL:  "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
-			TokenURL: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-		},
-	}
-}
+	// `ApprovalForce` ensures a refresh token is issued even if the user has previously consented.
+	authURL := oauthCfg.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
 
-// GetTokenFromWeb orchestrates the three-legged OAuth 2.0 flow by starting a
-// local web server to capture the authorization code from the provider's redirect.
-func GetTokenFromWeb(ctx context.Context, conf *oauth2.Config) (*oauth2.Token, error) {
-	// Generate the authorization URL that the user must visit.
-	// AccessTypeOffline is crucial for obtaining a refresh token.
-	authURL := conf.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-
-	logger.Info("A browser window should open. If not, please manually open this URL:")
-	logger.Info(authURL)
-
-	// Channel to receive the authorization code from the HTTP handler.
 	codeChan := make(chan string)
 	errChan := make(chan error)
 
-	// Configure the local server.
-	mux := http.NewServeMux()
-	server := &http.Server{
-		Addr:    ":8080",
-		Handler: mux,
-	}
-
-	// The handler for the callback URL.
-	mux.HandleFunc("/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
-		// Check for an error from the provider.
-		if errMsg := r.URL.Query().Get("error"); errMsg != "" {
-			errDesc := r.URL.Query().Get("error_description")
-			http.Error(w, fmt.Sprintf("OAuth Error: %s - %s", errMsg, errDesc), http.StatusBadRequest)
-			errChan <- fmt.Errorf("authentication failed: %s", errDesc)
-			return
-		}
-
-		// Extract the authorization code.
+	server := &http.Server{Addr: ":8080"}
+	http.HandleFunc("/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		if code == "" {
-			http.Error(w, "Error: Did not receive authorization code.", http.StatusBadRequest)
-			errChan <- errors.New("did not receive authorization code from provider")
+			msg := "Authorization code not found in callback URL."
+			fmt.Fprintln(w, "Error: "+msg+". Please try again.")
+			errChan <- fmt.Errorf(msg)
 			return
 		}
-
-		// Send a success message to the user's browser.
-		fmt.Fprintln(w, "Authentication successful! You can close this browser tab now.")
+		fmt.Fprintln(w, "Authentication successful! You can close this browser window and return to the terminal.")
 		codeChan <- code
 	})
 
-	// Start the server in a separate goroutine.
 	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errChan <- fmt.Errorf("failed to start local server for oauth callback: %w", err)
+		// This server will block until it's shut down.
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			errChan <- fmt.Errorf("callback server error: %w", err)
 		}
 	}()
+	// Gracefully shut down the server when the function exits.
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		server.Shutdown(ctx)
+	}()
 
-	// Wait for the code or an error.
-	var code string
+	logger.Info("Your browser should open for authentication.")
+	logger.Info("If it doesn't, please open this URL:\n%s", authURL)
+	time.Sleep(1 * time.Second) // Give the server a moment to start up.
+	if err := openBrowser(authURL); err != nil {
+		logger.Warn("auth", err, "could not open browser automatically")
+	}
+
 	select {
-	case code = <-codeChan:
-		logger.Info("Authorization code received successfully.")
+	case code := <-codeChan:
+		// Exchange the authorization code for a token set (which includes the refresh token).
+		token, err := oauthCfg.Exchange(context.Background(), code)
+		if err != nil {
+			return "", fmt.Errorf("failed to exchange authorization code for token: %w", err)
+		}
+		if token.RefreshToken == "" {
+			return "", fmt.Errorf("a refresh token was not returned. Please ensure you are requesting 'offline_access' and the Azure App Registration is configured correctly")
+		}
+		return token.RefreshToken, nil
 	case err := <-errChan:
-		return nil, err
-	case <-time.After(5 * time.Minute): // Timeout for the whole process.
-		return nil, errors.New("timed out waiting for oauth callback")
+		return "", err
+	case <-time.After(3 * time.Minute): // Timeout for the whole process.
+		return "", fmt.Errorf("authentication timed out after 3 minutes")
 	}
+}
 
-	// Shutdown the server gracefully now that we have the code.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		logger.Error("Failed to gracefully shut down callback server: %v", err)
+// openBrowser attempts to open a URL in the user's default web browser.
+func openBrowser(url string) error {
+	var cmd string
+	var args []string
+	switch runtime.GOOS {
+	case "windows":
+		cmd = "cmd"
+		args = []string{"/c", "start"}
+	case "darwin":
+		cmd = "open"
+	default: // "linux", "freebsd", "openbsd", "netbsd"
+		cmd = "xdg-open"
 	}
-
-	// Exchange the authorization code for an access and refresh token.
-	token, err := conf.Exchange(ctx, code)
-	if err != nil {
-		return nil, fmt.Errorf("failed to exchange authorization code for token: %w", err)
-	}
-
-	return token, nil
-}```
+	args = append(args, url)
+	// Start the command but don't wait for it to complete.
+	return exec.Command(cmd, args...).Start()
+}

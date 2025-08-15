@@ -1,9 +1,12 @@
 package task
 
 import (
-	"context"
+	"cloud-drives-sync/internal/api"
+	"cloud-drives-sync/internal/config"
+	"cloud-drives-sync/internal/database"
+	"cloud-drives-sync/internal/logger"
+	"cloud-drives-sync/internal/model"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -12,781 +15,602 @@ import (
 	"sync"
 	"time"
 
-	"cloud-drives-sync/internal/api"
-	"cloud-drives-sync/internal/auth"
-	"cloud-drives-sync/internal/config"
-	"cloud-drives-sync/internal/database"
-	"cloud-drives-sync/internal/google"
-	"cloud-drives-sync/internal/logger"
-	"cloud-drives-sync/internal/microsoft"
-	"cloud-drives-sync/internal/model"
-
-	"golang.org/x/oauth2"
+	"github.com/manifoldco/promptui"
 )
 
-// TaskRunner orchestrates all complex operations by coordinating the interactions
-// between configuration, the database, and the cloud provider clients.
+// TaskRunner orchestrates all complex, multi-step operations.
 type TaskRunner struct {
-	MasterPassword string
-	Config         *config.AppConfig
-	DB             database.DB
-	Clients        map[string]api.CloudClient // Keyed by user email
-	IsSafeRun      bool
+	Config    *config.Config
+	DB        *database.DB
+	Clients   map[string]api.CloudClient // map[email]client
+	IsSafeRun bool
 }
 
-// NewTaskRunner creates and initializes a fully operational TaskRunner. It loads the config,
-// connects to the database, and initializes an API client for every user.
-func NewTaskRunner(masterPassword string, safeRun bool) (*TaskRunner, error) {
-	cfg, err := config.LoadConfig(masterPassword)
-	if err != nil {
-		return nil, err
-	}
-
-	db, err := database.NewDB(masterPassword)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize database: %w", err)
-	}
-
-	clients := make(map[string]api.CloudClient)
-	for _, user := range cfg.Users {
-		ctx := context.Background()
-		ts, err := auth.NewTokenSource(ctx, &user, cfg)
-		if err != nil {
-			// Don't fail completely, just log a warning. The check-tokens command can be used to fix this.
-			logger.TaggedError(user.Email, "Failed to create token source, client for this user will be unavailable: %v", err)
-			continue
-		}
-
-		var client api.CloudClient
-		if user.Provider == "Google" {
-			httpClient := oauth2.NewClient(ctx, ts)
-			client, err = google.NewClient(httpClient)
-		} else if user.Provider == "Microsoft" {
-			client, err = microsoft.NewClient(ts)
-		} else {
-			return nil, fmt.Errorf("unknown provider in config: %s", user.Provider)
-		}
-
-		if err != nil {
-			return nil, fmt.Errorf("failed to create api client for %s: %w", user.Email, err)
-		}
-		clients[user.Email] = client
-	}
-
-	return &TaskRunner{
-		MasterPassword: masterPassword,
-		Config:         cfg,
-		DB:             db,
-		Clients:        clients,
-		IsSafeRun:      safeRun,
-	}, nil
-}
-
-// runPreFlightChecks executes the pre-flight check for each main account.
-// It returns a map of provider name to its sync folder ID.
-func (tr *TaskRunner) runPreFlightChecks(ctx context.Context) (map[string]string, error) {
-	syncFolderIDs := make(map[string]string)
-	for _, user := range tr.Config.Users {
-		if user.IsMain {
-			client, ok := tr.Clients[user.Email]
-			if !ok {
-				return nil, fmt.Errorf("client for main account '%s' is unavailable. please check credentials using 'check-tokens'", user.Email)
-			}
-			folderID, err := client.PreflightCheck(ctx)
-			if err != nil {
-				return nil, err
-			}
-			syncFolderIDs[user.Provider] = folderID
-		}
-	}
-	return syncFolderIDs, nil
-}
-
-// GetMetadata scans all configured cloud accounts, processes file and folder metadata,
-// handles hashing (with fallback), and updates the local database.
-func (tr *TaskRunner) GetMetadata(ctx context.Context) error {
-	logger.Info("Starting metadata retrieval...")
-	syncFolderIDs, err := tr.runPreFlightChecks(ctx)
-	if err != nil {
-		return fmt.Errorf("pre-flight checks failed: %w", err)
-	}
-
+// GetMetadata fetches metadata for all configured main accounts and their shared content.
+func (tr *TaskRunner) GetMetadata() error {
 	var wg sync.WaitGroup
 	errChan := make(chan error, len(tr.Config.Users))
 
 	for _, user := range tr.Config.Users {
-		client, ok := tr.Clients[user.Email]
-		if !ok {
-			logger.TaggedError(user.Email, "Skipping metadata retrieval; client is unavailable.")
+		if !user.IsMain {
 			continue
 		}
-
 		wg.Add(1)
-		go func(user config.User, client api.CloudClient) {
+		go func(u model.User) {
 			defer wg.Done()
-			var rootID string
-			var ok bool
-			if user.IsMain {
-				rootID, ok = syncFolderIDs[user.Provider]
-			} else {
-				// For backup accounts, the sync folder is the one shared by the main account.
-				// We assume it's also named SyncFolderName and is at the top-level of what's visible.
-				// A more robust solution would be to find the folder shared by the main account's email.
-				// For now, we search for it by name.
-				id, err := client.PreflightCheck(ctx)
-				if err != nil {
-					errChan <- fmt.Errorf("failed pre-flight for backup account %s: %w", user.Email, err)
-					return
-				}
-				rootID, ok = id, true
-			}
-
+			client, ok := tr.Clients[u.Email]
 			if !ok {
-				errChan <- fmt.Errorf("could not determine sync folder ID for user %s", user.Email)
+				errChan <- fmt.Errorf("client not found for %s", u.Email)
 				return
 			}
-
-			logger.TaggedInfo(user.Email, "Listing all files and folders...")
-			cloudFiles, cloudFolders, err := client.ListAllFilesAndFolders(ctx, rootID)
+			logger.TaggedInfo(u.Email, "Starting metadata scan...")
+			syncFolderID, err := client.PreFlightCheck()
 			if err != nil {
-				errChan <- fmt.Errorf("failed to list items for %s: %w", user.Email, err)
+				errChan <- fmt.Errorf("[%s] pre-flight check failed: %w", u.Email, err)
 				return
 			}
-			logger.TaggedInfo(user.Email, "Found %d files and %d folders in the cloud.", len(cloudFiles), len(cloudFolders))
-
-			// Process all metadata and update DB
-			if err := tr.processAndStoreMetadata(ctx, user, client, rootID, cloudFiles, cloudFolders); err != nil {
-				errChan <- err
+			if syncFolderID == "" {
+				logger.Warn(u.Email, nil, "'synched-cloud-drives' folder not found. Run 'init' for this account to create it.")
+				return
 			}
-		}(user, client)
+			// Scan folders first to build the path map
+			if err := client.ListFolders(syncFolderID, "", tr.folderProcessor); err != nil {
+				errChan <- fmt.Errorf("[%s] folder scan failed: %w", u.Email, err)
+			}
+			// Then scan files
+			if err := client.ListFiles(syncFolderID, "", tr.fileProcessor); err != nil {
+				errChan <- fmt.Errorf("[%s] file scan failed: %w", u.Email, err)
+			}
+			logger.TaggedInfo(u.Email, "Metadata scan complete.")
+		}(user)
 	}
-
 	wg.Wait()
 	close(errChan)
 
-	// Check for any errors from goroutines
-	for e := range errChan {
-		if e != nil {
-			return e // Return first error encountered
-		}
-	}
-
-	logger.Info("Metadata retrieval and database update complete.")
-	return nil
-}
-
-// processAndStoreMetadata is a helper to process items from a single account and update the database.
-func (tr *TaskRunner) processAndStoreMetadata(ctx context.Context, user config.User, client api.CloudClient, rootID string, cloudFiles []api.FileInfo, cloudFolders []api.FolderInfo) error {
-	folderMap := make(map[string]api.FolderInfo)
-	for _, f := range cloudFolders {
-		folderMap[f.ID] = f
-	}
-
-	pathMap, err := tr.buildPathMap(rootID, folderMap)
-	if err != nil {
-		return fmt.Errorf("could not build path map for %s: %w", user.Email, err)
-	}
-
-	// Update folders in DB
-	for id, path := range pathMap {
-		cf := folderMap[id]
-		folder := model.Folder{
-			FolderID: id, Provider: user.Provider, OwnerEmail: user.Email,
-			FolderName: cf.Name, ParentFolderID: cf.ParentFolderIDs[0], Path: path,
-			NormalizedPath: strings.ToLower(filepath.ToSlash(path)), LastSynced: time.Now().UTC(),
-		}
-		if err := tr.DB.UpsertFolder(&folder); err != nil {
-			return fmt.Errorf("db error upserting folder %s: %w", folder.FolderName, err)
-		}
-	}
-	// And so on for files... this is identical to the last correct version.
-	return nil
-}
-
-// ensureFileHash handles the hashing fallback for proprietary file types.
-func (tr *TaskRunner) ensureFileHash(ctx context.Context, userEmail string, client api.CloudClient, file *api.FileInfo) error {
-	if file.IsProprietary {
-		logger.TaggedInfo(userEmail, "Downloading proprietary file '%s' for local hashing...", file.Name)
-
-		// For Google Docs/Sheets, export as PDF.
-		exportMime := "application/pdf"
-
-		rc, err := client.ExportFile(ctx, file.ID, exportMime)
+	// Return the first error encountered from any goroutine.
+	for err := range errChan {
 		if err != nil {
-			return fmt.Errorf("failed to export '%s': %w", file.Name, err)
+			return err
 		}
-		defer rc.Close()
+	}
+	return nil
+}
+
+// folderProcessor is the callback for ListFolders.
+func (tr *TaskRunner) folderProcessor(folder model.Folder) error {
+	return tr.DB.UpsertFolder(folder)
+}
+
+// fileProcessor is the callback for ListFiles.
+func (tr *TaskRunner) fileProcessor(file model.File) error {
+	if file.HashAlgorithm == "SHA256" && file.FileHash == "" {
+		client := tr.Clients[file.OwnerEmail]
+		logger.TaggedInfo(file.OwnerEmail, "Calculating SHA256 for '%s'...", file.FileName)
+
+		body, _, err := client.DownloadFile(file.FileID)
+		if err != nil {
+			logger.Warn(file.OwnerEmail, err, "could not download file for hashing")
+			return nil // Skip this file but continue the scan.
+		}
+		defer body.Close()
 
 		h := sha256.New()
-		if _, err := io.Copy(h, rc); err != nil {
-			return fmt.Errorf("failed to hash exported file '%s': %w", file.Name, err)
+		if _, err := io.Copy(h, body); err != nil {
+			logger.Warn(file.OwnerEmail, err, "could not hash file content")
+			return nil
 		}
-		file.Hash = fmt.Sprintf("%x", h.Sum(nil))
-		file.HashAlgorithm = "SHA256"
-		logger.TaggedInfo(userEmail, "Successfully hashed '%s' with SHA256.", file.Name)
+		file.FileHash = fmt.Sprintf("%x", h.Sum(nil))
+	}
+	return tr.DB.UpsertFile(file)
+}
+
+// CheckForDuplicates finds and reports files with identical content hashes.
+func (tr *TaskRunner) CheckForDuplicates() (map[string][]model.File, error) {
+	logger.Info("Updating local metadata before checking for duplicates...")
+	if err := tr.GetMetadata(); err != nil {
+		return nil, fmt.Errorf("metadata update failed: %w", err)
+	}
+	logger.Info("Querying database for duplicates...")
+	duplicates, err := tr.DB.FindDuplicates()
+	if err != nil {
+		return nil, fmt.Errorf("database query failed: %w", err)
+	}
+
+	if len(duplicates) == 0 {
+		logger.Info("No duplicate files found.")
+		return nil, nil
+	}
+
+	logger.Info("Found duplicate files:")
+	for hashKey, files := range duplicates {
+		provider := files[0].Provider
+		hash := strings.Split(hashKey, ":")[1]
+		fmt.Printf("\n--- Duplicates in %s for Hash: %s ---\n", provider, hash)
+		for _, file := range files {
+			fmt.Printf("  - Path: %s\n    Owner: %s, Created: %s, Size: %.2f KB\n", file.Path, file.OwnerEmail, file.CreatedOn.Format(time.RFC822), float64(file.FileSize)/1024)
+		}
+	}
+	return duplicates, nil
+}
+
+// RemoveDuplicatesUnsafe automatically deletes all but the oldest copy of a file.
+func (tr *TaskRunner) RemoveDuplicatesUnsafe() error {
+	duplicates, err := tr.CheckForDuplicates()
+	if err != nil || duplicates == nil {
+		return err // Error or no duplicates found
+	}
+
+	for _, files := range duplicates {
+		toKeep := files[0]
+		toDelete := files[1:]
+
+		logger.Info("Keeping oldest file: '%s' (Created: %s)", toKeep.Path, toKeep.CreatedOn.Format(time.RFC822))
+
+		for _, fileToDelete := range toDelete {
+			if tr.IsSafeRun {
+				logger.DryRun(fileToDelete.OwnerEmail, "DELETE file '%s' (ID: %s)", fileToDelete.Path, fileToDelete.FileID)
+				continue
+			}
+			client := tr.Clients[fileToDelete.OwnerEmail]
+			logger.TaggedInfo(fileToDelete.OwnerEmail, "Deleting duplicate '%s'", fileToDelete.Path)
+			if err := client.DeleteFile(fileToDelete.FileID); err != nil {
+				logger.Warn(fileToDelete.OwnerEmail, err, "failed to delete file")
+			} else {
+				tr.DB.DeleteFile(fileToDelete.FileID, fileToDelete.Provider)
+			}
+		}
 	}
 	return nil
 }
 
-// CheckForDuplicates finds and reports files with identical content hashes within each provider.
-func (tr *TaskRunner) CheckForDuplicates(ctx context.Context) error {
-	logger.Info("Updating metadata before checking for duplicates...")
-	if err := tr.GetMetadata(ctx); err != nil {
-		return err
+// CheckTokens verifies all stored refresh tokens are valid by making a simple API call.
+func (tr *TaskRunner) CheckTokens() {
+	var wg sync.WaitGroup
+	for email, client := range tr.Clients {
+		wg.Add(1)
+		go func(e string, c api.CloudClient) {
+			defer wg.Done()
+			if _, err := c.GetAbout(); err != nil {
+				logger.Warn(e, err, "token check FAILED. Re-authentication may be required.")
+			} else {
+				logger.TaggedInfo(e, "Token is valid.")
+			}
+		}(email, client)
 	}
-
-	logger.Info("Querying database for duplicate files...")
-	for _, provider := range []string{"Google", "Microsoft"} {
-		logger.Info("--- Checking Provider: %s ---", provider)
-		hashes, err := tr.DB.GetDuplicateHashes(provider)
-		if err != nil {
-			return fmt.Errorf("failed to get duplicate hashes for %s: %w", provider, err)
-		}
-
-		if len(hashes) == 0 {
-			logger.Info("No duplicate files found for this provider.")
-			continue
-		}
-
-		for hash, count := range hashes {
-			// We need to query by hash and algo. Since we don't know the algo here, we try both.
-			files, err := tr.DB.GetFilesByHash(provider, hash, "MD5")
-			if err != nil {
-				return err
-			}
-			qxorFiles, err := tr.DB.GetFilesByHash(provider, hash, "quickXorHash")
-			if err != nil {
-				return err
-			}
-			shaFiles, err := tr.DB.GetFilesByHash(provider, hash, "SHA256")
-			if err != nil {
-				return err
-			}
-			files = append(files, qxorFiles...)
-			files = append(files, shaFiles...)
-
-			if len(files) > 1 {
-				fmt.Printf("\nFound %d duplicates for hash: %s\n", len(files), hash)
-				for _, file := range files {
-					fmt.Printf("  - FileName: %s (ID: %s, Owner: %s, Size: %d)\n", file.FileName, file.FileID, file.OwnerEmail, file.FileSize)
-				}
-			}
-		}
-	}
-	return nil
+	wg.Wait()
 }
 
-// SyncProviders ensures file content is identical between the main Google and Microsoft accounts.
-func (tr *TaskRunner) SyncProviders(ctx context.Context) error {
-	logger.Info("Starting provider synchronization...")
-	mainAccounts := make(map[string]config.User)
+// SyncProviders mirrors content between the main Google and Microsoft accounts.
+func (tr *TaskRunner) SyncProviders() error {
+	logger.Info("Starting provider sync. This may take a while...")
+	logger.Info("Step 1: Ensuring local metadata is up-to-date.")
+	if err := tr.GetMetadata(); err != nil {
+		return fmt.Errorf("metadata update failed: %w", err)
+	}
+
+	var googleMain, msMain model.User
+	var googleClient, msClient api.CloudClient
 	for _, u := range tr.Config.Users {
 		if u.IsMain {
-			mainAccounts[u.Provider] = u
-		}
-	}
-	googleUser, googleOK := mainAccounts["Google"]
-	msUser, msOK := mainAccounts["Microsoft"]
-	if !googleOK || !msOK {
-		return errors.New("a main account for both Google and Microsoft must be configured to sync providers")
-	}
-
-	logger.Info("Step 1: Updating local metadata cache...")
-	if err := tr.GetMetadata(ctx); err != nil {
-		return err
-	}
-
-	logger.Info("Step 2: Comparing file sets between providers...")
-	googleFiles, err := tr.DB.GetAllFilesByProvider("Google")
-	if err != nil {
-		return err
-	}
-	msFiles, err := tr.DB.GetAllFilesByProvider("Microsoft")
-	if err != nil {
-		return err
-	}
-
-	googleFileMap := createFileMap(googleFiles)
-	msFileMap := createFileMap(msFiles)
-
-	// Sync from Google to Microsoft
-	logger.Info("--- Syncing from Google to Microsoft ---")
-	if err := tr.syncDirection(ctx, "Google", "Microsoft", googleUser, msUser, googleFileMap, msFileMap); err != nil {
-		return err
-	}
-
-	// Sync from Microsoft to Google
-	logger.Info("--- Syncing from Microsoft to Google ---")
-	if err := tr.syncDirection(ctx, "Microsoft", "Google", msUser, googleUser, msFileMap, googleFileMap); err != nil {
-		return err
-	}
-
-	logger.Info("Provider synchronization complete.")
-	return nil
-}
-
-// BalanceStorage moves files from accounts over 95% capacity to other accounts
-// of the same provider with more free space.
-func (tr *TaskRunner) BalanceStorage(ctx context.Context) error {
-	logger.Info("Starting storage balancing...")
-	if _, err := tr.runPreFlightChecks(ctx); err != nil {
-		return err
-	}
-
-	accountsByProvider := make(map[string][]config.User)
-	for _, u := range tr.Config.Users {
-		accountsByProvider[u.Provider] = append(accountsByProvider[u.Provider], u)
-	}
-
-	for provider, accounts := range accountsByProvider {
-		logger.Info("--- Balancing Provider: %s ---", provider)
-		if len(accounts) < 2 {
-			logger.Info("Skipping, not enough accounts to balance.")
-			continue
-		}
-
-		quotas := make(map[string]*api.QuotaInfo)
-		for _, acc := range accounts {
-			client, ok := tr.Clients[acc.Email]
-			if !ok {
-				logger.TaggedError(acc.Email, "Skipping quota check, client unavailable.")
-				continue
-			}
-			quota, err := client.GetStorageQuota(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to get quota for %s: %w", acc.Email, err)
-			}
-			quotas[acc.Email] = quota
-		}
-
-		// Main balancing loop
-		for {
-			var sourceUser config.User
-			var sourceQuota *api.QuotaInfo
-
-			// Find an account over 95% full
-			for _, acc := range accounts {
-				q := quotas[acc.Email]
-				if q != nil && q.TotalBytes > 0 && (float64(q.UsedBytes)/float64(q.TotalBytes)) > 0.95 {
-					sourceUser = acc
-					sourceQuota = q
-					break
-				}
-			}
-
-			if sourceUser.Email == "" {
-				logger.Info("No accounts are over the 95%% threshold. Balancing for %s is complete.", provider)
-				break // Exit loop for this provider
-			}
-
-			logger.TaggedInfo(sourceUser.Email, "Account is at %.2f%% capacity, attempting to free space.", (float64(sourceQuota.UsedBytes)/float64(sourceQuota.TotalBytes))*100)
-
-			// Find best destination account (most free space, under 90%)
-			var destUser config.User
-			var maxFreeSpace int64 = -1
-			for _, acc := range accounts {
-				q := quotas[acc.Email]
-				if acc.Email != sourceUser.Email && q != nil && q.TotalBytes > 0 && (float64(q.UsedBytes)/float64(q.TotalBytes)) < 0.90 {
-					if q.FreeBytes > maxFreeSpace {
-						maxFreeSpace = q.FreeBytes
-						destUser = acc
-					}
-				}
-			}
-
-			if destUser.Email == "" {
-				logger.Error("Account %s is full, but no backup accounts with sufficient space are available!", sourceUser.Email)
-				break // No destination available
-			}
-
-			// Get all files owned by the source user and move the largest one
-			allFiles, err := tr.DB.GetAllFilesByProvider(provider)
-			if err != nil {
-				return err
-			}
-
-			var userFiles []model.File
-			for _, f := range allFiles {
-				if f.OwnerEmail == sourceUser.Email {
-					userFiles = append(userFiles, f)
-				}
-			}
-			sort.Slice(userFiles, func(i, j int) bool { return userFiles[i].FileSize > userFiles[j].FileSize })
-
-			if len(userFiles) == 0 {
-				logger.TaggedInfo(sourceUser.Email, "Account is full but owns no files in the sync directory.")
-				break
-			}
-
-			fileToMove := userFiles[0]
-
-			// Perform the move
-			err = tr.moveFileBetweenAccounts(ctx, fileToMove, sourceUser, destUser)
-			if err != nil {
-				logger.TaggedError(sourceUser.Email, "Failed to move file '%s': %v. Stopping balance for this user.", fileToMove.FileName, err)
-				break
-			}
-
-			// Update local quota objects to reflect the move
-			quotas[sourceUser.Email].UsedBytes -= fileToMove.FileSize
-			quotas[sourceUser.Email].FreeBytes += fileToMove.FileSize
-			quotas[destUser.Email].UsedBytes += fileToMove.FileSize
-			quotas[destUser.Email].FreeBytes -= fileToMove.FileSize
-
-			// Check if source is now below 90%
-			if (float64(quotas[sourceUser.Email].UsedBytes) / float64(quotas[sourceUser.Email].TotalBytes)) < 0.90 {
-				logger.TaggedInfo(sourceUser.Email, "Account is now below 90%%. Balance for this user is complete.")
+			if u.Provider == "Google" {
+				googleMain, googleClient = u, tr.Clients[u.Email]
+			} else if u.Provider == "Microsoft" {
+				msMain, msClient = u, tr.Clients[u.Email]
 			}
 		}
 	}
-
-	logger.Info("Storage balancing complete.")
-	return nil
-}
-
-// Close gracefully closes the database connection.
-func (tr *TaskRunner) Close() error {
-	if tr.DB != nil {
-		logger.Info("Closing database connection.")
-		return tr.DB.Close()
+	if googleClient == nil || msClient == nil {
+		return fmt.Errorf("a main account for both Google and Microsoft must be configured to run sync")
 	}
-	return nil
-}
 
-// --- Helper Functions ---
+	logger.Info("Step 2: Loading file and folder lists from database.")
+	gFiles, _ := tr.DB.GetFilesByProvider("Google")
+	mFiles, _ := tr.DB.GetFilesByProvider("Microsoft")
+	gFolders, _ := tr.DB.GetFoldersByProvider("Google")
+	mFolders, _ := tr.DB.GetFoldersByProvider("Microsoft")
 
-// syncDirection handles one-way synchronization between a source and destination provider.
-func (tr *TaskRunner) syncDirection(ctx context.Context, sourceProvider, destProvider string, sourceUser, destUser config.User, sourceMap, destMap map[string]model.File) error {
-	sourceClient := tr.Clients[sourceUser.Email]
-	destClient := tr.Clients[destUser.Email]
+	gFileMap := make(map[string]model.File)
+	for _, f := range gFiles {
+		gFileMap[f.NormalizedPath] = f
+	}
+	mFileMap := make(map[string]model.File)
+	for _, f := range mFiles {
+		mFileMap[f.NormalizedPath] = f
+	}
 
-	for path, sourceFile := range sourceMap {
-		destFile, exists := destMap[path]
+	gFolderMap := make(map[string]model.Folder)
+	for _, f := range gFolders {
+		gFolderMap[f.NormalizedPath] = f
+	}
+	mFolderMap := make(map[string]model.Folder)
+	for _, f := range mFolders {
+		mFolderMap[f.NormalizedPath] = f
+	}
 
-		// Case 1: File is missing at destination
+	// Sync logic: Google -> Microsoft
+	logger.Info("Step 3: Syncing items from Google (%s) to Microsoft (%s).", googleMain.Email, msMain.Email)
+	msSyncRootID, _ := msClient.PreFlightCheck()
+	for path := range gFolderMap {
+		if _, exists := mFolderMap[path]; !exists {
+			if _, err := tr.ensurePathExists(msClient, path, msSyncRootID, mFolderMap); err != nil {
+				logger.Warn("sync", err, "could not create folder structure on Microsoft for %s", path)
+			}
+		}
+	}
+	for path, gFile := range gFileMap {
+		mFile, exists := mFileMap[path]
 		if !exists {
-			logger.Info("'%s' is missing on %s, uploading...", sourceFile.FileName, destProvider)
-			if tr.IsSafeRun {
-				logger.TaggedInfo("DRY RUN", "Would upload '%s' to %s", sourceFile.FileName, destProvider)
-				continue
-			}
-			err := tr.transferFile(ctx, sourceFile, sourceClient, destClient)
-			if err != nil {
-				logger.Error("Failed to transfer '%s': %v", sourceFile.FileName, err)
-				continue // Continue with next file
-			}
-		} else { // Case 2: File exists, check hash
-			if sourceFile.FileHash != destFile.FileHash {
-				logger.Info("Conflict detected for '%s'. Renaming and uploading.", sourceFile.FileName)
-				if tr.IsSafeRun {
-					logger.TaggedInfo("DRY RUN", "Would upload '%s' as a conflict-renamed file to %s", sourceFile.FileName, destProvider)
-					continue
-				}
-				// Rename with suffix and transfer
-				sourceFile.FileName = addConflictSuffix(sourceFile.FileName)
-				err := tr.transferFile(ctx, sourceFile, sourceClient, destClient)
-				if err != nil {
-					logger.Error("Failed to transfer conflict file '%s': %v", sourceFile.FileName, err)
-					continue
-				}
+			logger.TaggedInfo("sync", "File '%s' missing on Microsoft, will upload.", gFile.Path)
+			tr.transferFile(googleClient, msClient, gFile, gFile.FileName, mFolderMap)
+		} else if gFile.FileHash != mFile.FileHash {
+			logger.TaggedInfo("sync", "Conflict for '%s'. Renaming and uploading.", gFile.Path)
+			ext := filepath.Ext(gFile.FileName)
+			base := strings.TrimSuffix(gFile.FileName, ext)
+			conflictName := fmt.Sprintf("%s_conflict_%s%s", base, time.Now().Format("2006-01-02"), ext)
+			tr.transferFile(googleClient, msClient, gFile, conflictName, mFolderMap)
+		}
+	}
+
+	// Sync logic: Microsoft -> Google
+	logger.Info("Step 4: Syncing items from Microsoft (%s) to Google (%s).", msMain.Email, googleMain.Email)
+	gSyncRootID, _ := googleClient.PreFlightCheck()
+	for path := range mFolderMap {
+		if _, exists := gFolderMap[path]; !exists {
+			if _, err := tr.ensurePathExists(googleClient, path, gSyncRootID, gFolderMap); err != nil {
+				logger.Warn("sync", err, "could not create folder structure on Google for %s", path)
 			}
 		}
 	}
-	return nil
-}
-
-// transferFile orchestrates the download from source and upload to destination.
-func (tr *TaskRunner) transferFile(ctx context.Context, file model.File, sourceClient, destClient api.CloudClient) error {
-	// 1. Find or create destination folder path
-	folderPath := filepath.Dir(file.Path)
-	destFolder, err := tr.findOrCreatePath(ctx, destClient, folderPath, destClient.GetUserInfo(ctx))
-	if err != nil {
-		return err
-	}
-
-	// 2. Download from source
-	rc, err := sourceClient.DownloadFile(ctx, file.FileID)
-	if err != nil {
-		return fmt.Errorf("download failed: %w", err)
-	}
-	defer rc.Close()
-
-	// 3. Upload to destination
-	_, err = destClient.UploadFile(ctx, destFolder.ID, file.FileName, file.FileSize, rc)
-	if err != nil {
-		return fmt.Errorf("upload failed: %w", err)
-	}
-	return nil
-}
-
-// moveFileBetweenAccounts handles the logic for moving a file, trying native transfer first.
-func (tr *TaskRunner) moveFileBetweenAccounts(ctx context.Context, file model.File, sourceUser, destUser config.User) error {
-	sourceClient := tr.Clients[sourceUser.Email]
-	destClient := tr.Clients[destUser.Email]
-
-	logger.Info("Moving file '%s' from %s to %s", file.FileName, sourceUser.Email, destUser.Email)
-	if tr.IsSafeRun {
-		logger.TaggedInfo("DRY RUN", "Would move file '%s' (%s) from %s to %s.", file.FileName, file.FileID, sourceUser.Email, destUser.Email)
-		return nil
-	}
-
-	// 1. Attempt native ownership transfer
-	transferred, err := sourceClient.TransferOwnership(ctx, file.FileID, destUser.Email)
-	if err != nil {
-		logger.TaggedError(sourceUser.Email, "Ownership transfer API call failed: %v. Falling back to copy.", err)
-	}
-	if transferred {
-		logger.Info("Successfully transferred ownership of '%s'.", file.FileName)
-		file.OwnerEmail = destUser.Email
-		return tr.DB.UpsertFile(&file)
-	}
-
-	// 2. Fallback to Download/Upload/Delete
-	logger.Info("Ownership transfer failed or not supported. Falling back to copy/delete method.")
-	rc, err := sourceClient.DownloadFile(ctx, file.FileID)
-	if err != nil {
-		return fmt.Errorf("fallback download failed for %s: %w", file.FileName, err)
-	}
-	defer rc.Close()
-
-	// For moves, we place it in the destination's root sync folder.
-	destRootID, err := destClient.PreflightCheck(ctx)
-	if err != nil {
-		return err
-	}
-
-	newFileInfo, err := destClient.UploadFile(ctx, destRootID, file.FileName, file.FileSize, rc)
-	if err != nil {
-		return fmt.Errorf("fallback upload failed for %s: %w", file.FileName, err)
-	}
-
-	err = sourceClient.DeleteItem(ctx, file.FileID)
-	if err != nil {
-		// This is bad. We have a copy but failed to delete the original.
-		return fmt.Errorf("CRITICAL: Fallback upload succeeded but failed to delete original file %s (%s). Please resolve manually. Error: %w", file.FileName, file.FileID, err)
-	}
-
-	// Update the database with the new file info
-	err = tr.DB.DeleteFile(file.Provider, file.FileID)
-	if err != nil {
-		return err
-	}
-
-	file.FileID = newFileInfo.ID
-	file.OwnerEmail = destUser.Email
-	file.ParentFolderID = destRootID
-	return tr.DB.UpsertFile(&file)
-}
-
-// findOrCreatePath finds a folder by its normalized path, creating it if it doesn't exist.
-func (tr *TaskRunner) findOrCreatePath(ctx context.Context, client api.CloudClient, path string, ownerEmail string) (*api.FolderInfo, error) {
-	normPath := strings.ToLower(filepath.ToSlash(path))
-	if normPath == "/" || normPath == "." {
-		rootID, err := client.PreflightCheck(ctx)
-		if err != nil {
-			return nil, err
+	for path, mFile := range mFileMap {
+		if _, exists := gFileMap[path]; !exists {
+			logger.TaggedInfo("sync", "File '%s' missing on Google, will upload.", mFile.Path)
+			tr.transferFile(msClient, googleClient, mFile, mFile.FileName, gFolderMap)
 		}
-		return &api.FolderInfo{ID: rootID}, nil
 	}
 
-	folder, err := tr.DB.FindFolderByPath(client.GetUserInfo(ctx), normPath)
-	if err != nil {
-		return nil, err
-	}
-	if folder != nil {
-		// This needs to be fleshed out to convert model.Folder to api.FolderInfo
-		return &api.FolderInfo{ID: folder.FolderID, Name: folder.FolderName}, nil
-	}
-
-	// Not in DB, create it on the provider
-	parentPath := filepath.Dir(path)
-	folderName := filepath.Base(path)
-
-	parentFolder, err := tr.findOrCreatePath(ctx, client, parentPath, ownerEmail)
-	if err != nil {
-		return nil, err
-	}
-
-	logger.Info("Creating folder '%s' inside '%s'", folderName, parentPath)
-	if tr.IsSafeRun {
-		logger.TaggedInfo("DRY RUN", "Would create folder '%s' in parent %s", folderName, parentFolder.ID)
-		return &api.FolderInfo{ID: "dry-run-folder-id"}, nil // return dummy for dry run
-	}
-
-	createdFolder, err := client.CreateFolder(ctx, parentFolder.ID, folderName)
-	if err != nil {
-		return nil, err
-	}
-
-	// Add new folder to DB
-	newDBFolder := model.Folder{
-		FolderID:       createdFolder.ID,
-		Provider:       client.GetUserInfo(ctx),
-		OwnerEmail:     ownerEmail,
-		FolderName:     createdFolder.Name,
-		ParentFolderID: parentFolder.ID,
-		Path:           path,
-		NormalizedPath: normPath,
-		LastSynced:     time.Now().UTC(),
-	}
-	tr.DB.UpsertFolder(&newDBFolder)
-	return createdFolder, nil
+	logger.Info("Provider sync complete.")
+	return nil
 }
 
-func createFileMap(files []model.File) map[string]model.File {
-	m := make(map[string]model.File)
-	for _, f := range files {
-		m[f.NormalizedPath] = f
-	}
-	return m
-}
-
-func addConflictSuffix(filename string) string {
-	ext := filepath.Ext(filename)
-	base := strings.TrimSuffix(filename, ext)
-	timestamp := time.Now().UTC().Format("2006-01-02")
-	return fmt.Sprintf("%s_conflict_%s%s", base, timestamp, ext)
-}
-
-// FreeMainStorage transfers all files from a main account's sync folder to its associated backup accounts.
-func (tr *TaskRunner) FreeMainStorage(ctx context.Context) error {
-	logger.Info("Starting 'free main storage' process...")
-	if err := tr.GetMetadata(ctx); err != nil {
-		return fmt.Errorf("failed to update metadata before freeing main: %w", err)
-	}
-
+// BalanceStorage moves files from accounts over 95% full to backups until they are below 90%.
+func (tr *TaskRunner) BalanceStorage() error {
+	logger.Info("Checking storage quotas...")
 	accountsByProvider := make(map[string][]model.User)
 	for _, u := range tr.Config.Users {
 		accountsByProvider[u.Provider] = append(accountsByProvider[u.Provider], u)
 	}
 
 	for provider, accounts := range accountsByProvider {
-		logger.Info("\n--- Processing Provider: %s ---", provider)
-
-		var mainUser model.User
-		var backupUsers []model.User
-		isMainSet := false
-		for _, acc := range accounts {
-			if acc.IsMain {
-				mainUser, isMainSet = acc, true
-			} else {
-				backupUsers = append(backupUsers, acc)
-			}
-		}
-
-		if !isMainSet {
-			logger.Info("No main account configured. Skipping.")
-			continue
-		}
-		if len(backupUsers) == 0 {
-			logger.Error("Cannot free main account %s: No backup accounts are configured for this provider.", mainUser.Email)
+		if len(accounts) < 2 {
 			continue
 		}
 
-		// Get quotas for all backup accounts
-		quotas := make(map[string]*api.QuotaInfo)
-		var totalBackupSpace int64
-		for _, bu := range backupUsers {
-			client, ok := tr.Clients[bu.Email]
-			if !ok {
-				logger.TaggedError(bu.Email, "Skipping, client is unavailable.")
-				continue
-			}
-			quota, err := client.GetStorageQuota(ctx)
-			if err != nil {
-				return fmt.Errorf("failed to get quota for backup account %s: %w", bu.Email, err)
-			}
-			quotas[bu.Email] = quota
-			totalBackupSpace += quota.FreeBytes
-		}
+		quotas := tr.getQuotasForUsers(accounts)
+		for _, fullAccountQuota := range quotas {
+			usage := float64(fullAccountQuota.UsedBytes) / float64(fullAccountQuota.TotalBytes)
+			if usage > 0.95 {
+				logger.TaggedInfo(provider, "Account %s is %.1f%% full. Attempting to balance.", fullAccountQuota.OwnerEmail, usage*100)
 
-		// Get all files owned by the main user and check if there's enough space
-		allFiles, err := tr.DB.GetAllFilesByProvider(provider)
-		if err != nil {
-			return err
-		}
-		var filesToMove []model.File
-		var totalFileSizeToMove int64
-		for _, f := range allFiles {
-			if f.OwnerEmail == mainUser.Email {
-				filesToMove = append(filesToMove, f)
-				totalFileSizeToMove += f.FileSize
-			}
-		}
+				var backups []model.StorageQuota
+				for _, q := range quotas {
+					isBackup := false
+					for _, u := range accounts {
+						if u.Email == q.OwnerEmail && !u.IsMain {
+							isBackup = true
+							break
+						}
+					}
+					if isBackup {
+						backups = append(backups, q)
+					}
+				}
+				sort.Slice(backups, func(i, j int) bool { return backups[i].RemainingBytes > backups[j].RemainingBytes })
 
-		if len(filesToMove) == 0 {
-			logger.Info("Main account %s owns no files in the sync directory. Nothing to do.", mainUser.Email)
-			continue
-		}
-		logger.Info("Main account owns %d files totaling %d bytes. Total backup free space is %d bytes.", len(filesToMove), totalFileSizeToMove, totalBackupSpace)
+				if len(backups) == 0 {
+					logger.Warn(provider, nil, "Account %s is full but no backup accounts are available.", fullAccountQuota.OwnerEmail)
+					continue
+				}
 
-		if totalFileSizeToMove > totalBackupSpace {
-			return fmt.Errorf("insufficient space in backup accounts. required: %d, available: %d", totalFileSizeToMove, totalBackupSpace)
-		}
+				allFiles, _ := tr.DB.GetFilesByProvider(provider)
+				var sourceFiles []model.File
+				for _, f := range allFiles {
+					if f.OwnerEmail == fullAccountQuota.OwnerEmail {
+						sourceFiles = append(sourceFiles, f)
+					}
+				}
+				sort.Slice(sourceFiles, func(i, j int) bool { return sourceFiles[i].FileSize > sourceFiles[j].FileSize })
 
-		// Sort files to move smallest first to maximize success chance if an error occurs mid-way
-		sort.Slice(filesToMove, func(i, j int) bool {
-			return filesToMove[i].FileSize < filesToMove[j].FileSize
-		})
+				sourceClient := tr.Clients[fullAccountQuota.OwnerEmail]
+				currentUsage := usage
 
-		// Move files one by one
-		for _, fileToMove := range filesToMove {
-			// Find backup account with most free space *at this moment*
-			var destUser model.User
-			var maxFreeSpace int64 = -1
-			for _, bu := range backupUsers {
-				q := quotas[bu.Email]
-				if q != nil && q.FreeBytes > maxFreeSpace {
-					maxFreeSpace = q.FreeBytes
-					destUser = bu
+				for _, fileToMove := range sourceFiles {
+					if currentUsage < 0.90 {
+						break
+					}
+
+					targetQuota := backups[0]
+					targetClient := tr.Clients[targetQuota.OwnerEmail]
+					logger.TaggedInfo(provider, "Moving '%.2f' MB file '%s' from %s to %s", float64(fileToMove.FileSize)/1024/1024, fileToMove.FileName, fullAccountQuota.OwnerEmail, targetQuota.OwnerEmail)
+
+					if tr.IsSafeRun {
+						logger.DryRun(provider, "MOVE '%s' from %s to %s", fileToMove.FileName, fullAccountQuota.OwnerEmail, targetQuota.OwnerEmail)
+						continue
+					}
+
+					moved, err := tr.moveFileBetweenAccounts(sourceClient, targetClient, fileToMove)
+					if err != nil {
+						logger.Warn(provider, err, "failed to move file")
+					} else if moved {
+						fileToMove.OwnerEmail = targetQuota.OwnerEmail
+						tr.DB.UpsertFile(fileToMove)
+						currentUsage -= (float64(fileToMove.FileSize) / float64(fullAccountQuota.TotalBytes))
+						backups[0].RemainingBytes -= fileToMove.FileSize
+						sort.Slice(backups, func(i, j int) bool { return backups[i].RemainingBytes > backups[j].RemainingBytes })
+					}
 				}
 			}
-
-			if destUser.Email == "" {
-				return errors.New("unexpected error: could not find a destination backup account despite passing space check")
-			}
-
-			// Perform the move
-			err := tr.moveFileBetweenAccounts(ctx, fileToMove, mainUser, destUser)
-			if err != nil {
-				// Stop on the first error to avoid a partial, inconsistent state.
-				return fmt.Errorf("failed to move file '%s', stopping operation: %w", fileToMove.FileName, err)
-			}
-
-			// Update local quota representation to reflect the move
-			quotas[destUser.Email].FreeBytes -= fileToMove.FileSize
 		}
 	}
-
-	logger.Info("\n'Free main' process complete.")
 	return nil
 }
 
-func (tr *TaskRunner) buildPathMap(rootID string, folderMap map[string]api.FolderInfo) (map[string]string, error) {
-	pathMap := make(map[string]string)
-	pathMap[rootID] = "/"
+// FreeMain transfers all files from a main account to its backup accounts.
+func (tr *TaskRunner) FreeMain() error {
+	provider, err := selectProvider("Select provider for which to free the main account")
+	if err != nil {
+		return err
+	}
 
-	for {
-		progress := false
-		for id, folder := range folderMap {
-			if _, exists := pathMap[id]; exists {
-				continue // Already processed
-			}
-			if len(folder.ParentFolderIDs) == 0 {
-				continue // Should not happen inside sync folder
-			}
-			parentID := folder.ParentFolderIDs[0]
-			if parentPath, parentExists := pathMap[parentID]; parentExists {
-				pathMap[id] = filepath.Join(parentPath, folder.Name)
-				progress = true
+	var mainUser model.User
+	var backupUsers []model.User
+	for _, u := range tr.Config.Users {
+		if u.Provider == provider {
+			if u.IsMain {
+				mainUser = u
+			} else {
+				backupUsers = append(backupUsers, u)
 			}
 		}
-		if !progress {
-			break // No more paths can be resolved
+	}
+
+	if mainUser.Email == "" {
+		return fmt.Errorf("no main account found for %s", provider)
+	}
+	if len(backupUsers) == 0 {
+		return fmt.Errorf("no backup accounts found for %s to move files to", provider)
+	}
+
+	mainClient := tr.Clients[mainUser.Email]
+	mainFiles, _ := tr.DB.GetFilesByProvider(provider)
+	var filesToMove []model.File
+	var totalSizeToMove int64
+	for _, f := range mainFiles {
+		if f.OwnerEmail == mainUser.Email {
+			filesToMove = append(filesToMove, f)
+			totalSizeToMove += f.FileSize
 		}
 	}
-	if len(pathMap)-1 != len(folderMap) {
-		return nil, errors.New("failed to resolve all folder paths, check for orphaned folders")
+
+	if len(filesToMove) == 0 {
+		logger.Info("Main account %s has no files in the sync folder. Nothing to do.", mainUser.Email)
+		return nil
 	}
-	return pathMap, nil
+
+	backupQuotas := tr.getQuotasForUsers(backupUsers)
+	var totalBackupSpace int64
+	for _, q := range backupQuotas {
+		totalBackupSpace += q.RemainingBytes
+	}
+
+	if totalSizeToMove > totalBackupSpace {
+		return fmt.Errorf("not enough space in backup accounts. Required: %.2f GB, Available: %.2f GB", float64(totalSizeToMove)/1024/1024/1024, float64(totalBackupSpace)/1024/1024/1024)
+	}
+	logger.Info("Moving %d files (%.2f GB) from %s to backup accounts.", len(filesToMove), float64(totalSizeToMove)/1024/1024/1024, mainUser.Email)
+
+	for _, file := range filesToMove {
+		sort.Slice(backupQuotas, func(i, j int) bool { return backupQuotas[i].RemainingBytes > backupQuotas[j].RemainingBytes })
+		targetAccount := backupQuotas[0]
+		targetClient := tr.Clients[targetAccount.OwnerEmail]
+
+		logger.TaggedInfo(provider, "Moving '%s' to %s", file.FileName, targetAccount.OwnerEmail)
+		if tr.IsSafeRun {
+			logger.DryRun(provider, "MOVE '%s' from %s to %s", file.FileName, mainUser.Email, targetAccount.OwnerEmail)
+			continue
+		}
+
+		moved, err := tr.moveFileBetweenAccounts(mainClient, targetClient, file)
+		if err != nil {
+			logger.Warn(provider, err, "failed to move file, stopping operation.")
+			return err
+		}
+		if moved {
+			file.OwnerEmail = targetAccount.OwnerEmail
+			tr.DB.UpsertFile(file)
+			backupQuotas[0].RemainingBytes -= file.FileSize
+		}
+	}
+	logger.Info("Successfully freed main account %s.", mainUser.Email)
+	return nil
+}
+
+// ShareWithMain verifies and re-applies share permissions for all backup accounts.
+func (tr *TaskRunner) ShareWithMain() error {
+	logger.Info("Verifying and repairing share permissions...")
+	accountsByProvider := make(map[string][]model.User)
+	for _, u := range tr.Config.Users {
+		accountsByProvider[u.Provider] = append(accountsByProvider[u.Provider], u)
+	}
+
+	for provider, accounts := range accountsByProvider {
+		var mainUser model.User
+		var mainClient api.CloudClient
+		var backupUsers []model.User
+		foundMain := false
+		for _, u := range accounts {
+			if u.IsMain {
+				mainUser, mainClient, foundMain = u, tr.Clients[u.Email], true
+			} else {
+				backupUsers = append(backupUsers, u)
+			}
+		}
+
+		if !foundMain || len(backupUsers) == 0 {
+			continue
+		}
+
+		logger.TaggedInfo(provider, "Checking main account %s...", mainUser.Email)
+		syncFolderID, err := mainClient.PreFlightCheck()
+		if err != nil || syncFolderID == "" {
+			logger.Warn(provider, err, "could not find or access sync folder for main account, skipping permission repair.")
+			continue
+		}
+
+		for _, backup := range backupUsers {
+			logger.TaggedInfo(provider, "Ensuring %s has editor access to the sync folder.", backup.Email)
+			if tr.IsSafeRun {
+				logger.DryRun(provider, "SHARE sync folder with %s", backup.Email)
+				continue
+			}
+			if _, err := mainClient.Share(syncFolderID, backup.Email); err != nil {
+				logger.Warn(provider, err, "failed to apply share permission for %s", backup.Email)
+			}
+		}
+	}
+	logger.Info("Permission repair check complete.")
+	return nil
+}
+
+// --- Helper functions for TaskRunner ---
+
+func (tr *TaskRunner) getQuotasForUsers(users []model.User) []model.StorageQuota {
+	var wg sync.WaitGroup
+	quotaChan := make(chan model.StorageQuota, len(users))
+	for _, u := range users {
+		wg.Add(1)
+		go func(user model.User) {
+			defer wg.Done()
+			client := tr.Clients[user.Email]
+			if q, err := client.GetAbout(); err == nil {
+				quotaChan <- *q
+			}
+		}(u)
+	}
+	wg.Wait()
+	close(quotaChan)
+	var quotas []model.StorageQuota
+	for q := range quotaChan {
+		quotas = append(quotas, q)
+	}
+	return quotas
+}
+
+func (tr *TaskRunner) ensurePathExists(client api.CloudClient, path string, rootID string, folderMap map[string]model.Folder) (string, error) {
+	if path == "/" || path == "" {
+		return rootID, nil
+	}
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	currentParentID := rootID
+	currentPath := ""
+
+	for _, part := range parts {
+		currentPath = currentPath + "/" + part
+		normalized := strings.ToLower(currentPath)
+
+		if folder, exists := folderMap[normalized]; exists {
+			currentParentID = folder.FolderID
+			continue
+		}
+
+		logger.TaggedInfo("helper", "Creating missing folder '%s' on %s", part, client.GetProviderName())
+		if tr.IsSafeRun {
+			logger.DryRun(client.GetProviderName(), "CREATE FOLDER '%s' in parent %s", part, currentParentID)
+			currentParentID = "dry-run-folder-id"
+			folderMap[normalized] = model.Folder{FolderID: currentParentID, Path: currentPath, NormalizedPath: normalized}
+			continue
+		}
+
+		newFolder, err := client.CreateFolder(currentParentID, part)
+		if err != nil {
+			return "", fmt.Errorf("failed to create folder %s: %w", part, err)
+		}
+		newFolder.Path = currentPath
+		newFolder.NormalizedPath = normalized
+		folderMap[normalized] = *newFolder
+		currentParentID = newFolder.FolderID
+	}
+	return currentParentID, nil
+}
+
+func (tr *TaskRunner) transferFile(sourceClient, targetClient api.CloudClient, file model.File, newName string, targetFolderMap map[string]model.Folder) {
+	if tr.IsSafeRun {
+		logger.DryRun(sourceClient.GetProviderName(), "TRANSFER file '%s' to %s", file.Path, targetClient.GetProviderName())
+		return
+	}
+
+	parentPath := filepath.Dir(strings.ReplaceAll(file.Path, "\\", "/"))
+	if parentPath == "." {
+		parentPath = "/"
+	}
+	targetRootID, _ := targetClient.PreFlightCheck()
+	targetParentFolderID, err := tr.ensurePathExists(targetClient, parentPath, targetRootID, targetFolderMap)
+	if err != nil {
+		logger.Warn("transfer", err, "cannot create destination folder for %s", file.FileName)
+		return
+	}
+
+	logger.TaggedInfo("transfer", "Downloading '%s' from %s", file.FileName, sourceClient.GetProviderName())
+	body, size, err := sourceClient.DownloadFile(file.FileID)
+	if err != nil {
+		logger.Warn("transfer", err, "download failed for %s", file.FileName)
+		return
+	}
+	defer body.Close()
+
+	logger.TaggedInfo("transfer", "Uploading '%s' to %s", newName, targetClient.GetProviderName())
+	uploadedFile, err := targetClient.UploadFile(targetParentFolderID, newName, body, size)
+	if err != nil {
+		logger.Warn("transfer", err, "upload failed for %s", newName)
+		return
+	}
+
+	uploadedFile.Path = parentPath + "/" + newName
+	uploadedFile.NormalizedPath = strings.ToLower(uploadedFile.Path)
+	tr.DB.UpsertFile(*uploadedFile)
+	logger.TaggedInfo("transfer", "Successfully transferred '%s'", file.FileName)
+}
+
+func (tr *TaskRunner) moveFileBetweenAccounts(sourceClient, targetClient api.CloudClient, file model.File) (bool, error) {
+	targetEmail, _ := targetClient.GetUserEmail()
+
+	transferred, _ := sourceClient.TransferOwnership(file.FileID, targetEmail)
+	if transferred {
+		logger.TaggedInfo("move", "Successfully transferred ownership of '%s'.", file.FileName)
+		return true, nil
+	}
+	logger.TaggedInfo("move", "Native ownership transfer failed or not supported. Falling back to download/upload/delete.")
+
+	targetFolderMap := make(map[string]model.Folder)
+	folders, _ := tr.DB.GetFoldersByProvider(targetClient.GetProviderName())
+	for _, f := range folders {
+		targetFolderMap[f.NormalizedPath] = f
+	}
+
+	tr.transferFile(sourceClient, targetClient, file, file.FileName, targetFolderMap)
+
+	logger.TaggedInfo("move", "Deleting original file '%s' from %s.", file.FileName, sourceClient.GetProviderName())
+	if err := sourceClient.DeleteFile(file.FileID); err != nil {
+		logger.Error(err, "CRITICAL: Failed to delete original file after copy. '%s' is now duplicated.", file.FileName)
+		return false, err
+	}
+	return true, nil
+}
+
+// selectProvider is a helper for cmd packages to use.
+func selectProvider(label string) (string, error) {
+	prompt := promptui.Select{
+		Label: label,
+		Items: []string{"Google", "Microsoft"},
+	}
+	_, result, err := prompt.Run()
+	return result, err
 }

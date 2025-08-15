@@ -1,37 +1,52 @@
 package auth
 
 import (
-	"context"
-	"fmt"
-
 	"cloud-drives-sync/internal/config"
+	"context"
 
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+	"golang.org/x/oauth2/microsoft"
 )
 
-// NewTokenSource creates a reusable oauth2.TokenSource for a specific user.
-// This source uses the user's stored refresh token to automatically acquire new
-// access tokens as needed, handling expiration transparently.
-func NewTokenSource(ctx context.Context, user *config.User, appCfg *config.AppConfig) (oauth2.TokenSource, error) {
-	var oauthCfg *oauth2.Config
-	switch user.Provider {
-	case "Google":
-		oauthCfg = GetGoogleOAuthConfig(appCfg)
-	case "Microsoft":
-		oauthCfg = GetMicrosoftOAuthConfig(appCfg)
-	default:
-		return nil, fmt.Errorf("unknown provider for token source: %s", user.Provider)
+// GetGoogleTokenSource creates a Google OAuth2 token source from a stored refresh token.
+// The token source will automatically handle refreshing the access token when it expires.
+func GetGoogleTokenSource(ctx context.Context, cfg *config.Config, refreshToken string) (oauth2.TokenSource, error) {
+	oauthCfg := &oauth2.Config{
+		ClientID:     cfg.GoogleClient.ID,
+		ClientSecret: cfg.GoogleClient.Secret,
+		Endpoint:     google.Endpoint,
+		Scopes: []string{
+			"https://www.googleapis.com/auth/drive",
+			"https://www.googleapis.com/auth/userinfo.email",
+		},
 	}
 
-	if user.RefreshToken == "" {
-		return nil, fmt.Errorf("user %s has no refresh token", user.Email)
-	}
-
-	// Create a token struct with the essential refresh token.
 	token := &oauth2.Token{
-		RefreshToken: user.RefreshToken,
+		RefreshToken: refreshToken,
+		// Access token will be fetched on the first use.
 	}
 
-	// The returned TokenSource will use the refresh token to get new access tokens.
+	return oauthCfg.TokenSource(ctx, token), nil
+}
+
+// GetMicrosoftTokenSource creates a Microsoft OAuth2 token source from a stored refresh token.
+// It is used by the adapter that provides tokens to the Microsoft Graph SDK.
+func GetMicrosoftTokenSource(ctx context.Context, cfg *config.Config, refreshToken string) (oauth2.TokenSource, error) {
+	oauthCfg := &oauth2.Config{
+		ClientID:     cfg.MicrosoftClient.ID,
+		ClientSecret: cfg.MicrosoftClient.Secret,
+		Endpoint:     microsoft.LiveConnectEndpoint,
+		Scopes: []string{
+			"files.readwrite.all",
+			"user.read",
+			"offline_access",
+		},
+	}
+
+	token := &oauth2.Token{
+		RefreshToken: refreshToken,
+	}
+
 	return oauthCfg.TokenSource(ctx, token), nil
 }

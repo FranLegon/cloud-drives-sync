@@ -2,11 +2,14 @@ package main
 
 import (
 	"cloud-drives-sync/cmd"
+	"os"
 )
 
-// main is the entry point for the entire application. Its sole responsibility
-// is to execute the root command of the CLI structure defined in the 'cmd' package.
-// All logic, argument parsing, and flag handling are managed by Cobra within that package.
 func main() {
-	cmd.Execute()
+	// The cobra framework handles command execution and error catching.
+	// We just need to kick it off.
+	if err := cmd.Execute(); err != nil {
+		// Cobra prints the error, so we just need to exit.
+		os.Exit(1)
+	}
 }

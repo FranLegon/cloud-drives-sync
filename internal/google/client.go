@@ -1,264 +1,380 @@
 package google
 
 import (
+	"cloud-drives-sync/internal/api"
+	"cloud-drives-sync/internal/logger"
+	"cloud-drives-sync/internal/model"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
-	"cloud-drives-sync/internal/api"
-	"cloud-drives-sync/internal/logger"
-
+	"golang.org/x/oauth2"
+	"golang.org/x/time/rate"
 	"google.golang.org/api/drive/v3"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
+// googleMimeTypeMap maps Google's proprietary document types to their standard export formats.
+var googleMimeTypeMap = map[string]string{
+	"application/vnd.google-apps.document":     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",   // .docx
+	"application/vnd.google-apps.spreadsheet":  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",         // .xlsx
+	"application/vnd.google-apps.presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
+	"application/vnd.google-apps.drawing":      "image/png",
+}
+
 // googleClient implements the api.CloudClient interface for Google Drive.
 type googleClient struct {
-	service *drive.Service
+	service     *drive.Service
+	ownerEmail  string
+	rateLimiter *rate.Limiter
+	userEmail   string
+	emailOnce   sync.Once
 }
 
-// NewClient creates a new Google Drive client using an OAuth2-aware http.Client.
-func NewClient(httpClient *http.Client) (api.CloudClient, error) {
-	srv, err := drive.NewService(context.Background(), option.WithHTTPClient(httpClient))
+// NewClient creates a new Google Drive client with a built-in rate limiter
+// to avoid hitting API quotas.
+func NewClient(ctx context.Context, ts oauth2.TokenSource, ownerEmail string) (api.CloudClient, error) {
+	httpClient := oauth2.NewClient(ctx, ts)
+	service, err := drive.NewService(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create google drive service: %w", err)
-	}
-	return &googleClient{service: srv}, nil
-}
-
-// PreflightCheck ensures the sync folder exists and is unique in the root.
-func (c *googleClient) PreflightCheck(ctx context.Context) (string, error) {
-	query := fmt.Sprintf("name = '%s' and 'root' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false", api.SyncFolderName)
-	files, err := c.service.Files.List().Q(query).Fields("files(id)").Context(ctx).Do()
-	if err != nil {
-		return "", fmt.Errorf("[Google] failed to search for sync folder: %w", err)
+		return nil, fmt.Errorf("unable to retrieve Drive client: %w", err)
 	}
 
-	if len(files.Files) > 1 {
-		return "", fmt.Errorf("[Google] found %d folders named '%s' in the root. please resolve this ambiguity manually", len(files.Files), api.SyncFolderName)
-	}
-
-	if len(files.Files) == 1 {
-		logger.TaggedInfo("Google", "Found existing sync folder with ID: %s", files.Files[0].Id)
-		return files.Files[0].Id, nil
-	}
-
-	// If not found in root, create it.
-	logger.TaggedInfo("Google", "Sync folder not found in root, creating a new one...")
-	folderMeta := &drive.File{
-		Name:     api.SyncFolderName,
-		MimeType: "application/vnd.google-apps.folder",
-		Parents:  []string{"root"},
-	}
-	createdFolder, err := c.service.Files.Create(folderMeta).Fields("id").Context(ctx).Do()
-	if err != nil {
-		return "", fmt.Errorf("[Google] failed to create sync folder: %w", err)
-	}
-	logger.TaggedInfo("Google", "Successfully created sync folder with ID: %s", createdFolder.Id)
-	return createdFolder.Id, nil
-}
-
-// GetUserInfo retrieves the user's email address.
-func (c *googleClient) GetUserInfo(ctx context.Context) (string, error) {
-	about, err := c.service.About.Get().Fields("user(emailAddress)").Context(ctx).Do()
-	if err != nil {
-		return "", fmt.Errorf("[Google] failed to get user info: %w", err)
-	}
-	return about.User.EmailAddress, nil
-}
-
-// ListAllFilesAndFolders recursively scans the sync folder.
-func (c *googleClient) ListAllFilesAndFolders(ctx context.Context, rootFolderID string) ([]api.FileInfo, []api.FolderInfo, error) {
-	var allFiles []api.FileInfo
-	var allFolders []api.FolderInfo
-
-	var list func(folderID string) error
-	list = func(folderID string) error {
-		pageToken := ""
-		for {
-			q := fmt.Sprintf("'%s' in parents and trashed = false", folderID)
-			req := c.service.Files.List().Q(q).
-				Fields("nextPageToken, files(id, name, parents, createdTime, modifiedTime, size, md5Checksum, mimeType, exportLinks, owners)").
-				PageSize(1000).Context(ctx)
-			if pageToken != "" {
-				req.PageToken(pageToken)
-			}
-
-			res, err := req.Do()
-			if err != nil {
-				return fmt.Errorf("[Google] failed to list items in folder %s: %w", folderID, err)
-			}
-
-			for _, f := range res.Files {
-				if f.MimeType == "application/vnd.google-apps.folder" {
-					allFolders = append(allFolders, c.toApiFolderInfo(f))
-					if err := list(f.Id); err != nil {
-						return err // Propagate recursive errors
-					}
-				} else {
-					allFiles = append(allFiles, c.toApiFileInfo(f))
-				}
-			}
-			pageToken = res.NextPageToken
-			if pageToken == "" {
-				break
-			}
-		}
-		return nil
-	}
-
-	if err := list(rootFolderID); err != nil {
-		return nil, nil, err
-	}
-	return allFiles, allFolders, nil
-}
-
-// CreateFolder creates a new folder.
-func (c *googleClient) CreateFolder(ctx context.Context, parentFolderID, folderName string) (*api.FolderInfo, error) {
-	folderMeta := &drive.File{
-		Name:     folderName,
-		MimeType: "application/vnd.google-apps.folder",
-		Parents:  []string{parentFolderID},
-	}
-	f, err := c.service.Files.Create(folderMeta).Fields("id, name, parents, owners").Context(ctx).Do()
-	if err != nil {
-		return nil, err
-	}
-	folder := c.toApiFolderInfo(f)
-	return &folder, nil
-}
-
-// UploadFile streams content to create a new file.
-func (c *googleClient) UploadFile(ctx context.Context, parentFolderID, fileName string, fileSize int64, content io.Reader) (*api.FileInfo, error) {
-	fileMeta := &drive.File{
-		Name:    fileName,
-		Parents: []string{parentFolderID},
-	}
-	f, err := c.service.Files.Create(fileMeta).Media(content).Context(ctx).Do()
-	if err != nil {
-		return nil, fmt.Errorf("[Google] failed to upload file '%s': %w", fileName, err)
-	}
-	info := c.toApiFileInfo(f)
-	return &info, nil
-}
-
-// DownloadFile gets a reader for a standard file's content.
-func (c *googleClient) DownloadFile(ctx context.Context, fileID string) (io.ReadCloser, error) {
-	resp, err := c.service.Files.Get(fileID).Download(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return resp.Body, nil
-}
-
-// ExportFile gets a reader for an exported proprietary file.
-func (c *googleClient) ExportFile(ctx context.Context, fileID, mimeType string) (io.ReadCloser, error) {
-	resp, err := c.service.Files.Export(fileID, mimeType).Download(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return resp.Body, nil
-}
-
-// DeleteItem permanently deletes a file or folder.
-func (c *googleClient) DeleteItem(ctx context.Context, itemID string) error {
-	return c.service.Files.Delete(itemID).Context(ctx).Do()
-}
-
-// ShareFolder grants write/edit permissions to a user.
-func (c *googleClient) ShareFolder(ctx context.Context, folderID, emailAddress string) error {
-	perm := &drive.Permission{
-		Type:         "user",
-		Role:         "writer", // "writer" is the role for "editor" permissions.
-		EmailAddress: emailAddress,
-	}
-	_, err := c.service.Permissions.Create(folderID, perm).Context(ctx).Do()
-	return err
-}
-
-// GetStorageQuota retrieves account storage information.
-func (c *googleClient) GetStorageQuota(ctx context.Context) (*api.QuotaInfo, error) {
-	about, err := c.service.About.Get().Fields("storageQuota").Context(ctx).Do()
-	if err != nil {
-		return nil, err
-	}
-	q := about.StorageQuota
-	return &api.QuotaInfo{
-		TotalBytes: q.Limit,
-		UsedBytes:  q.Usage,
-		FreeBytes:  q.Limit - q.Usage,
+	return &googleClient{
+		service:     service,
+		ownerEmail:  ownerEmail,
+		rateLimiter: rate.NewLimiter(rate.Every(200*time.Millisecond), 1), // 5 requests per second
 	}, nil
 }
 
-// MoveFile changes the parent of a file.
-func (c *googleClient) MoveFile(ctx context.Context, fileID, newParentFolderID, oldParentFolderID string) error {
-	_, err := c.service.Files.Update(fileID, nil).
-		AddParents(newParentFolderID).
-		RemoveParents(oldParentFolderID).
-		Context(ctx).Do()
-	return err
+func (c *googleClient) GetProviderName() string {
+	return "Google"
 }
 
-// TransferOwnership attempts to make another user the owner of a file.
-func (c *googleClient) TransferOwnership(ctx context.Context, fileID, userEmail string) (bool, error) {
+func (c *googleClient) GetUserEmail() (string, error) {
+	var err error
+	c.emailOnce.Do(func() {
+		c.rateLimiter.Wait(context.Background())
+		about, getErr := c.service.About.Get().Fields("user(emailAddress)").Do()
+		if getErr != nil {
+			err = handleGoogleError(getErr)
+			return
+		}
+		c.userEmail = about.User.EmailAddress
+	})
+	return c.userEmail, err
+}
+
+func (c *googleClient) GetAbout() (*model.StorageQuota, error) {
+	c.rateLimiter.Wait(context.Background())
+	about, err := c.service.About.Get().Fields("storageQuota").Do()
+	if err != nil {
+		return nil, handleGoogleError(err)
+	}
+	sq := about.StorageQuota
+	email, _ := c.GetUserEmail()
+	return &model.StorageQuota{
+		TotalBytes:     sq.Limit,
+		UsedBytes:      sq.Usage,
+		RemainingBytes: sq.Limit - sq.Usage,
+		OwnerEmail:     email,
+		Provider:       c.GetProviderName(),
+	}, nil
+}
+
+func (c *googleClient) PreFlightCheck() (string, error) {
+	c.rateLimiter.Wait(context.Background())
+	query := "name = 'synched-cloud-drives' and 'me' in owners and trashed = false"
+	r, err := c.service.Files.List().Q(query).Fields("files(id, parents)").Do()
+	if err != nil {
+		return "", handleGoogleError(err)
+	}
+
+	if len(r.Files) > 1 {
+		return "", fmt.Errorf("pre-flight check failed: found %d 'synched-cloud-drives' folders; please resolve ambiguity", len(r.Files))
+	}
+	if len(r.Files) == 0 {
+		return "", nil // Not found is a valid state, handled by the caller.
+	}
+
+	folder := r.Files[0]
+	c.rateLimiter.Wait(context.Background())
+	root, err := c.service.Files.Get("root").Fields("id").Do()
+	if err != nil {
+		return "", handleGoogleError(err)
+	}
+
+	isAtRoot := false
+	for _, parentID := range folder.Parents {
+		if parentID == root.Id {
+			isAtRoot = true
+			break
+		}
+	}
+
+	if !isAtRoot {
+		logger.TaggedInfo(c.ownerEmail, "Sync folder found but not at root. Moving it now.")
+		c.rateLimiter.Wait(context.Background())
+		_, err = c.service.Files.Update(folder.Id, nil).
+			AddParents(root.Id).
+			RemoveParents(strings.Join(folder.Parents, ",")).
+			Do()
+		if err != nil {
+			return "", fmt.Errorf("failed to move 'synched-cloud-drives' to root: %w", handleGoogleError(err))
+		}
+	}
+	return folder.Id, nil
+}
+
+func (c *googleClient) CreateRootSyncFolder() (string, error) {
+	c.rateLimiter.Wait(context.Background())
+	folder := &drive.File{
+		Name:     "synched-cloud-drives",
+		MimeType: "application/vnd.google-apps.folder",
+	}
+	f, err := c.service.Files.Create(folder).Fields("id").Do()
+	if err != nil {
+		return "", handleGoogleError(err)
+	}
+	return f.Id, nil
+}
+
+func (c *googleClient) ListFolders(folderID string, parentPath string, callback func(model.Folder) error) error {
+	query := fmt.Sprintf("'%s' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false", folderID)
+	fields := "nextPageToken, files(id, name, parents)"
+
+	c.rateLimiter.Wait(context.Background())
+	return c.service.Files.List().Q(query).Fields(googleapi.Field(fields)).Pages(context.Background(), func(page *drive.FileList) error {
+		for _, f := range page.Files {
+			path := parentPath + "/" + f.Name
+			email, _ := c.GetUserEmail()
+			folder := model.Folder{
+				FolderID:       f.Id,
+				Provider:       c.GetProviderName(),
+				OwnerEmail:     email,
+				FolderName:     f.Name,
+				ParentFolderID: f.Parents[0],
+				Path:           path,
+				NormalizedPath: strings.ToLower(strings.ReplaceAll(path, "\\", "/")),
+			}
+			if err := callback(folder); err != nil {
+				return err // Stop iteration if callback returns an error
+			}
+			// Recurse into the subfolder
+			if err := c.ListFolders(f.Id, path, callback); err != nil {
+				return err
+			}
+		}
+		c.rateLimiter.Wait(context.Background())
+		return nil
+	})
+}
+
+func (c *googleClient) ListFiles(folderID, parentPath string, callback func(model.File) error) error {
+	query := fmt.Sprintf("'%s' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false", folderID)
+	fields := "nextPageToken, files(id, name, size, md5Checksum, mimeType, createdTime, modifiedTime, parents)"
+
+	c.rateLimiter.Wait(context.Background())
+	return c.service.Files.List().Q(query).Fields(googleapi.Field(fields)).Pages(context.Background(), func(page *drive.FileList) error {
+		for _, f := range page.Files {
+			path := parentPath + "/" + f.Name
+			created, _ := time.Parse(time.RFC3339, f.CreatedTime)
+			modified, _ := time.Parse(time.RFC3339, f.ModifiedTime)
+			email, _ := c.GetUserEmail()
+
+			file := model.File{
+				FileID:         f.Id,
+				Provider:       c.GetProviderName(),
+				OwnerEmail:     email,
+				FileName:       f.Name,
+				FileSize:       f.Size,
+				ParentFolderID: f.Parents[0],
+				Path:           path,
+				NormalizedPath: strings.ToLower(strings.ReplaceAll(path, "\\", "/")),
+				CreatedOn:      created,
+				LastModified:   modified,
+			}
+
+			if _, isGoogleDoc := googleMimeTypeMap[f.MimeType]; isGoogleDoc {
+				file.HashAlgorithm = "SHA256" // Mark for local hashing via export
+			} else if f.Md5Checksum != "" {
+				file.FileHash = f.Md5Checksum
+				file.HashAlgorithm = "MD5"
+			} else {
+				file.HashAlgorithm = "SHA256" // Fallback for binary files without MD5
+			}
+
+			if err := callback(file); err != nil {
+				return err // Stop iteration
+			}
+		}
+		c.rateLimiter.Wait(context.Background())
+		return nil
+	})
+}
+
+func (c *googleClient) CreateFolder(parentFolderID, name string) (*model.Folder, error) {
+	c.rateLimiter.Wait(context.Background())
+	folder := &drive.File{
+		Name:     name,
+		MimeType: "application/vnd.google-apps.folder",
+		Parents:  []string{parentFolderID},
+	}
+	f, err := c.service.Files.Create(folder).Fields("id", "name", "parents").Do()
+	if err != nil {
+		return nil, handleGoogleError(err)
+	}
+	email, _ := c.GetUserEmail()
+	return &model.Folder{
+		FolderID:       f.Id,
+		FolderName:     f.Name,
+		ParentFolderID: f.Parents[0],
+		Provider:       c.GetProviderName(),
+		OwnerEmail:     email,
+	}, nil
+}
+
+func (c *googleClient) DownloadFile(fileID string) (io.ReadCloser, int64, error) {
+	c.rateLimiter.Wait(context.Background())
+	file, err := c.service.Files.Get(fileID).Fields("size, mimeType").Do()
+	if err != nil {
+		return nil, 0, handleGoogleError(err)
+	}
+	// If it's a Google Doc, we must export it.
+	if _, isGoogleDoc := googleMimeTypeMap[file.MimeType]; isGoogleDoc {
+		return c.ExportFile(fileID, file.MimeType)
+	}
+
+	c.rateLimiter.Wait(context.Background())
+	resp, err := c.service.Files.Get(fileID).Download()
+	if err != nil {
+		return nil, 0, handleGoogleError(err)
+	}
+	return resp.Body, file.Size, nil
+}
+
+func (c *googleClient) ExportFile(fileID, mimeType string) (io.ReadCloser, int64, error) {
+	exportMimeType, ok := googleMimeTypeMap[mimeType]
+	if !ok {
+		return nil, 0, fmt.Errorf("no export mapping for google mime type: %s", mimeType)
+	}
+
+	c.rateLimiter.Wait(context.Background())
+	resp, err := c.service.Files.Export(fileID, exportMimeType).Download()
+	if err != nil {
+		return nil, 0, handleGoogleError(err)
+	}
+	// Export does not provide a Content-Length header, so size is unknown (-1).
+	return resp.Body, -1, nil
+}
+
+func (c *googleClient) UploadFile(parentFolderID, name string, content io.Reader, size int64) (*model.File, error) {
+	c.rateLimiter.Wait(context.Background())
+	file := &drive.File{
+		Name:    name,
+		Parents: []string{parentFolderID},
+	}
+	// Use resumable uploads for better reliability. Chunk size can be tuned.
+	f, err := c.service.Files.Create(file).Media(content, googleapi.ChunkSize(8*1024*1024)).Do()
+	if err != nil {
+		return nil, handleGoogleError(err)
+	}
+
+	created, _ := time.Parse(time.RFC3339, f.CreatedTime)
+	modified, _ := time.Parse(time.RFC3339, f.ModifiedTime)
+	email, _ := c.GetUserEmail()
+
+	return &model.File{
+		FileID:         f.Id,
+		Provider:       c.GetProviderName(),
+		OwnerEmail:     email,
+		FileName:       f.Name,
+		FileSize:       f.Size,
+		FileHash:       f.Md5Checksum,
+		HashAlgorithm:  "MD5",
+		ParentFolderID: f.Parents[0],
+		CreatedOn:      created,
+		LastModified:   modified,
+	}, nil
+}
+
+func (c *googleClient) DeleteFile(fileID string) error {
+	c.rateLimiter.Wait(context.Background())
+	return handleGoogleError(c.service.Files.Delete(fileID).Do())
+}
+
+func (c *googleClient) Share(folderID, emailAddress string) (string, error) {
+	c.rateLimiter.Wait(context.Background())
+	perm := &drive.Permission{
+		Type:         "user",
+		Role:         "writer", // "writer" is the API term for "editor" role.
+		EmailAddress: emailAddress,
+	}
+	p, err := c.service.Permissions.Create(folderID, perm).SendNotificationEmail(false).Fields("id").Do()
+	if err != nil {
+		// If permission already exists, API returns a 403 error. This is not a failure for us.
+		if gerr, ok := err.(*googleapi.Error); ok && gerr.Code == http.StatusForbidden {
+			return "permission-exists", nil // Use a special string to indicate success-if-exists
+		}
+		return "", handleGoogleError(err)
+	}
+	return p.Id, nil
+}
+
+func (c *googleClient) CheckShare(folderID, permissionID string) (bool, error) {
+	c.rateLimiter.Wait(context.Background())
+	_, err := c.service.Permissions.Get(folderID, permissionID).Fields("id").Do()
+	if err != nil {
+		if gerr, ok := err.(*googleapi.Error); ok && gerr.Code == http.StatusNotFound {
+			return false, nil // 404 means the permission is missing.
+		}
+		return false, handleGoogleError(err)
+	}
+	return true, nil
+}
+
+func (c *googleClient) TransferOwnership(fileID, emailAddress string) (bool, error) {
+	c.rateLimiter.Wait(context.Background())
 	perm := &drive.Permission{
 		Type:         "user",
 		Role:         "owner",
-		EmailAddress: userEmail,
+		EmailAddress: emailAddress,
 	}
-	_, err := c.service.Permissions.Create(fileID, perm).TransferOwnership(true).Context(ctx).Do()
+	// TransferOwnership can fail for many reasons (e.g., domain policies, user not in domain).
+	_, err := c.service.Permissions.Create(fileID, perm).TransferOwnership(true).Do()
 	if err != nil {
-		// This operation can fail for many valid reasons (e.g., cross-domain restrictions).
-		// We log it but return 'false' to indicate fallback is needed.
-		logger.TaggedInfo("Google", "Native ownership transfer failed for file %s to %s: %v. Falling back.", fileID, userEmail, err)
+		// Log the reason but return false instead of an error, as this is an expected outcome.
+		logger.Warn("google", err, "native ownership transfer failed")
 		return false, nil
 	}
 	return true, nil
 }
 
-// toApiFileInfo converts a Google Drive file object to the internal API model.
-func (c *googleClient) toApiFileInfo(f *drive.File) api.FileInfo {
-	isProprietary := f.Md5Checksum == ""
-	hashAlgo := "MD5"
-	if isProprietary {
-		hashAlgo = "SHA256" // Will be calculated from exported PDF/XLSX
-	}
-
-	var owner string
-	if len(f.Owners) > 0 {
-		owner = f.Owners[0].EmailAddress
-	}
-
-	created, _ := time.Parse(time.RFC3339, f.CreatedTime)
-	modified, _ := time.Parse(time.RFC3339, f.ModifiedTime)
-
-	return api.FileInfo{
-		ID:              f.Id,
-		Name:            f.Name,
-		Size:            f.Size,
-		ParentFolderIDs: f.Parents,
-		CreatedTime:     created,
-		ModifiedTime:    modified,
-		Owner:           owner,
-		Hash:            f.Md5Checksum,
-		HashAlgorithm:   hashAlgo,
-		IsProprietary:   isProprietary,
-		ExportLinks:     f.ExportLinks,
-	}
+func (c *googleClient) MoveFile(fileID, currentParentID, newParentFolderID string) error {
+	c.rateLimiter.Wait(context.Background())
+	_, err := c.service.Files.Update(fileID, nil).
+		AddParents(newParentFolderID).
+		RemoveParents(currentParentID).
+		Do()
+	return handleGoogleError(err)
 }
 
-// toApiFolderInfo converts a Google Drive folder object to the internal API model.
-func (c *googleClient) toApiFolderInfo(f *drive.File) api.FolderInfo {
-	var owner string
-	if len(f.Owners) > 0 {
-		owner = f.Owners[0].EmailAddress
+// handleGoogleError checks for rate limit or server-side errors which are retryable.
+func handleGoogleError(err error) error {
+	if err == nil {
+		return nil
 	}
-	return api.FolderInfo{
-		ID:              f.Id,
-		Name:            f.Name,
-		ParentFolderIDs: f.Parents,
-		Owner:           owner,
+	if gerr, ok := err.(*googleapi.Error); ok {
+		// 403 can be rate limiting or other permission issues. 429 is definitely rate limiting.
+		if gerr.Code == 403 || gerr.Code == 429 || gerr.Code >= 500 {
+			// A simple retry strategy. Production code might use exponential backoff.
+			time.Sleep(2 * time.Second)
+		}
 	}
+	return err
 }

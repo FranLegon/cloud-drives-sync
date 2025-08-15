@@ -2,8 +2,8 @@ package model
 
 import "time"
 
-// User represents a single user account for a cloud provider as defined in the
-// configuration file. It holds authentication details and account roles.
+// User represents a single cloud account configured in the application.
+// It's stored in the encrypted config.json.enc file.
 type User struct {
 	Provider     string `json:"provider"`
 	Email        string `json:"email"`
@@ -11,32 +11,40 @@ type User struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-// File represents the metadata of a single file, designed to be stored in the
-// local SQLite database. It mirrors the 'files' table schema.
+// File represents a file's metadata stored in the local encrypted database.
 type File struct {
-	FileID         string    `db:"FileID"`
-	Provider       string    `db:"Provider"`
-	OwnerEmail     string    `db:"OwnerEmail"`
-	FileHash       string    `db:"FileHash"`
-	HashAlgorithm  string    `db:"HashAlgorithm"`
-	FileName       string    `db:"FileName"`
-	FileSize       int64     `db:"FileSize"`
-	ParentFolderID string    `db:"ParentFolderID"`
-	CreatedOn      time.Time `db:"CreatedOn"`
-	LastModified   time.Time `db:"LastModified"`
-	LastSynced     time.Time `db:"LastSynced"`
+	FileID         string
+	Provider       string
+	OwnerEmail     string
+	FileHash       string
+	HashAlgorithm  string
+	FileName       string
+	FileSize       int64
+	ParentFolderID string
+	Path           string // The full, original case path from the sync root.
+	NormalizedPath string // The lowercase, forward-slash path for matching.
+	CreatedOn      time.Time
+	LastModified   time.Time
+	LastSynced     time.Time
 }
 
-// Folder represents the metadata of a single folder, designed to be stored in the
-// local SQLite database. It mirrors the 'folders' table schema and includes
-// path information for cross-provider matching.
+// Folder represents a folder's metadata stored in the local encrypted database.
 type Folder struct {
-	FolderID       string    `db:"FolderID"`
-	Provider       string    `db:"Provider"`
-	OwnerEmail     string    `db:"OwnerEmail"`
-	FolderName     string    `db:"FolderName"`
-	ParentFolderID string    `db:"ParentFolderID"`
-	Path           string    `db:"Path"`
-	NormalizedPath string    `db:"NormalizedPath"`
-	LastSynced     time.Time `db:"LastSynced"`
+	FolderID       string
+	Provider       string
+	OwnerEmail     string
+	FolderName     string
+	ParentFolderID string
+	Path           string
+	NormalizedPath string
+	LastSynced     time.Time
+}
+
+// StorageQuota holds information about a user's storage usage retrieved from the API.
+type StorageQuota struct {
+	TotalBytes     int64
+	UsedBytes      int64
+	RemainingBytes int64
+	OwnerEmail     string
+	Provider       string
 }
