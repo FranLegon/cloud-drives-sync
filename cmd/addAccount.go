@@ -30,7 +30,6 @@ This command will:
 			logger.Error(err, "Provider selection failed")
 		}
 
-		// Find the main account for this provider
 		var mainUser model.User
 		foundMain := false
 		for _, u := range cfg.Users {
@@ -80,7 +79,6 @@ This command will:
 			logger.Error(err, "Failed to share sync folder")
 		}
 
-		// Save the updated user list to the encrypted config file.
 		password := promptForPassword("Confirm Master Password to save changes")
 		if err := cfg.SaveConfig(password); err != nil {
 			logger.Error(err, "Failed to save configuration")
