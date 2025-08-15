@@ -14,7 +14,7 @@ var removeDuplicatesCmd = &cobra.Command{
 	Long: `Finds sets of duplicate files and, for each set, prompts the user
 to select which single file to KEEP. All other files in that set will be
 moved to the trash.`,
-	Run: func(cmd *cobra.command, args []string) {
+	Run: func(cmd *cobra.Command, args []string) {
 		runner := setup()
 		defer runner.DB.Close()
 

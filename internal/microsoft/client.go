@@ -15,8 +15,7 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-
-	//"github.com/microsoftgraph/msgraph-sdk-go/drive/items"
+	"github.com/microsoftgraph/msgraph-sdk-go/drives/item/items/item/createuploadsession"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/models/odataerrors"
 )
@@ -50,10 +49,11 @@ func (c *microsoftClient) GetProviderName() string {
 func (c *microsoftClient) GetUserEmail() (string, error) {
 	var err error
 	c.emailOnce.Do(func() {
+		requestParameters := &msgraph.MeRequestBuilderGetQueryParameters{
+			Select: []string{"userPrincipalName", "mail"},
+		}
 		reqConf := &msgraph.MeRequestBuilderGetRequestConfiguration{
-			QueryParameters: &msgraph.MeRequestBuilderGetQueryParameters{
-				Select: []string{"userPrincipalName", "mail"},
-			},
+			QueryParameters: requestParameters,
 		}
 		user, getErr := c.graphClient.Me().Get(context.Background(), reqConf)
 		if getErr != nil {
@@ -89,10 +89,11 @@ func (c *microsoftClient) GetAbout() (*model.StorageQuota, error) {
 
 func (c *microsoftClient) PreFlightCheck() (string, error) {
 	filter := "name eq 'synched-cloud-drives' and folder ne null"
-	reqConf := &items.ItemChildrenRequestBuilderGetRequestConfiguration{
-		QueryParameters: &items.ItemChildrenRequestBuilderGetQueryParameters{
-			Filter: &filter,
-		},
+	requestParameters := &msgraph.DrivesItemRootChildrenRequestBuilderGetQueryParameters{
+		Filter: &filter,
+	}
+	reqConf := &msgraph.DrivesItemRootChildrenRequestBuilderGetRequestConfiguration{
+		QueryParameters: requestParameters,
 	}
 	res, err := c.graphClient.Me().Drive().Root().Children().Get(context.Background(), reqConf)
 	if err != nil {
@@ -110,9 +111,11 @@ func (c *microsoftClient) PreFlightCheck() (string, error) {
 
 func (c *microsoftClient) CreateRootSyncFolder() (string, error) {
 	folder := models.NewDriveItem()
-	folder.SetName("synched-cloud-drives")
+	name := "synched-cloud-drives"
+	folder.SetName(&name)
 	folder.SetFolder(models.NewFolder())
-	folder.SetAdditionalData(map[string]interface{}{"@microsoft.graph.conflictBehavior": "fail"})
+	conflictBehavior := "fail"
+	folder.SetAdditionalData(map[string]interface{}{"@microsoft.graph.conflictBehavior": &conflictBehavior})
 	created, err := c.graphClient.Me().Drive().Root().Children().Post(context.Background(), folder, nil)
 	if err != nil {
 		return "", handleGraphError(err)
@@ -121,10 +124,11 @@ func (c *microsoftClient) CreateRootSyncFolder() (string, error) {
 }
 
 func (c *microsoftClient) listChildren(itemID string, parentPath string, folderCallback func(model.Folder) error, fileCallback func(model.File) error) error {
-	reqConf := &items.ItemChildrenRequestBuilderGetRequestConfiguration{
-		QueryParameters: &items.ItemChildrenRequestBuilderGetQueryParameters{
-			Select: []string{"id", "name", "size", "folder", "file", "parentReference", "createdDateTime", "lastModifiedDateTime", "hashes"},
-		},
+	requestParameters := &msgraph.DrivesItemItemsItemChildrenRequestBuilderGetQueryParameters{
+		Select: []string{"id", "name", "size", "folder", "file", "parentReference", "createdDateTime", "lastModifiedDateTime", "hashes"},
+	}
+	reqConf := &msgraph.DrivesItemItemsItemChildrenRequestBuilderGetRequestConfiguration{
+		QueryParameters: requestParameters,
 	}
 	pages, err := c.graphClient.Me().Drive().Items().ByDriveItemId(itemID).Children().Get(context.Background(), reqConf)
 	if err != nil {
@@ -194,9 +198,10 @@ func (c *microsoftClient) ListFiles(folderID, parentPath string, callback func(m
 
 func (c *microsoftClient) CreateFolder(parentFolderID, name string) (*model.Folder, error) {
 	folder := models.NewDriveItem()
-	folder.SetName(name)
+	folder.SetName(&name)
 	folder.SetFolder(models.NewFolder())
-	folder.SetAdditionalData(map[string]interface{}{"@microsoft.graph.conflictBehavior": "rename"})
+	conflictBehavior := "rename"
+	folder.SetAdditionalData(map[string]interface{}{"@microsoft.graph.conflictBehavior": &conflictBehavior})
 
 	created, err := c.graphClient.Me().Drive().Items().ByDriveItemId(parentFolderID).Children().Post(context.Background(), folder, nil)
 	if err != nil {
@@ -225,7 +230,6 @@ func (c *microsoftClient) DownloadFile(fileID string) (io.ReadCloser, int64, err
 }
 
 func (c *microsoftClient) ExportFile(fileID, mimeType string) (io.ReadCloser, int64, error) {
-	// OneDrive/SharePoint don't have proprietary formats like GSuite, so export is the same as download.
 	return c.DownloadFile(fileID)
 }
 
@@ -237,7 +241,7 @@ func (c *microsoftClient) UploadFile(parentFolderID, name string, content io.Rea
 	if err != nil {
 		return nil, err
 	}
-	item, err := c.graphClient.Me().Drive().Items().ByDriveItemId(parentFolderID).Children().ByDriveItemId(name).Content().Put(context.Background(), data, nil)
+	item, err := c.graphClient.Me().Drive().Items().ByDriveItemId(parentFolderID).ItemWithPath(name).Content().Put(context.Background(), data, nil)
 	if err != nil {
 		return nil, handleGraphError(err)
 	}
@@ -246,20 +250,20 @@ func (c *microsoftClient) UploadFile(parentFolderID, name string, content io.Rea
 }
 
 func (c *microsoftClient) resumableUpload(parentFolderID, name string, content io.Reader, size int64) (*model.File, error) {
-	uploadSessionReq := items.NewItemCreateUploadSessionPostRequestBody()
+	uploadSessionReq := createuploadsession.NewCreateUploadSessionPostRequestBody()
 	itemInfo := models.NewDriveItemUploadableProperties()
-	itemInfo.SetName(name)
+	itemInfo.SetName(&name)
 	conflictBehavior := "rename"
 	itemInfo.SetAdditionalData(map[string]interface{}{"@microsoft.graph.conflictBehavior": &conflictBehavior})
 	uploadSessionReq.SetItem(itemInfo)
 
-	session, err := c.graphClient.Me().Drive().Items().ByDriveItemId(parentFolderID).CreateUploadSession().Post(context.Background(), uploadSessionReq, nil)
+	session, err := c.graphClient.Me().Drive().Items().ByDriveItemId(parentFolderID).ItemWithPath(name).CreateUploadSession().Post(context.Background(), uploadSessionReq, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create upload session: %w", handleGraphError(err))
 	}
 
 	uploadURL := *session.GetUploadUrl()
-	chunkSize := 320 * 1024 * 10 // 3.2 MB chunks, a recommended size
+	chunkSize := 320 * 1024 * 10 // 3.2 MB chunks
 	buffer := make([]byte, chunkSize)
 	var bytesUploaded int64
 
@@ -288,7 +292,7 @@ func (c *microsoftClient) resumableUpload(parentFolderID, name string, content i
 		}
 		defer resp.Body.Close()
 
-		if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK { // 201 or 200 means final block was uploaded.
+		if resp.StatusCode == http.StatusCreated || resp.StatusCode == http.StatusOK {
 			var result models.DriveItem
 			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 				return nil, err
@@ -296,7 +300,7 @@ func (c *microsoftClient) resumableUpload(parentFolderID, name string, content i
 			email, _ := c.GetUserEmail()
 			return driveItemToFileModel(&result, email, parentFolderID), nil
 		}
-		if resp.StatusCode != http.StatusAccepted { // 202 means block was received.
+		if resp.StatusCode != http.StatusAccepted {
 			return nil, fmt.Errorf("upload failed with status %s", resp.Status)
 		}
 		bytesUploaded += int64(bytesRead)
@@ -311,11 +315,13 @@ func (c *microsoftClient) DeleteFile(fileID string) error {
 
 func (c *microsoftClient) Share(folderID, emailAddress string) (string, error) {
 	req := models.NewInvitePostRequestBody()
-	req.SetRequireSignIn(true)
-	req.SetSendInvitation(false) // Don't email the user.
+	sendInvite := false
+	requireSignin := true
+	req.SetSendInvitation(&sendInvite)
+	req.SetRequireSignIn(&requireSignin)
 	req.SetRoles([]string{"write"})
 	recipient := models.NewDriveRecipient()
-	recipient.SetEmail(emailAddress)
+	recipient.SetEmail(&emailAddress)
 	req.SetRecipients([]models.DriveRecipientable{recipient})
 
 	perms, err := c.graphClient.Me().Drive().Items().ByDriveItemId(folderID).Invite().Post(context.Background(), req, nil)
@@ -325,14 +331,14 @@ func (c *microsoftClient) Share(folderID, emailAddress string) (string, error) {
 	if len(perms.GetValue()) > 0 {
 		return *perms.GetValue()[0].GetId(), nil
 	}
-	return "permission-exists", nil // Assume if no new perm is returned, it already exists.
+	return "permission-exists", nil
 }
 
 func (c *microsoftClient) CheckShare(folderID, permissionID string) (bool, error) {
 	_, err := c.graphClient.Me().Drive().Items().ByDriveItemId(folderID).Permissions().ByPermissionId(permissionID).Get(context.Background(), nil)
 	if err != nil {
-		if oerr, ok := err.(*odataerrors.ODataError); ok && oerr.GetError() != nil && *oerr.GetError().GetCode() == "itemNotFound" {
-			return false, nil // 404 means permission does not exist
+		if oerr, ok := err.(*odataerrors.ODataError); ok && oerr.GetCode() != nil && *oerr.GetCode() == "itemNotFound" {
+			return false, nil
 		}
 		return false, handleGraphError(err)
 	}
@@ -340,44 +346,39 @@ func (c *microsoftClient) CheckShare(folderID, permissionID string) (bool, error
 }
 
 func (c *microsoftClient) TransferOwnership(fileID, emailAddress string) (bool, error) {
-	// Native ownership transfer is not supported by the Graph API for OneDrive in a way
-	// that works between arbitrary personal and work accounts. Fallback is required.
 	return false, nil
 }
 
 func (c *microsoftClient) MoveFile(fileID, currentParentID, newParentFolderID string) error {
 	req := models.NewDriveItem()
 	parentRef := models.NewItemReference()
-	parentRef.SetId(newParentFolderID)
+	parentRef.SetId(&newParentFolderID)
 	req.SetParentReference(parentRef)
 	_, err := c.graphClient.Me().Drive().Items().ByDriveItemId(fileID).Patch(context.Background(), req, nil)
 	return handleGraphError(err)
 }
 
-// handleGraphError interprets OData errors from the Graph API for better logging and retry logic.
 func handleGraphError(err error) error {
 	if err == nil {
 		return nil
 	}
-	if odataErr, ok := err.(*odataerrors.ODataError); ok && odataErr.GetError() != nil {
+	if odataErr, ok := err.(*odataerrors.ODataError); ok {
 		code, message := "unknown", "no message"
-		if odataErr.GetError().GetCode() != nil {
-			code = *odataErr.GetError().GetCode()
+		if odataErr.GetCode() != nil {
+			code = *odataErr.GetCode()
 		}
-		if odataErr.GetError().GetMessage() != nil {
-			message = *odataErr.GetError().GetMessage()
+		if odataErr.GetMessage() != nil {
+			message = *odataErr.GetMessage()
 		}
 
-		// Implement backoff for common transient/throttling error codes.
 		if code == "activityLimitReached" || code == "throttled" || code == "serviceNotAvailable" || code == "resourceLocked" {
-			time.Sleep(5 * time.Second) // Simple backoff
+			time.Sleep(5 * time.Second)
 		}
 		return fmt.Errorf("graph API error: %s - %s", code, message)
 	}
 	return err
 }
 
-// driveItemToFileModel is a helper to convert a Graph SDK DriveItem to our internal model.
 func driveItemToFileModel(item models.DriveItemable, ownerEmail, parentID string) *model.File {
 	file := &model.File{
 		FileID:         *item.GetId(),

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -334,6 +335,8 @@ func (tr *TaskRunner) BalanceStorage() error {
 
 					if tr.IsSafeRun {
 						logger.DryRun(provider, "MOVE '%s' from %s to %s", fileToMove.FileName, fullAccountQuota.OwnerEmail, targetQuota.OwnerEmail)
+						// Simulate the move for dry run calculations
+						currentUsage -= (float64(fileToMove.FileSize) / float64(fullAccountQuota.TotalBytes))
 						continue
 					}
 
@@ -408,6 +411,7 @@ func (tr *TaskRunner) FreeMain() error {
 	logger.Info("Moving %d files (%.2f GB) from %s to backup accounts.", len(filesToMove), float64(totalSizeToMove)/1024/1024/1024, mainUser.Email)
 
 	for _, file := range filesToMove {
+		// Sort backups by remaining space before each move to pick the best target.
 		sort.Slice(backupQuotas, func(i, j int) bool { return backupQuotas[i].RemainingBytes > backupQuotas[j].RemainingBytes })
 		targetAccount := backupQuotas[0]
 		targetClient := tr.Clients[targetAccount.OwnerEmail]
@@ -415,6 +419,8 @@ func (tr *TaskRunner) FreeMain() error {
 		logger.TaggedInfo(provider, "Moving '%s' to %s", file.FileName, targetAccount.OwnerEmail)
 		if tr.IsSafeRun {
 			logger.DryRun(provider, "MOVE '%s' from %s to %s", file.FileName, mainUser.Email, targetAccount.OwnerEmail)
+			// Simulate space change for dry run
+			backupQuotas[0].RemainingBytes -= file.FileSize
 			continue
 		}
 
@@ -424,6 +430,7 @@ func (tr *TaskRunner) FreeMain() error {
 			return err
 		}
 		if moved {
+			// Update local state to reflect the move for the next iteration.
 			file.OwnerEmail = targetAccount.OwnerEmail
 			tr.DB.UpsertFile(file)
 			backupQuotas[0].RemainingBytes -= file.FileSize
@@ -471,6 +478,7 @@ func (tr *TaskRunner) ShareWithMain() error {
 				logger.DryRun(provider, "SHARE sync folder with %s", backup.Email)
 				continue
 			}
+			// This is an idempotent operation; re-sharing is safe if it already exists.
 			if _, err := mainClient.Share(syncFolderID, backup.Email); err != nil {
 				logger.Warn(provider, err, "failed to apply share permission for %s", backup.Email)
 			}
@@ -489,7 +497,10 @@ func (tr *TaskRunner) getQuotasForUsers(users []model.User) []model.StorageQuota
 		wg.Add(1)
 		go func(user model.User) {
 			defer wg.Done()
-			client := tr.Clients[user.Email]
+			client, ok := tr.Clients[user.Email]
+			if !ok {
+				return
+			}
 			if q, err := client.GetAbout(); err == nil {
 				quotaChan <- *q
 			}
@@ -524,7 +535,8 @@ func (tr *TaskRunner) ensurePathExists(client api.CloudClient, path string, root
 		logger.TaggedInfo("helper", "Creating missing folder '%s' on %s", part, client.GetProviderName())
 		if tr.IsSafeRun {
 			logger.DryRun(client.GetProviderName(), "CREATE FOLDER '%s' in parent %s", part, currentParentID)
-			currentParentID = "dry-run-folder-id"
+			// For dry run, we need a placeholder ID to continue and update the map.
+			currentParentID = "dry-run-folder-id-" + part
 			folderMap[normalized] = model.Folder{FolderID: currentParentID, Path: currentPath, NormalizedPath: normalized}
 			continue
 		}
@@ -548,7 +560,7 @@ func (tr *TaskRunner) transferFile(sourceClient, targetClient api.CloudClient, f
 	}
 
 	parentPath := filepath.Dir(strings.ReplaceAll(file.Path, "\\", "/"))
-	if parentPath == "." {
+	if parentPath == "." || parentPath == "\\" {
 		parentPath = "/"
 	}
 	targetRootID, _ := targetClient.PreFlightCheck()
@@ -580,7 +592,10 @@ func (tr *TaskRunner) transferFile(sourceClient, targetClient api.CloudClient, f
 }
 
 func (tr *TaskRunner) moveFileBetweenAccounts(sourceClient, targetClient api.CloudClient, file model.File) (bool, error) {
-	targetEmail, _ := targetClient.GetUserEmail()
+	targetEmail, err := targetClient.GetUserEmail()
+	if err != nil {
+		return false, fmt.Errorf("could not get target user email: %w", err)
+	}
 
 	transferred, _ := sourceClient.TransferOwnership(file.FileID, targetEmail)
 	if transferred {
@@ -599,9 +614,12 @@ func (tr *TaskRunner) moveFileBetweenAccounts(sourceClient, targetClient api.Clo
 
 	logger.TaggedInfo("move", "Deleting original file '%s' from %s.", file.FileName, sourceClient.GetProviderName())
 	if err := sourceClient.DeleteFile(file.FileID); err != nil {
-		logger.Error(err, "CRITICAL: Failed to delete original file after copy. '%s' is now duplicated.", file.FileName)
+		// This is a critical error. The file is now duplicated across accounts.
+		logger.Error(err, "CRITICAL: Failed to delete original file after copy. '%s' is now duplicated across accounts.", file.FileName)
 		return false, err
 	}
+	tr.DB.DeleteFile(file.FileID, file.Provider)
+
 	return true, nil
 }
 
@@ -612,5 +630,9 @@ func selectProvider(label string) (string, error) {
 		Items: []string{"Google", "Microsoft"},
 	}
 	_, result, err := prompt.Run()
-	return result, err
+	if err != nil {
+		logger.Info("Operation cancelled.")
+		os.Exit(0)
+	}
+	return result, nil
 }

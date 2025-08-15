@@ -1,15 +1,11 @@
 package cmd
 
 import (
-	"cloud-drives-sync/internal/api"
 	"cloud-drives-sync/internal/auth"
 	"cloud-drives-sync/internal/config"
 	"cloud-drives-sync/internal/database"
-	"cloud-drives-sync/internal/google"
 	"cloud-drives-sync/internal/logger"
-	"cloud-drives-sync/internal/microsoft"
 	"cloud-drives-sync/internal/model"
-	"context"
 	"fmt"
 	"os"
 
@@ -175,35 +171,4 @@ func promptForInput(label string) string {
 		logger.Error(err, "Prompt failed")
 	}
 	return result
-}
-
-// getEmailFromToken creates a temporary client just to get the user's email for configuration.
-func getEmailFromToken(provider string, cfg *config.Config, refreshToken string) (string, error) {
-	tempUser := model.User{Email: "temp", RefreshToken: refreshToken, Provider: provider}
-	client, err := createTempClient(provider, cfg, tempUser)
-	if err != nil {
-		return "", err
-	}
-	return client.GetUserEmail()
-}
-
-// createTempClient is a helper for creating a single-use client.
-func createTempClient(provider string, cfg *config.Config, user model.User) (api.CloudClient, error) {
-	ctx := context.Background()
-	switch provider {
-	case "Google":
-		ts, err := auth.GetGoogleTokenSource(ctx, cfg, user.RefreshToken)
-		if err != nil {
-			return nil, err
-		}
-		return google.NewClient(ctx, ts, user.Email)
-	case "Microsoft":
-		ts, err := auth.GetMicrosoftTokenSource(ctx, cfg, user.RefreshToken)
-		if err != nil {
-			return nil, err
-		}
-		adapter := &tokenSourceAdapter{ts: ts}
-		return microsoft.NewClient(ctx, adapter, user.Email)
-	}
-	return nil, fmt.Errorf("unknown provider: %s", provider)
 }
