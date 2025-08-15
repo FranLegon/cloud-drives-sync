@@ -6,11 +6,13 @@ import (
 	"cloud-drives-sync/internal/database"
 	"cloud-drives-sync/internal/logger"
 	"cloud-drives-sync/internal/model"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 
-	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
+	"github.comcom/manifoldco/promptui"
 )
 
 var initCmd = &cobra.Command{
@@ -94,12 +96,12 @@ func createNewConfig() *config.Config {
 	logger.Info("For details, see the project's README on setting up API access.")
 
 	logger.Info("\nEnter Google Client credentials (from Google Cloud Console):")
-	cfg.GoogleClient.ID = promptForInput("Google Client ID")
-	cfg.GoogleClient.Secret = promptForInput("Google Client Secret")
+	cfg.GoogleClient.ID = promptForInput("Google Client ID", true)
+	cfg.GoogleClient.Secret = promptForInput("Google Client Secret", true)
 
 	logger.Info("\nEnter Microsoft Client credentials (from Azure Portal):")
-	cfg.MicrosoftClient.ID = promptForInput("Microsoft Client ID")
-	cfg.MicrosoftClient.Secret = promptForInput("Microsoft Client Secret")
+	cfg.MicrosoftClient.ID = promptForInput("Microsoft Client ID", true)
+	cfg.MicrosoftClient.Secret = promptForInput("Microsoft Client Secret", true)
 
 	return cfg
 }
@@ -161,8 +163,18 @@ func addMainAccount(cfg *config.Config, password string) {
 	}
 }
 
-func promptForInput(label string) string {
-	prompt := promptui.Prompt{Label: label}
+// promptForInput now has a 'required' flag to enforce non-empty input.
+func promptForInput(label string, required bool) string {
+	validate := func(input string) error {
+		if required && strings.TrimSpace(input) == "" {
+			return errors.New("this field cannot be empty")
+		}
+		return nil
+	}
+	prompt := promptui.Prompt{
+		Label:    label,
+		Validate: validate,
+	}
 	result, err := prompt.Run()
 	if err != nil {
 		logger.Error(err, "Prompt failed")

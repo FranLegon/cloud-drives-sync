@@ -43,7 +43,9 @@ func StartOAuthFlow(provider string, cfg *config.Config) (string, error) {
 			ClientID:     cfg.MicrosoftClient.ID,
 			ClientSecret: cfg.MicrosoftClient.Secret,
 			RedirectURL:  redirectURL,
-			Endpoint:     microsoft.LiveConnectEndpoint,
+			// *** THIS IS THE FIX ***
+			// Use the "common" endpoint to support both personal and work/school accounts.
+			Endpoint: microsoft.AzureADEndpoint("common"),
 			Scopes: []string{
 				"files.readwrite.all",
 				"user.read",
