@@ -14,11 +14,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
-	"golang.org/x/oauth2"
 )
 
 var (
@@ -57,23 +54,6 @@ func promptForPassword(label string) string {
 		os.Exit(0)
 	}
 	return result
-}
-
-// tokenSourceAdapter adapts an oauth2.TokenSource to the azcore.TokenCredential interface.
-type tokenSourceAdapter struct {
-	ts oauth2.TokenSource
-}
-
-// GetToken satisfies the azcore.TokenCredential interface.
-func (t *tokenSourceAdapter) GetToken(_ context.Context, _ policy.TokenRequestOptions) (azcore.AccessToken, error) {
-	token, err := t.ts.Token()
-	if err != nil {
-		return azcore.AccessToken{}, err
-	}
-	return azcore.AccessToken{
-		Token:     token.AccessToken,
-		ExpiresOn: token.Expiry,
-	}, nil
 }
 
 // setup is the main helper function called by operational commands.
@@ -133,8 +113,8 @@ func createClient(provider string, cfg *config.Config, user model.User) (api.Clo
 		if err != nil {
 			return nil, err
 		}
-		adapter := &tokenSourceAdapter{ts: ts}
-		return microsoft.NewClient(ctx, adapter, user.Email)
+		// The new pure HTTP client uses the standard oauth2.TokenSource directly.
+		return microsoft.NewClient(ctx, ts, user.Email)
 	}
 	return nil, fmt.Errorf("unknown provider: %s", provider)
 }
