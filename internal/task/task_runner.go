@@ -193,9 +193,10 @@ func (tr *TaskRunner) SyncProviders() error {
 	var googleClient, msClient api.CloudClient
 	for _, u := range tr.Config.Users {
 		if u.IsMain {
-			if u.Provider == "Google" {
+			switch u.Provider {
+			case "Google":
 				googleMain, googleClient = u, tr.Clients[u.Email]
-			} else if u.Provider == "Microsoft" {
+			case "Microsoft":
 				msMain, msClient = u, tr.Clients[u.Email]
 			}
 		}
