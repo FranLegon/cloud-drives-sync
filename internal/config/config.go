@@ -30,9 +30,9 @@ type ClientCredentials struct {
 	Secret string `json:"secret"`
 }
 
-// getConfigPath returns the absolute path to a configuration file, assuming
+// GetConfigPath returns the absolute path to a configuration file, assuming
 // it resides in the same directory as the executable.
-func getConfigPath(filename string) (string, error) {
+func GetConfigPath(filename string) (string, error) {
 	exePath, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -42,7 +42,7 @@ func getConfigPath(filename string) (string, error) {
 
 // LoadConfig finds, reads, decrypts, and unmarshals the configuration from disk.
 func LoadConfig(password string) (*Config, error) {
-	saltPath, err := getConfigPath(SaltFile)
+	saltPath, err := GetConfigPath(SaltFile)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +51,7 @@ func LoadConfig(password string) (*Config, error) {
 		return nil, err
 	}
 
-	configPath, err := getConfigPath(ConfigFile)
+	configPath, err := GetConfigPath(ConfigFile)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +76,7 @@ func LoadConfig(password string) (*Config, error) {
 // SaveConfig marshals the current Config struct to JSON, encrypts it,
 // and writes it back to disk. It handles the initial creation of the salt file.
 func (c *Config) SaveConfig(password string) error {
-	saltPath, err := getConfigPath(SaltFile)
+	saltPath, err := GetConfigPath(SaltFile)
 	if err != nil {
 		return err
 	}
@@ -110,7 +110,7 @@ func (c *Config) SaveConfig(password string) error {
 		return err
 	}
 
-	configPath, err := getConfigPath(ConfigFile)
+	configPath, err := GetConfigPath(ConfigFile)
 	if err != nil {
 		return err
 	}
