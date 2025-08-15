@@ -15,13 +15,15 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	azauthentication "github.com/microsoft/kiota-authentication-azure-go"
+	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/models/odataerrors"
 )
 
 // microsoftClient implements the api.CloudClient interface for Microsoft OneDrive.
 type microsoftClient struct {
-	graphClient *msgraph.GraphServiceClient
+	graphClient *msgraphsdk.GraphServiceClient
 	ownerEmail  string
 	userEmail   string
 	emailOnce   sync.Once
@@ -29,15 +31,15 @@ type microsoftClient struct {
 
 // NewClient creates a new, fully functional Microsoft Graph client for OneDrive.
 func NewClient(ctx context.Context, ts azcore.TokenCredential, ownerEmail string) (api.CloudClient, error) {
-	authProvider, err := kiotaauthentication.NewAzureIdentityAuthenticationProviderWithScopes(ts, []string{"https://graph.microsoft.com/.default"})
+	authProvider, err := azauthentication.NewAzureIdentityAuthenticationProviderWithScopes(ts, []string{"https://graph.microsoft.com/.default"})
 	if err != nil {
 		return nil, fmt.Errorf("error creating graph auth provider: %w", err)
 	}
-	adapter, err := msgraph.NewGraphRequestAdapter(authProvider)
+	adapter, err := msgraphsdk.NewGraphRequestAdapter(authProvider)
 	if err != nil {
 		return nil, fmt.Errorf("error creating graph request adapter: %w", err)
 	}
-	client := msgraph.NewGraphServiceClient(adapter)
+	client := msgraphsdk.NewGraphServiceClient(adapter)
 	return &microsoftClient{graphClient: client, ownerEmail: ownerEmail}, nil
 }
 
@@ -48,10 +50,10 @@ func (c *microsoftClient) GetProviderName() string {
 func (c *microsoftClient) GetUserEmail() (string, error) {
 	var err error
 	c.emailOnce.Do(func() {
-		requestParameters := &msgraph.MeRequestBuilderGetQueryParameters{
+		requestParameters := &msgraphsdk.MeRequestBuilderGetQueryParameters{
 			Select: []string{"userPrincipalName", "mail"},
 		}
-		reqConf := &msgraph.MeRequestBuilderGetRequestConfiguration{
+		reqConf := &msgraphsdk.MeRequestBuilderGetRequestConfiguration{
 			QueryParameters: requestParameters,
 		}
 		user, getErr := c.graphClient.Me().Get(context.Background(), reqConf)
@@ -88,10 +90,10 @@ func (c *microsoftClient) GetAbout() (*model.StorageQuota, error) {
 
 func (c *microsoftClient) PreFlightCheck() (string, error) {
 	filter := "name eq 'synched-cloud-drives' and folder ne null"
-	requestParameters := &msgraph.DrivesItemRootChildrenRequestBuilderGetQueryParameters{
+	requestParameters := &msgraphsdk.DrivesItemRootChildrenRequestBuilderGetQueryParameters{
 		Filter: &filter,
 	}
-	reqConf := &msgraph.DrivesItemRootChildrenRequestBuilderGetRequestConfiguration{
+	reqConf := &msgraphsdk.DrivesItemRootChildrenRequestBuilderGetRequestConfiguration{
 		QueryParameters: requestParameters,
 	}
 	res, err := c.graphClient.Me().Drive().Root().Children().Get(context.Background(), reqConf)
@@ -123,10 +125,10 @@ func (c *microsoftClient) CreateRootSyncFolder() (string, error) {
 }
 
 func (c *microsoftClient) listChildren(itemID string, parentPath string, folderCallback func(model.Folder) error, fileCallback func(model.File) error) error {
-	requestParameters := &msgraph.DrivesItemItemsItemChildrenRequestBuilderGetQueryParameters{
+	requestParameters := &msgraphsdk.DrivesItemItemsItemChildrenRequestBuilderGetQueryParameters{
 		Select: []string{"id", "name", "size", "folder", "file", "parentReference", "createdDateTime", "lastModifiedDateTime", "hashes"},
 	}
-	reqConf := &msgraph.DrivesItemItemsItemChildrenRequestBuilderGetRequestConfiguration{
+	reqConf := &msgraphsdk.DrivesItemItemsItemChildrenRequestBuilderGetRequestConfiguration{
 		QueryParameters: requestParameters,
 	}
 	pages, err := c.graphClient.Me().Drive().Items().ByDriveItemId(itemID).Children().Get(context.Background(), reqConf)
@@ -134,7 +136,7 @@ func (c *microsoftClient) listChildren(itemID string, parentPath string, folderC
 		return handleGraphError(err)
 	}
 
-	pageIterator, err := msgraph.NewPageIterator(pages, c.graphClient.GetAdapter(), models.CreateDriveItemCollectionResponseFromDiscriminatorValue)
+	pageIterator, err := msgraphsdk.NewPageIterator(pages, c.graphClient.GetAdapter(), models.CreateDriveItemCollectionResponseFromDiscriminatorValue)
 	if err != nil {
 		return handleGraphError(err)
 	}
@@ -250,8 +252,6 @@ func (c *microsoftClient) UploadFile(parentFolderID, name string, content io.Rea
 }
 
 func (c *microsoftClient) resumableUpload(parentFolderID, name string, content io.Reader, size int64) (*model.File, error) {
-	// *** FIX IS HERE ***
-	// The request body is created from the main models package, not a deep import path.
 	uploadSessionReq := models.NewCreateUploadSessionPostRequestBody()
 	itemInfo := models.NewDriveItemUploadableProperties()
 	itemInfo.SetName(&name)
@@ -317,8 +317,6 @@ func (c *microsoftClient) DeleteFile(fileID string) error {
 }
 
 func (c *microsoftClient) Share(folderID, emailAddress string) (string, error) {
-	// *** FIX IS HERE ***
-	// The request body is from the main models package.
 	req := models.NewInvitePostRequestBody()
 	sendInvite := false
 	requireSignin := true
@@ -342,7 +340,7 @@ func (c *microsoftClient) Share(folderID, emailAddress string) (string, error) {
 func (c *microsoftClient) CheckShare(folderID, permissionID string) (bool, error) {
 	_, err := c.graphClient.Me().Drive().Items().ByDriveItemId(folderID).Permissions().ByPermissionId(permissionID).Get(context.Background(), nil)
 	if err != nil {
-		if oerr, ok := err.(*odataerrors.ODataError); ok && oerr.GetCode() != nil && *oerr.GetCode() == "itemNotFound" {
+		if odataErr, ok := err.(*odataerrors.ODataError); ok && odataErr.GetMainError() != nil && odataErr.GetMainError().GetCode() != nil && *odataErr.GetMainError().GetCode() == "itemNotFound" {
 			return false, nil
 		}
 		return false, handleGraphError(err)
@@ -369,11 +367,15 @@ func handleGraphError(err error) error {
 	}
 	if odataErr, ok := err.(*odataerrors.ODataError); ok {
 		code, message := "unknown", "no message"
-		if odataErr.GetCode() != nil {
-			code = *odataErr.GetCode()
-		}
-		if odataErr.GetMessage() != nil {
-			message = *odataErr.GetMessage()
+		// *** FIX IS HERE ***
+		// Correct way to access error details in modern SDK
+		if odataErr.GetMainError() != nil {
+			if odataErr.GetMainError().GetCode() != nil {
+				code = *odataErr.GetMainError().GetCode()
+			}
+			if odataErr.GetMainError().GetMessage() != nil {
+				message = *odataErr.GetMainError().GetMessage()
+			}
 		}
 
 		if code == "activityLimitReached" || code == "throttled" || code == "serviceNotAvailable" || code == "resourceLocked" {

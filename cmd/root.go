@@ -8,11 +8,13 @@ import (
 	"cloud-drives-sync/internal/google"
 	"cloud-drives-sync/internal/logger"
 	"cloud-drives-sync/internal/microsoft"
+	"cloud-drives-sync/internal/model"
 	"cloud-drives-sync/internal/task"
 	"context"
+	"fmt"
 	"os"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore" // THIS IMPORT WAS ADDED
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
@@ -115,28 +117,7 @@ func setup() *task.TaskRunner {
 	ctx := context.Background()
 
 	for _, user := range cfg.Users {
-		var client api.CloudClient
-		var err error
-
-		switch user.Provider {
-		case "Google":
-			ts, tokenErr := auth.GetGoogleTokenSource(ctx, cfg, user.RefreshToken)
-			if tokenErr != nil {
-				logger.Warn(user.Email, tokenErr, "could not create google token source")
-				continue
-			}
-			client, err = google.NewClient(ctx, ts, user.Email)
-
-		case "Microsoft":
-			ts, tokenErr := auth.GetMicrosoftTokenSource(ctx, cfg, user.RefreshToken)
-			if tokenErr != nil {
-				logger.Warn(user.Email, tokenErr, "could not create microsoft token source")
-				continue
-			}
-			adapter := &tokenSourceAdapter{ts: ts}
-			client, err = microsoft.NewClient(ctx, adapter, user.Email)
-		}
-
+		client, err := createTempClient(user.Provider, cfg, user)
 		if err != nil {
 			logger.Warn(user.Email, err, "failed to create API client")
 			continue
@@ -150,4 +131,35 @@ func setup() *task.TaskRunner {
 		Clients:   clients,
 		IsSafeRun: safeRun,
 	}
+}
+
+// getEmailFromToken creates a temporary client just to get the user's email for configuration.
+func getEmailFromToken(provider string, cfg *config.Config, refreshToken string) (string, error) {
+	tempUser := model.User{Email: "temp", RefreshToken: refreshToken, Provider: provider}
+	client, err := createTempClient(provider, cfg, tempUser)
+	if err != nil {
+		return "", err
+	}
+	return client.GetUserEmail()
+}
+
+// createTempClient is a helper for creating a single-use client.
+func createTempClient(provider string, cfg *config.Config, user model.User) (api.CloudClient, error) {
+	ctx := context.Background()
+	switch provider {
+	case "Google":
+		ts, err := auth.GetGoogleTokenSource(ctx, cfg, user.RefreshToken)
+		if err != nil {
+			return nil, err
+		}
+		return google.NewClient(ctx, ts, user.Email)
+	case "Microsoft":
+		ts, err := auth.GetMicrosoftTokenSource(ctx, cfg, user.RefreshToken)
+		if err != nil {
+			return nil, err
+		}
+		adapter := &tokenSourceAdapter{ts: ts}
+		return microsoft.NewClient(ctx, adapter, user.Email)
+	}
+	return nil, fmt.Errorf("unknown provider: %s", provider)
 }
