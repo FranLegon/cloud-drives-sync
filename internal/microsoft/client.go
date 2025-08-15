@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/microsoftgraph/msgraph-sdk-go"
-	"github.com/microsoftgraph/msgraph-sdk-go/drive/items"
+
+	//"github.com/microsoftgraph/msgraph-sdk-go/drive/items"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/models/odataerrors"
 )
