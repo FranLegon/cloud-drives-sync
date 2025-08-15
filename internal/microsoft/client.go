@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/microsoftgraph/msgraph-sdk-go/drives/item/items/item/createuploadsession"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/models/odataerrors"
 )
@@ -241,6 +240,7 @@ func (c *microsoftClient) UploadFile(parentFolderID, name string, content io.Rea
 	if err != nil {
 		return nil, err
 	}
+	// Note: ItemWithPath is used to upload by filename.
 	item, err := c.graphClient.Me().Drive().Items().ByDriveItemId(parentFolderID).ItemWithPath(name).Content().Put(context.Background(), data, nil)
 	if err != nil {
 		return nil, handleGraphError(err)
@@ -250,13 +250,16 @@ func (c *microsoftClient) UploadFile(parentFolderID, name string, content io.Rea
 }
 
 func (c *microsoftClient) resumableUpload(parentFolderID, name string, content io.Reader, size int64) (*model.File, error) {
-	uploadSessionReq := createuploadsession.NewCreateUploadSessionPostRequestBody()
+	// *** FIX IS HERE ***
+	// The request body is created from the main models package, not a deep import path.
+	uploadSessionReq := models.NewCreateUploadSessionPostRequestBody()
 	itemInfo := models.NewDriveItemUploadableProperties()
 	itemInfo.SetName(&name)
 	conflictBehavior := "rename"
 	itemInfo.SetAdditionalData(map[string]interface{}{"@microsoft.graph.conflictBehavior": &conflictBehavior})
 	uploadSessionReq.SetItem(itemInfo)
 
+	// Create the session based on the intended final path of the file.
 	session, err := c.graphClient.Me().Drive().Items().ByDriveItemId(parentFolderID).ItemWithPath(name).CreateUploadSession().Post(context.Background(), uploadSessionReq, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create upload session: %w", handleGraphError(err))
@@ -314,6 +317,8 @@ func (c *microsoftClient) DeleteFile(fileID string) error {
 }
 
 func (c *microsoftClient) Share(folderID, emailAddress string) (string, error) {
+	// *** FIX IS HERE ***
+	// The request body is from the main models package.
 	req := models.NewInvitePostRequestBody()
 	sendInvite := false
 	requireSignin := true
