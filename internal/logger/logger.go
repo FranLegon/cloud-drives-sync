@@ -4,45 +4,89 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 )
 
-var (
-	infoLog   = log.New(os.Stdout, "INFO: ", log.Ldate|log.Ltime)
-	warnLog   = log.New(os.Stderr, "WARN: ", log.Ldate|log.Ltime)
-	errorLog  = log.New(os.Stderr, "ERROR: ", log.Ldate|log.Ltime)
-	dryRunLog = log.New(os.Stdout, "[DRY RUN] ", log.Ldate|log.Ltime)
-)
-
-// Info logs a standard informational message.
-func Info(format string, v ...interface{}) {
-	infoLog.Printf(format, v...)
+// Logger provides structured logging with tags
+type Logger struct {
+	prefix string
 }
 
-// TaggedInfo logs an informational message with a prefix tag (e.g., provider or email).
-func TaggedInfo(tag, format string, v ...interface{}) {
-	infoLog.Printf(fmt.Sprintf("[%s] %s", tag, format), v...)
+// New creates a new logger instance
+func New() *Logger {
+	log.SetFlags(log.Ldate | log.Ltime)
+	log.SetOutput(os.Stdout)
+	return &Logger{}
 }
 
-// Warn logs a non-fatal error message that does not terminate the program.
-func Warn(tag string, err error, format string, v ...interface{}) {
-	if err != nil {
-		warnLog.Printf(fmt.Sprintf("[%s] %s: %v", tag, format, err), v...)
+// WithPrefix returns a new logger with the specified prefix/tag
+func (l *Logger) WithPrefix(prefix string) *Logger {
+	return &Logger{prefix: prefix}
+}
+
+// Info logs an informational message
+func (l *Logger) Info(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if l.prefix != "" {
+		log.Printf("[%s] %s", l.prefix, msg)
 	} else {
-		warnLog.Printf(fmt.Sprintf("[%s] %s", tag, format), v...)
+		log.Println(msg)
 	}
 }
 
-// Error logs a fatal error message and terminates the program with a non-zero exit code.
-func Error(err error, format string, v ...interface{}) {
-	if err != nil {
-		errorLog.Printf(format+": %v", append(v, err)...)
+// Error logs an error message
+func (l *Logger) Error(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if l.prefix != "" {
+		log.Printf("[%s] ERROR: %s", l.prefix, msg)
 	} else {
-		errorLog.Printf(format, v...)
+		log.Printf("ERROR: %s", msg)
 	}
-	os.Exit(1)
 }
 
-// DryRun logs an action that would have been taken if the --safe flag were not present.
-func DryRun(tag, format string, v ...interface{}) {
-	dryRunLog.Printf(fmt.Sprintf("[%s] %s", tag, format), v...)
+// Warning logs a warning message
+func (l *Logger) Warning(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if l.prefix != "" {
+		log.Printf("[%s] WARNING: %s", l.prefix, msg)
+	} else {
+		log.Printf("WARNING: %s", msg)
+	}
+}
+
+// Success logs a success message
+func (l *Logger) Success(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if l.prefix != "" {
+		log.Printf("[%s] ✓ %s", l.prefix, msg)
+	} else {
+		log.Printf("✓ %s", msg)
+	}
+}
+
+// DryRun logs a dry-run action
+func (l *Logger) DryRun(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if l.prefix != "" {
+		log.Printf("[%s] [DRY RUN] %s", l.prefix, msg)
+	} else {
+		log.Printf("[DRY RUN] %s", msg)
+	}
+}
+
+// Fatal logs a fatal error and exits
+func (l *Logger) Fatal(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if l.prefix != "" {
+		log.Fatalf("[%s] FATAL: %s", l.prefix, msg)
+	} else {
+		log.Fatalf("FATAL: %s", msg)
+	}
+}
+
+// NormalizePath normalizes a path to lowercase with forward slashes
+func NormalizePath(path string) string {
+	normalized := strings.ToLower(path)
+	normalized = strings.ReplaceAll(normalized, "\\", "/")
+	return normalized
 }

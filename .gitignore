@@ -1,0 +1,17 @@
+# Binaries
+bin/
+
+# Config and database files
+*.enc
+*.db
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

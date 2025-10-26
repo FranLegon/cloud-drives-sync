@@ -1,6 +1,10 @@
 package cmd
 
 import (
+	"context"
+	"fmt"
+	"os"
+
 	"cloud-drives-sync/internal/api"
 	"cloud-drives-sync/internal/auth"
 	"cloud-drives-sync/internal/config"
@@ -9,112 +13,125 @@ import (
 	"cloud-drives-sync/internal/logger"
 	"cloud-drives-sync/internal/microsoft"
 	"cloud-drives-sync/internal/model"
-	"cloud-drives-sync/internal/task"
-	"context"
-	"fmt"
-	"os"
 
-	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 )
 
 var (
-	safeRun bool
+	safeMode bool
+	log      *logger.Logger
 )
 
-// rootCmd represents the base command when called without any subcommands.
+// rootCmd represents the base command
 var rootCmd = &cobra.Command{
 	Use:   "cloud-drives-sync",
-	Short: "A tool to manage and synchronize files across Google Drive and OneDrive.",
-	Long: `cloud-drives-sync helps de-duplicate files, mirror data between providers,
-and balance storage usage across your configured cloud accounts.
-
-All configuration and metadata is stored in encrypted files (config.json.enc, metadata.db)
-in the same directory as the executable, protected by a master password.`,
+	Short: "Synchronize and manage files across Google Drive and OneDrive accounts",
+	Long: `cloud-drives-sync is a command-line tool for managing and synchronizing
+files across multiple Google Drive and OneDrive accounts. It provides
+de-duplication, cross-provider sync, and storage balancing capabilities.`,
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		log = logger.New()
+	},
 }
 
-// Execute adds all child commands to the root command and sets flags appropriately.
-func Execute() error {
-	return rootCmd.Execute()
+// Execute runs the root command
+func Execute() {
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
 }
 
 func init() {
-	rootCmd.PersistentFlags().BoolVarP(&safeRun, "safe", "s", false, "Perform a dry run without making remote changes (--safe)")
-	rootCmd.AddCommand(initCmd, addAccountCmd, getMetadataCmd, checkForDuplicatesCmd, removeDuplicatesCmd, removeDuplicatesUnsafeCmd, syncProvidersCmd, balanceStorageCmd, freeMainCmd, checkTokensCmd, shareWithMainCmd)
+	// Global flags
+	rootCmd.PersistentFlags().BoolVarP(&safeMode, "safe", "s", false, "Dry-run mode: show what would be done without making changes")
+
+	// Add all subcommands
+	rootCmd.AddCommand(initCmd)
+	rootCmd.AddCommand(addAccountCmd)
+	rootCmd.AddCommand(getMetadataCmd)
+	rootCmd.AddCommand(checkForDuplicatesCmd)
+	rootCmd.AddCommand(removeDuplicatesCmd)
+	rootCmd.AddCommand(syncProvidersCmd)
+	rootCmd.AddCommand(balanceStorageCmd)
+	rootCmd.AddCommand(freeMainCmd)
+	rootCmd.AddCommand(checkTokensCmd)
+	rootCmd.AddCommand(shareWithMainCmd)
 }
 
-func promptForPassword(label string) string {
-	prompt := promptui.Prompt{
-		Label: label,
-		Mask:  '*',
-	}
-	result, err := prompt.Run()
-	if err != nil {
-		logger.Info("Operation cancelled.")
-		os.Exit(0)
-	}
-	return result
-}
-
-// setup is the main helper function called by operational commands.
-func setup() *task.TaskRunner {
-	password := promptForPassword("Enter Master Password")
-
-	cfg, err := config.LoadConfig(password)
-	if err != nil {
-		logger.Error(err, "Failed to load configuration")
-	}
-
-	db, err := database.Connect(password)
-	if err != nil {
-		logger.Error(err, "Failed to connect to database")
-	}
-
-	clients := make(map[string]api.CloudClient)
-	for _, user := range cfg.Users {
-		client, err := createClient(user.Provider, cfg, user)
-		if err != nil {
-			logger.Warn(user.Email, err, "failed to create API client")
-			continue
-		}
-		clients[user.Email] = client
-	}
-
-	return &task.TaskRunner{
-		Config:    cfg,
-		DB:        db,
-		Clients:   clients,
-		IsSafeRun: safeRun,
-	}
-}
-
-// getEmailFromToken creates a temporary client to get a user's email from a new token.
-func getEmailFromToken(provider string, cfg *config.Config, refreshToken string) (string, error) {
-	tempUser := model.User{Email: "temp", RefreshToken: refreshToken, Provider: provider}
-	client, err := createClient(provider, cfg, tempUser)
+// getPassword prompts for and returns the master password
+func getPassword() (string, error) {
+	fmt.Print("Enter master password: ")
+	var password string
+	_, err := fmt.Scanln(&password)
 	if err != nil {
 		return "", err
 	}
-	return client.GetUserEmail()
+	return password, nil
 }
 
-// createClient is a factory for API clients.
-func createClient(provider string, cfg *config.Config, user model.User) (api.CloudClient, error) {
-	ctx := context.Background()
-	switch provider {
-	case "Google":
-		ts, err := auth.GetGoogleTokenSource(ctx, cfg, user.RefreshToken)
-		if err != nil {
-			return nil, err
-		}
-		return google.NewClient(ctx, ts, user.Email)
-	case "Microsoft":
-		ts, err := auth.GetMicrosoftTokenSource(ctx, cfg, user.RefreshToken)
-		if err != nil {
-			return nil, err
-		}
-		// The new pure HTTP client uses the standard oauth2.TokenSource directly.
-		return microsoft.NewClient(ctx, ts, user.Email)
+// loadConfig loads the configuration with password
+func loadConfig() (*config.Config, string, error) {
+	password, err := getPassword()
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to read password: %w", err)
 	}
-	return nil, fmt.Errorf("unknown provider: %s", provider)
+
+	cfg, err := config.Load(password)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to load config: %w", err)
+	}
+
+	return cfg, password, nil
+}
+
+// openDatabase opens the database with password
+func openDatabase(password string) (database.Database, error) {
+	db, err := database.NewDatabase(password)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open database: %w", err)
+	}
+	return db, nil
+}
+
+// getContext returns a background context
+func getContext() context.Context {
+	return context.Background()
+}
+
+// createAllClients creates API clients for all users in the config
+func createAllClients(ctx context.Context, cfg *config.Config) (map[string]api.CloudClient, error) {
+	clients := make(map[string]api.CloudClient)
+
+	for _, user := range cfg.Users {
+		var clientID, clientSecret string
+		if user.Provider == model.ProviderGoogle {
+			clientID = cfg.GoogleClient.ID
+			clientSecret = cfg.GoogleClient.Secret
+		} else {
+			clientID = cfg.MicrosoftClient.ID
+			clientSecret = cfg.MicrosoftClient.Secret
+		}
+
+		oauthConfig, err := auth.OAuthConfig(user.Provider, clientID, clientSecret)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create OAuth config for %s: %w", user.Email, err)
+		}
+
+		tokenSource := auth.TokenSource(ctx, oauthConfig, user.RefreshToken)
+
+		var client api.CloudClient
+		if user.Provider == model.ProviderGoogle {
+			client, err = google.NewClient(ctx, tokenSource)
+		} else {
+			client, err = microsoft.NewClient(ctx, tokenSource)
+		}
+
+		if err != nil {
+			return nil, fmt.Errorf("failed to create client for %s: %w", user.Email, err)
+		}
+
+		clients[user.Email] = client
+	}
+
+	return clients, nil
 }

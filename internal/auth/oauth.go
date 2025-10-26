@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"os/exec"
-	"runtime"
 	"time"
 
-	"cloud-drives-sync/internal/config"
 	"cloud-drives-sync/internal/logger"
+	"cloud-drives-sync/internal/model"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -17,116 +15,129 @@ import (
 )
 
 const (
-	redirectURL = "http://localhost:8080/oauth/callback"
+	// OAuth redirect URI for local callback server
+	RedirectURL = "http://localhost:8080/callback"
+
+	// Google OAuth scopes
+	GoogleDriveScope = "https://www.googleapis.com/auth/drive"
+	GoogleEmailScope = "https://www.googleapis.com/auth/userinfo.email"
+
+	// Microsoft OAuth scopes
+	MicrosoftFilesScope   = "files.readwrite.all"
+	MicrosoftUserScope    = "user.read"
+	MicrosoftOfflineScope = "offline_access"
 )
 
-// StartOAuthFlow initiates the full OAuth 2.0 authorization code flow for a given provider.
-// It starts a local web server to receive the callback, opens the user's browser,
-// waits for the authorization code, and exchanges it for a refresh token.
-func StartOAuthFlow(provider string, cfg *config.Config) (string, error) {
-	var oauthCfg *oauth2.Config
-
+// OAuthConfig creates an OAuth2 configuration for a provider
+func OAuthConfig(provider model.Provider, clientID, clientSecret string) (*oauth2.Config, error) {
 	switch provider {
-	case "Google":
-		oauthCfg = &oauth2.Config{
-			ClientID:     cfg.GoogleClient.ID,
-			ClientSecret: cfg.GoogleClient.Secret,
-			RedirectURL:  redirectURL,
-			Endpoint:     google.Endpoint,
+	case model.ProviderGoogle:
+		return &oauth2.Config{
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			RedirectURL:  RedirectURL,
 			Scopes: []string{
-				"https://www.googleapis.com/auth/drive",
-				"https://www.googleapis.com/auth/userinfo.email",
+				GoogleDriveScope,
+				GoogleEmailScope,
 			},
-		}
-	case "Microsoft":
-		oauthCfg = &oauth2.Config{
-			ClientID:     cfg.MicrosoftClient.ID,
-			ClientSecret: cfg.MicrosoftClient.Secret,
-			RedirectURL:  redirectURL,
-			// *** THIS IS THE FIX ***
-			// Use the "common" endpoint to support both personal and work/school accounts.
-			Endpoint: microsoft.AzureADEndpoint("common"),
+			Endpoint: google.Endpoint,
+		}, nil
+
+	case model.ProviderMicrosoft:
+		return &oauth2.Config{
+			ClientID:     clientID,
+			ClientSecret: clientSecret,
+			RedirectURL:  RedirectURL,
 			Scopes: []string{
-				"files.readwrite.all",
-				"user.read",
-				"offline_access", // This scope is required to get a refresh token.
+				MicrosoftFilesScope,
+				MicrosoftUserScope,
+				MicrosoftOfflineScope,
 			},
-		}
+			Endpoint: microsoft.AzureADEndpoint("common"), // Supports both personal and organizational accounts
+		}, nil
+
 	default:
-		return "", fmt.Errorf("unknown provider for OAuth flow: %s", provider)
-	}
-
-	// `ApprovalForce` ensures a refresh token is issued even if the user has previously consented.
-	authURL := oauthCfg.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
-
-	codeChan := make(chan string)
-	errChan := make(chan error)
-
-	server := &http.Server{Addr: ":8080"}
-	http.HandleFunc("/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			msg := "Authorization code not found in callback URL."
-			fmt.Fprintln(w, "Error: "+msg+". Please try again.")
-			errChan <- fmt.Errorf(msg)
-			return
-		}
-		fmt.Fprintln(w, "Authentication successful! You can close this browser window and return to the terminal.")
-		codeChan <- code
-	})
-
-	go func() {
-		// This server will block until it's shut down.
-		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			errChan <- fmt.Errorf("callback server error: %w", err)
-		}
-	}()
-	// Gracefully shut down the server when the function exits.
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		server.Shutdown(ctx)
-	}()
-
-	logger.Info("Your browser should open for authentication.")
-	logger.Info("If it doesn't, please open this URL:\n%s", authURL)
-	time.Sleep(1 * time.Second) // Give the server a moment to start up.
-	if err := openBrowser(authURL); err != nil {
-		logger.Warn("auth", err, "could not open browser automatically")
-	}
-
-	select {
-	case code := <-codeChan:
-		// Exchange the authorization code for a token set (which includes the refresh token).
-		token, err := oauthCfg.Exchange(context.Background(), code)
-		if err != nil {
-			return "", fmt.Errorf("failed to exchange authorization code for token: %w", err)
-		}
-		if token.RefreshToken == "" {
-			return "", fmt.Errorf("a refresh token was not returned. Please ensure you are requesting 'offline_access' and the Azure App Registration is configured correctly")
-		}
-		return token.RefreshToken, nil
-	case err := <-errChan:
-		return "", err
-	case <-time.After(3 * time.Minute): // Timeout for the whole process.
-		return "", fmt.Errorf("authentication timed out after 3 minutes")
+		return nil, fmt.Errorf("unsupported provider: %s", provider)
 	}
 }
 
-// openBrowser attempts to open a URL in the user's default web browser.
-func openBrowser(url string) error {
-	var cmd string
-	var args []string
-	switch runtime.GOOS {
-	case "windows":
-		cmd = "cmd"
-		args = []string{"/c", "start"}
-	case "darwin":
-		cmd = "open"
-	default: // "linux", "freebsd", "openbsd", "netbsd"
-		cmd = "xdg-open"
+// PerformOAuthFlow initiates the OAuth flow and returns the refresh token
+func PerformOAuthFlow(ctx context.Context, config *oauth2.Config, log *logger.Logger) (string, error) {
+	// Generate a random state for CSRF protection
+	state := generateRandomState()
+
+	// Get the authorization URL
+	authURL := config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+
+	log.Info("Please visit this URL to authorize the application:")
+	log.Info(authURL)
+
+	// Channel to receive the authorization code
+	codeChan := make(chan string, 1)
+	errChan := make(chan error, 1)
+
+	// Start local web server to handle OAuth callback
+	server := &http.Server{Addr: ":8080"}
+
+	http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		// Verify state parameter
+		if r.URL.Query().Get("state") != state {
+			errChan <- fmt.Errorf("state mismatch")
+			fmt.Fprintf(w, "Error: State mismatch. You can close this window.")
+			return
+		}
+
+		// Get authorization code
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			errChan <- fmt.Errorf("no authorization code received")
+			fmt.Fprintf(w, "Error: No authorization code received. You can close this window.")
+			return
+		}
+
+		codeChan <- code
+		fmt.Fprintf(w, "Authorization successful! You can close this window and return to the terminal.")
+	})
+
+	// Start server in a goroutine
+	go func() {
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			errChan <- fmt.Errorf("server error: %w", err)
+		}
+	}()
+
+	// Wait for code or error with timeout
+	var code string
+	select {
+	case code = <-codeChan:
+		// Success
+	case err := <-errChan:
+		server.Shutdown(ctx)
+		return "", err
+	case <-time.After(5 * time.Minute):
+		server.Shutdown(ctx)
+		return "", fmt.Errorf("OAuth flow timed out after 5 minutes")
 	}
-	args = append(args, url)
-	// Start the command but don't wait for it to complete.
-	return exec.Command(cmd, args...).Start()
+
+	// Shutdown the server
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	server.Shutdown(shutdownCtx)
+
+	// Exchange authorization code for token
+	token, err := config.Exchange(ctx, code)
+	if err != nil {
+		return "", fmt.Errorf("failed to exchange code for token: %w", err)
+	}
+
+	if token.RefreshToken == "" {
+		return "", fmt.Errorf("no refresh token received (user may have already authorized)")
+	}
+
+	return token.RefreshToken, nil
+}
+
+// generateRandomState creates a random state string for OAuth CSRF protection
+func generateRandomState() string {
+	return fmt.Sprintf("%d", time.Now().UnixNano())
 }

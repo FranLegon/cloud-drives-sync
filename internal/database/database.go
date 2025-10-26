@@ -1,151 +1,204 @@
 package database
 
 import (
-	"cloud-drives-sync/internal/model"
 	"database/sql"
+	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3" // SQLite driver with SQLCipher support
+	"cloud-drives-sync/internal/model"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 const (
-	dbFile = "metadata.db"
+	DBFileName = "metadata.db"
+	DBUser     = "owner"
 )
 
-// DB wraps the standard sql.DB connection pool.
-type DB struct {
-	*sql.DB
+// Database defines the interface for database operations
+type Database interface {
+	Close() error
+
+	// File operations
+	UpsertFile(file *model.File) error
+	GetFile(fileID string, provider model.Provider) (*model.File, error)
+	GetFilesByHash(hash string, hashAlgorithm string, provider model.Provider) ([]model.File, error)
+	GetAllFiles(provider model.Provider, ownerEmail string) ([]model.File, error)
+	DeleteFile(fileID string, provider model.Provider) error
+
+	// Folder operations
+	UpsertFolder(folder *model.Folder) error
+	GetFolder(folderID string, provider model.Provider) (*model.Folder, error)
+	GetFolderByPath(normalizedPath string, provider model.Provider) (*model.Folder, error)
+	GetAllFolders(provider model.Provider, ownerEmail string) ([]model.Folder, error)
+	DeleteFolder(folderID string, provider model.Provider) error
+
+	// Duplicate detection
+	FindDuplicates(provider model.Provider) (map[string][]model.File, error)
 }
 
-// getDBPath returns the absolute path to the database file.
-func getDBPath() (string, error) {
-	exePath, err := os.Executable()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(filepath.Dir(exePath), dbFile), nil
+// SQLiteDB implements the Database interface using SQLite with SQLCipher
+type SQLiteDB struct {
+	db *sql.DB
 }
 
-// Connect opens and initializes the encrypted SQLite database using SQLCipher.
-func Connect(password string) (*DB, error) {
-	dbPath, err := getDBPath()
+// NewDatabase creates and initializes a new encrypted SQLite database
+func NewDatabase(password string) (Database, error) {
+	// Connection string with SQLCipher encryption
+	// Note: SQLCipher uses PRAGMA key for encryption
+	connStr := fmt.Sprintf("file:%s?_pragma_key=%s&_pragma_cipher_page_size=4096", DBFileName, password)
+
+	db, err := sql.Open("sqlite3", connStr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
-	// The DSN for SQLCipher requires a specific format to pass the key.
-	// The password is URI-encoded to handle special characters.
-	dsn := fmt.Sprintf("file:%s?_auth&_auth_user=owner&_auth_pass=%s&_auth_crypt=sqlcipher", dbPath, password)
-
-	sqlDB, err := sql.Open("sqlite3", dsn)
-	if err != nil {
-		return nil, err
+	// Test the connection
+	if err := db.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 
-	// Ping the database to verify the connection and password.
-	if err = sqlDB.Ping(); err != nil {
-		sqlDB.Close()
-		return nil, fmt.Errorf("failed to connect to encrypted database (check master password): %w", err)
-	}
+	sqlDB := &SQLiteDB{db: db}
 
-	db := &DB{sqlDB}
-	if err = db.initSchema(); err != nil {
+	// Create tables if they don't exist
+	if err := sqlDB.createTables(); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
-	return db, nil
+
+	return sqlDB, nil
 }
 
-// initSchema creates the necessary tables if they don't already exist.
-func (db *DB) initSchema() error {
+// createTables creates the necessary database tables
+func (d *SQLiteDB) createTables() error {
 	filesTable := `
-    CREATE TABLE IF NOT EXISTS files (
-        FileID TEXT,
-        Provider TEXT,
-        OwnerEmail TEXT,
-        FileHash TEXT NOT NULL,
-        HashAlgorithm TEXT NOT NULL,
-        FileName TEXT,
-        FileSize INTEGER,
-        ParentFolderID TEXT,
-        Path TEXT,
-        NormalizedPath TEXT,
-        CreatedOn DATETIME,
-        LastModified DATETIME,
-        LastSynced DATETIME,
-        PRIMARY KEY (FileID, Provider)
-    );`
+	CREATE TABLE IF NOT EXISTS files (
+		FileID TEXT NOT NULL,
+		Provider TEXT NOT NULL,
+		OwnerEmail TEXT NOT NULL,
+		FileHash TEXT NOT NULL,
+		HashAlgorithm TEXT NOT NULL,
+		FileName TEXT,
+		FileSize INTEGER,
+		ParentFolderID TEXT,
+		CreatedOn DATETIME,
+		LastModified DATETIME,
+		LastSynced DATETIME,
+		PRIMARY KEY (FileID, Provider)
+	);`
 
 	foldersTable := `
-    CREATE TABLE IF NOT EXISTS folders (
-        FolderID TEXT,
-        Provider TEXT,
-        OwnerEmail TEXT,
-        FolderName TEXT,
-        ParentFolderID TEXT,
-        Path TEXT NOT NULL,
-        NormalizedPath TEXT NOT NULL,
-        LastSynced DATETIME,
-        PRIMARY KEY (FolderID, Provider)
-    );`
+	CREATE TABLE IF NOT EXISTS folders (
+		FolderID TEXT NOT NULL,
+		Provider TEXT NOT NULL,
+		OwnerEmail TEXT NOT NULL,
+		FolderName TEXT,
+		ParentFolderID TEXT,
+		Path TEXT NOT NULL,
+		NormalizedPath TEXT NOT NULL,
+		LastSynced DATETIME,
+		PRIMARY KEY (FolderID, Provider)
+	);`
 
-	tx, err := db.Begin()
+	if _, err := d.db.Exec(filesTable); err != nil {
+		return fmt.Errorf("failed to create files table: %w", err)
+	}
+
+	if _, err := d.db.Exec(foldersTable); err != nil {
+		return fmt.Errorf("failed to create folders table: %w", err)
+	}
+
+	// Create indexes for common queries
+	indexes := []string{
+		"CREATE INDEX IF NOT EXISTS idx_files_hash ON files(FileHash, HashAlgorithm, Provider);",
+		"CREATE INDEX IF NOT EXISTS idx_files_owner ON files(OwnerEmail, Provider);",
+		"CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(NormalizedPath, Provider);",
+		"CREATE INDEX IF NOT EXISTS idx_folders_owner ON folders(OwnerEmail, Provider);",
+	}
+
+	for _, idx := range indexes {
+		if _, err := d.db.Exec(idx); err != nil {
+			return fmt.Errorf("failed to create index: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// Close closes the database connection
+func (d *SQLiteDB) Close() error {
+	return d.db.Close()
+}
+
+// UpsertFile inserts or updates a file record
+func (d *SQLiteDB) UpsertFile(file *model.File) error {
+	query := `
+	INSERT INTO files (FileID, Provider, OwnerEmail, FileHash, HashAlgorithm, FileName, FileSize, ParentFolderID, CreatedOn, LastModified, LastSynced)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(FileID, Provider) DO UPDATE SET
+		OwnerEmail = excluded.OwnerEmail,
+		FileHash = excluded.FileHash,
+		HashAlgorithm = excluded.HashAlgorithm,
+		FileName = excluded.FileName,
+		FileSize = excluded.FileSize,
+		ParentFolderID = excluded.ParentFolderID,
+		CreatedOn = excluded.CreatedOn,
+		LastModified = excluded.LastModified,
+		LastSynced = excluded.LastSynced;
+	`
+
+	_, err := d.db.Exec(query,
+		file.FileID,
+		file.Provider,
+		file.OwnerEmail,
+		file.FileHash,
+		file.HashAlgorithm,
+		file.FileName,
+		file.FileSize,
+		file.ParentFolderID,
+		file.CreatedOn,
+		file.LastModified,
+		file.LastSynced,
+	)
+
+	return err
+}
+
+// GetFile retrieves a file by ID and provider
+func (d *SQLiteDB) GetFile(fileID string, provider model.Provider) (*model.File, error) {
+	query := `SELECT FileID, Provider, OwnerEmail, FileHash, HashAlgorithm, FileName, FileSize, ParentFolderID, CreatedOn, LastModified, LastSynced FROM files WHERE FileID = ? AND Provider = ?`
+
+	var file model.File
+	err := d.db.QueryRow(query, fileID, provider).Scan(
+		&file.FileID,
+		&file.Provider,
+		&file.OwnerEmail,
+		&file.FileHash,
+		&file.HashAlgorithm,
+		&file.FileName,
+		&file.FileSize,
+		&file.ParentFolderID,
+		&file.CreatedOn,
+		&file.LastModified,
+		&file.LastSynced,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, errors.New("file not found")
+	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer tx.Rollback() // Rollback on error, commit on success
 
-	if _, err := tx.Exec(filesTable); err != nil {
-		return err
-	}
-	if _, err := tx.Exec(foldersTable); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return &file, nil
 }
 
-// UpsertFile inserts a new file record or updates an existing one based on the primary key.
-func (db *DB) UpsertFile(file model.File) error {
-	query := `
-    INSERT INTO files (FileID, Provider, OwnerEmail, FileHash, HashAlgorithm, FileName, FileSize, ParentFolderID, Path, NormalizedPath, CreatedOn, LastModified, LastSynced)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(FileID, Provider) DO UPDATE SET
-        OwnerEmail=excluded.OwnerEmail,
-        FileHash=excluded.FileHash,
-        HashAlgorithm=excluded.HashAlgorithm,
-        FileName=excluded.FileName,
-        FileSize=excluded.FileSize,
-        ParentFolderID=excluded.ParentFolderID,
-        Path=excluded.Path,
-        NormalizedPath=excluded.NormalizedPath,
-        LastModified=excluded.LastModified,
-        LastSynced=excluded.LastSynced;`
-	_, err := db.Exec(query, file.FileID, file.Provider, file.OwnerEmail, file.FileHash, file.HashAlgorithm, file.FileName, file.FileSize, file.ParentFolderID, file.Path, file.NormalizedPath, file.CreatedOn, file.LastModified, time.Now().UTC())
-	return err
-}
+// GetFilesByHash retrieves all files with a specific hash within a provider
+func (d *SQLiteDB) GetFilesByHash(hash string, hashAlgorithm string, provider model.Provider) ([]model.File, error) {
+	query := `SELECT FileID, Provider, OwnerEmail, FileHash, HashAlgorithm, FileName, FileSize, ParentFolderID, CreatedOn, LastModified, LastSynced FROM files WHERE FileHash = ? AND HashAlgorithm = ? AND Provider = ?`
 
-// UpsertFolder inserts a new folder record or updates an existing one.
-func (db *DB) UpsertFolder(folder model.Folder) error {
-	query := `
-    INSERT INTO folders (FolderID, Provider, OwnerEmail, FolderName, ParentFolderID, Path, NormalizedPath, LastSynced)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(FolderID, Provider) DO UPDATE SET
-        OwnerEmail=excluded.OwnerEmail,
-        FolderName=excluded.FolderName,
-        ParentFolderID=excluded.ParentFolderID,
-        Path=excluded.Path,
-        NormalizedPath=excluded.NormalizedPath,
-        LastSynced=excluded.LastSynced;`
-	_, err := db.Exec(query, folder.FolderID, folder.Provider, folder.OwnerEmail, folder.FolderName, folder.ParentFolderID, folder.Path, folder.NormalizedPath, time.Now().UTC())
-	return err
-}
-
-// GetFilesByProvider retrieves all file records for a given provider.
-func (db *DB) GetFilesByProvider(provider string) ([]model.File, error) {
-	rows, err := db.Query("SELECT FileID, Provider, OwnerEmail, FileHash, HashAlgorithm, FileName, FileSize, ParentFolderID, Path, NormalizedPath, CreatedOn, LastModified FROM files WHERE Provider = ?", provider)
+	rows, err := d.db.Query(query, hash, hashAlgorithm, provider)
 	if err != nil {
 		return nil, err
 	}
@@ -153,18 +206,156 @@ func (db *DB) GetFilesByProvider(provider string) ([]model.File, error) {
 
 	var files []model.File
 	for rows.Next() {
-		var f model.File
-		if err := rows.Scan(&f.FileID, &f.Provider, &f.OwnerEmail, &f.FileHash, &f.HashAlgorithm, &f.FileName, &f.FileSize, &f.ParentFolderID, &f.Path, &f.NormalizedPath, &f.CreatedOn, &f.LastModified); err != nil {
+		var file model.File
+		err := rows.Scan(
+			&file.FileID,
+			&file.Provider,
+			&file.OwnerEmail,
+			&file.FileHash,
+			&file.HashAlgorithm,
+			&file.FileName,
+			&file.FileSize,
+			&file.ParentFolderID,
+			&file.CreatedOn,
+			&file.LastModified,
+			&file.LastSynced,
+		)
+		if err != nil {
 			return nil, err
 		}
-		files = append(files, f)
+		files = append(files, file)
 	}
-	return files, nil
+
+	return files, rows.Err()
 }
 
-// GetFoldersByProvider retrieves all folder records for a given provider.
-func (db *DB) GetFoldersByProvider(provider string) ([]model.Folder, error) {
-	rows, err := db.Query("SELECT FolderID, Provider, OwnerEmail, FolderName, ParentFolderID, Path, NormalizedPath FROM folders WHERE Provider = ?", provider)
+// GetAllFiles retrieves all files for a provider and owner
+func (d *SQLiteDB) GetAllFiles(provider model.Provider, ownerEmail string) ([]model.File, error) {
+	query := `SELECT FileID, Provider, OwnerEmail, FileHash, HashAlgorithm, FileName, FileSize, ParentFolderID, CreatedOn, LastModified, LastSynced FROM files WHERE Provider = ? AND OwnerEmail = ?`
+
+	rows, err := d.db.Query(query, provider, ownerEmail)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []model.File
+	for rows.Next() {
+		var file model.File
+		err := rows.Scan(
+			&file.FileID,
+			&file.Provider,
+			&file.OwnerEmail,
+			&file.FileHash,
+			&file.HashAlgorithm,
+			&file.FileName,
+			&file.FileSize,
+			&file.ParentFolderID,
+			&file.CreatedOn,
+			&file.LastModified,
+			&file.LastSynced,
+		)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+
+	return files, rows.Err()
+}
+
+// DeleteFile removes a file from the database
+func (d *SQLiteDB) DeleteFile(fileID string, provider model.Provider) error {
+	query := `DELETE FROM files WHERE FileID = ? AND Provider = ?`
+	_, err := d.db.Exec(query, fileID, provider)
+	return err
+}
+
+// UpsertFolder inserts or updates a folder record
+func (d *SQLiteDB) UpsertFolder(folder *model.Folder) error {
+	query := `
+	INSERT INTO folders (FolderID, Provider, OwnerEmail, FolderName, ParentFolderID, Path, NormalizedPath, LastSynced)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(FolderID, Provider) DO UPDATE SET
+		OwnerEmail = excluded.OwnerEmail,
+		FolderName = excluded.FolderName,
+		ParentFolderID = excluded.ParentFolderID,
+		Path = excluded.Path,
+		NormalizedPath = excluded.NormalizedPath,
+		LastSynced = excluded.LastSynced;
+	`
+
+	_, err := d.db.Exec(query,
+		folder.FolderID,
+		folder.Provider,
+		folder.OwnerEmail,
+		folder.FolderName,
+		folder.ParentFolderID,
+		folder.Path,
+		folder.NormalizedPath,
+		folder.LastSynced,
+	)
+
+	return err
+}
+
+// GetFolder retrieves a folder by ID and provider
+func (d *SQLiteDB) GetFolder(folderID string, provider model.Provider) (*model.Folder, error) {
+	query := `SELECT FolderID, Provider, OwnerEmail, FolderName, ParentFolderID, Path, NormalizedPath, LastSynced FROM folders WHERE FolderID = ? AND Provider = ?`
+
+	var folder model.Folder
+	err := d.db.QueryRow(query, folderID, provider).Scan(
+		&folder.FolderID,
+		&folder.Provider,
+		&folder.OwnerEmail,
+		&folder.FolderName,
+		&folder.ParentFolderID,
+		&folder.Path,
+		&folder.NormalizedPath,
+		&folder.LastSynced,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, errors.New("folder not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &folder, nil
+}
+
+// GetFolderByPath retrieves a folder by normalized path and provider
+func (d *SQLiteDB) GetFolderByPath(normalizedPath string, provider model.Provider) (*model.Folder, error) {
+	query := `SELECT FolderID, Provider, OwnerEmail, FolderName, ParentFolderID, Path, NormalizedPath, LastSynced FROM folders WHERE NormalizedPath = ? AND Provider = ?`
+
+	var folder model.Folder
+	err := d.db.QueryRow(query, normalizedPath, provider).Scan(
+		&folder.FolderID,
+		&folder.Provider,
+		&folder.OwnerEmail,
+		&folder.FolderName,
+		&folder.ParentFolderID,
+		&folder.Path,
+		&folder.NormalizedPath,
+		&folder.LastSynced,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, errors.New("folder not found")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	return &folder, nil
+}
+
+// GetAllFolders retrieves all folders for a provider and owner
+func (d *SQLiteDB) GetAllFolders(provider model.Provider, ownerEmail string) ([]model.Folder, error) {
+	query := `SELECT FolderID, Provider, OwnerEmail, FolderName, ParentFolderID, Path, NormalizedPath, LastSynced FROM folders WHERE Provider = ? AND OwnerEmail = ?`
+
+	rows, err := d.db.Query(query, provider, ownerEmail)
 	if err != nil {
 		return nil, err
 	}
@@ -172,29 +363,49 @@ func (db *DB) GetFoldersByProvider(provider string) ([]model.Folder, error) {
 
 	var folders []model.Folder
 	for rows.Next() {
-		var f model.Folder
-		if err := rows.Scan(&f.FolderID, &f.Provider, &f.OwnerEmail, &f.FolderName, &f.ParentFolderID, &f.Path, &f.NormalizedPath); err != nil {
+		var folder model.Folder
+		err := rows.Scan(
+			&folder.FolderID,
+			&folder.Provider,
+			&folder.OwnerEmail,
+			&folder.FolderName,
+			&folder.ParentFolderID,
+			&folder.Path,
+			&folder.NormalizedPath,
+			&folder.LastSynced,
+		)
+		if err != nil {
 			return nil, err
 		}
-		folders = append(folders, f)
+		folders = append(folders, folder)
 	}
-	return folders, nil
+
+	return folders, rows.Err()
 }
 
-// FindDuplicates queries for files with identical hashes within the same provider.
-func (db *DB) FindDuplicates() (map[string][]model.File, error) {
-	query := `
-    SELECT FileID, Provider, OwnerEmail, FileHash, HashAlgorithm, FileName, FileSize, CreatedOn, Path
-    FROM files
-    WHERE (FileHash, HashAlgorithm, Provider) IN (
-        SELECT FileHash, HashAlgorithm, Provider
-        FROM files
-        GROUP BY FileHash, HashAlgorithm, Provider
-        HAVING COUNT(*) > 1
-    )
-    ORDER BY FileHash, Provider, CreatedOn;`
+// DeleteFolder removes a folder from the database
+func (d *SQLiteDB) DeleteFolder(folderID string, provider model.Provider) error {
+	query := `DELETE FROM folders WHERE FolderID = ? AND Provider = ?`
+	_, err := d.db.Exec(query, folderID, provider)
+	return err
+}
 
-	rows, err := db.Query(query)
+// FindDuplicates finds all duplicate files within a provider
+func (d *SQLiteDB) FindDuplicates(provider model.Provider) (map[string][]model.File, error) {
+	query := `
+	SELECT FileID, Provider, OwnerEmail, FileHash, HashAlgorithm, FileName, FileSize, ParentFolderID, CreatedOn, LastModified, LastSynced
+	FROM files
+	WHERE Provider = ? AND (FileHash, HashAlgorithm) IN (
+		SELECT FileHash, HashAlgorithm
+		FROM files
+		WHERE Provider = ?
+		GROUP BY FileHash, HashAlgorithm
+		HAVING COUNT(*) > 1
+	)
+	ORDER BY FileHash, HashAlgorithm, CreatedOn;
+	`
+
+	rows, err := d.db.Query(query, provider, provider)
 	if err != nil {
 		return nil, err
 	}
@@ -203,18 +414,59 @@ func (db *DB) FindDuplicates() (map[string][]model.File, error) {
 	duplicates := make(map[string][]model.File)
 	for rows.Next() {
 		var file model.File
-		if err := rows.Scan(&file.FileID, &file.Provider, &file.OwnerEmail, &file.FileHash, &file.HashAlgorithm, &file.FileName, &file.FileSize, &file.CreatedOn, &file.Path); err != nil {
+		err := rows.Scan(
+			&file.FileID,
+			&file.Provider,
+			&file.OwnerEmail,
+			&file.FileHash,
+			&file.HashAlgorithm,
+			&file.FileName,
+			&file.FileSize,
+			&file.ParentFolderID,
+			&file.CreatedOn,
+			&file.LastModified,
+			&file.LastSynced,
+		)
+		if err != nil {
 			return nil, err
 		}
-		// Group by a key of provider + hash
-		hashKey := fmt.Sprintf("%s:%s", file.Provider, file.FileHash)
-		duplicates[hashKey] = append(duplicates[hashKey], file)
+
+		key := file.FileHash + ":" + file.HashAlgorithm
+		duplicates[key] = append(duplicates[key], file)
 	}
-	return duplicates, nil
+
+	return duplicates, rows.Err()
 }
 
-// DeleteFile removes a file record from the database.
-func (db *DB) DeleteFile(fileID, provider string) error {
-	_, err := db.Exec("DELETE FROM files WHERE FileID = ? AND Provider = ?", fileID, provider)
-	return err
+// SetupDatabase initializes the database with proper user/password (for SQLCipher)
+func SetupDatabase(password string) error {
+	db, err := NewDatabase(password)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	// Test that we can insert and read
+	testFile := &model.File{
+		FileID:        "test",
+		Provider:      model.ProviderGoogle,
+		OwnerEmail:    "test@example.com",
+		FileHash:      "testhash",
+		HashAlgorithm: "MD5",
+		FileName:      "test.txt",
+		FileSize:      100,
+		CreatedOn:     time.Now(),
+		LastModified:  time.Now(),
+		LastSynced:    time.Now(),
+	}
+
+	if err := db.UpsertFile(testFile); err != nil {
+		return fmt.Errorf("failed to test database write: %w", err)
+	}
+
+	if err := db.DeleteFile("test", model.ProviderGoogle); err != nil {
+		return fmt.Errorf("failed to test database delete: %w", err)
+	}
+
+	return nil
 }

@@ -1,380 +1,595 @@
 package google
 
 import (
-	"cloud-drives-sync/internal/api"
-	"cloud-drives-sync/internal/logger"
-	"cloud-drives-sync/internal/model"
 	"context"
+	"crypto/md5"
+	"encoding/base64"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
-	"sync"
 	"time"
 
+	"cloud-drives-sync/internal/api"
+	"cloud-drives-sync/internal/crypto"
+	"cloud-drives-sync/internal/logger"
+	"cloud-drives-sync/internal/model"
+
 	"golang.org/x/oauth2"
-	"golang.org/x/time/rate"
 	"google.golang.org/api/drive/v3"
-	"google.golang.org/api/googleapi"
+	googleoauth "google.golang.org/api/oauth2/v2"
 	"google.golang.org/api/option"
 )
 
-// googleMimeTypeMap maps Google's proprietary document types to their standard export formats.
-var googleMimeTypeMap = map[string]string{
-	"application/vnd.google-apps.document":     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",   // .docx
-	"application/vnd.google-apps.spreadsheet":  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",         // .xlsx
-	"application/vnd.google-apps.presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
-	"application/vnd.google-apps.drawing":      "image/png",
-}
-
-// googleClient implements the api.CloudClient interface for Google Drive.
-type googleClient struct {
+// Client implements the CloudClient interface for Google Drive
+type Client struct {
 	service     *drive.Service
-	ownerEmail  string
-	rateLimiter *rate.Limiter
-	userEmail   string
-	emailOnce   sync.Once
+	oauth2Svc   *googleoauth.Service
+	email       string
+	tokenSource oauth2.TokenSource
+	log         *logger.Logger
+	maxRetries  int
+	retryDelay  time.Duration
 }
 
-// NewClient creates a new Google Drive client with a built-in rate limiter
-// to avoid hitting API quotas.
-func NewClient(ctx context.Context, ts oauth2.TokenSource, ownerEmail string) (api.CloudClient, error) {
-	httpClient := oauth2.NewClient(ctx, ts)
-	service, err := drive.NewService(ctx, option.WithHTTPClient(httpClient))
+// NewClient creates a new Google Drive client
+func NewClient(ctx context.Context, tokenSource oauth2.TokenSource) (api.CloudClient, error) {
+	// Create Drive service
+	driveService, err := drive.NewService(ctx, option.WithTokenSource(tokenSource))
 	if err != nil {
-		return nil, fmt.Errorf("unable to retrieve Drive client: %w", err)
+		return nil, fmt.Errorf("failed to create Drive service: %w", err)
 	}
 
-	return &googleClient{
-		service:     service,
-		ownerEmail:  ownerEmail,
-		rateLimiter: rate.NewLimiter(rate.Every(200*time.Millisecond), 1), // 5 requests per second
-	}, nil
+	// Create OAuth2 service for user info
+	oauth2Service, err := googleoauth.NewService(ctx, option.WithTokenSource(tokenSource))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OAuth2 service: %w", err)
+	}
+
+	client := &Client{
+		service:     driveService,
+		oauth2Svc:   oauth2Service,
+		tokenSource: tokenSource,
+		log:         logger.New().WithPrefix("Google"),
+		maxRetries:  3,
+		retryDelay:  time.Second,
+	}
+
+	// Get user email
+	email, err := client.GetUserEmail(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user email: %w", err)
+	}
+	client.email = email
+	client.log = logger.New().WithPrefix(fmt.Sprintf("Google:%s", email))
+
+	return client, nil
 }
 
-func (c *googleClient) GetProviderName() string {
-	return "Google"
+// GetUserEmail returns the email address of the authenticated user
+func (c *Client) GetUserEmail(ctx context.Context) (string, error) {
+	userInfo, err := c.oauth2Svc.Userinfo.Get().Context(ctx).Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to get user info: %w", err)
+	}
+	return userInfo.Email, nil
 }
 
-func (c *googleClient) GetUserEmail() (string, error) {
-	var err error
-	c.emailOnce.Do(func() {
-		c.rateLimiter.Wait(context.Background())
-		about, getErr := c.service.About.Get().Fields("user(emailAddress)").Do()
-		if getErr != nil {
-			err = handleGoogleError(getErr)
-			return
+// FindFoldersByName finds all folders with the given name
+func (c *Client) FindFoldersByName(ctx context.Context, name string, includeTrash bool) ([]model.Folder, error) {
+	query := fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder'", name)
+	if !includeTrash {
+		query += " and trashed=false"
+	}
+
+	fileList, err := c.service.Files.List().
+		Q(query).
+		Fields("files(id, name, parents, trashed)").
+		Context(ctx).
+		Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to search for folders: %w", err)
+	}
+
+	var folders []model.Folder
+	for _, file := range fileList.Files {
+		parentID := ""
+		if len(file.Parents) > 0 {
+			parentID = file.Parents[0]
 		}
-		c.userEmail = about.User.EmailAddress
-	})
-	return c.userEmail, err
+
+		folders = append(folders, model.Folder{
+			FolderID:       file.Id,
+			Provider:       model.ProviderGoogle,
+			OwnerEmail:     c.email,
+			FolderName:     file.Name,
+			ParentFolderID: parentID,
+		})
+	}
+
+	return folders, nil
 }
 
-func (c *googleClient) GetAbout() (*model.StorageQuota, error) {
-	c.rateLimiter.Wait(context.Background())
-	about, err := c.service.About.Get().Fields("storageQuota").Do()
-	if err != nil {
-		return nil, handleGoogleError(err)
+// GetOrCreateFolder gets or creates a folder with the given name and parent
+func (c *Client) GetOrCreateFolder(ctx context.Context, name string, parentID string) (string, error) {
+	// Search for existing folder
+	query := fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder' and trashed=false", name)
+	if parentID != "" {
+		query += fmt.Sprintf(" and '%s' in parents", parentID)
+	} else {
+		query += " and 'root' in parents"
 	}
-	sq := about.StorageQuota
-	email, _ := c.GetUserEmail()
-	return &model.StorageQuota{
-		TotalBytes:     sq.Limit,
-		UsedBytes:      sq.Usage,
-		RemainingBytes: sq.Limit - sq.Usage,
-		OwnerEmail:     email,
-		Provider:       c.GetProviderName(),
-	}, nil
+
+	fileList, err := c.service.Files.List().
+		Q(query).
+		Fields("files(id)").
+		Context(ctx).
+		Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to search for folder: %w", err)
+	}
+
+	if len(fileList.Files) > 0 {
+		return fileList.Files[0].Id, nil
+	}
+
+	// Create new folder
+	folder := &drive.File{
+		Name:     name,
+		MimeType: "application/vnd.google-apps.folder",
+	}
+	if parentID != "" {
+		folder.Parents = []string{parentID}
+	}
+
+	created, err := c.service.Files.Create(folder).
+		Fields("id").
+		Context(ctx).
+		Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to create folder: %w", err)
+	}
+
+	c.log.Info("Created folder '%s' (ID: %s)", name, created.Id)
+	return created.Id, nil
 }
 
-func (c *googleClient) PreFlightCheck() (string, error) {
-	c.rateLimiter.Wait(context.Background())
-	query := "name = 'synched-cloud-drives' and 'me' in owners and trashed = false"
-	r, err := c.service.Files.List().Q(query).Fields("files(id, parents)").Do()
+// MoveFolder moves a folder to a new parent
+func (c *Client) MoveFolder(ctx context.Context, folderID string, newParentID string) error {
+	// Get current parents
+	file, err := c.service.Files.Get(folderID).
+		Fields("parents").
+		Context(ctx).
+		Do()
 	if err != nil {
-		return "", handleGoogleError(err)
+		return fmt.Errorf("failed to get folder: %w", err)
 	}
 
-	if len(r.Files) > 1 {
-		return "", fmt.Errorf("pre-flight check failed: found %d 'synched-cloud-drives' folders; please resolve ambiguity", len(r.Files))
-	}
-	if len(r.Files) == 0 {
-		return "", nil // Not found is a valid state, handled by the caller.
+	// Move folder by removing old parents and adding new parent
+	previousParents := strings.Join(file.Parents, ",")
+
+	if newParentID == "" {
+		newParentID = "root"
 	}
 
-	folder := r.Files[0]
-	c.rateLimiter.Wait(context.Background())
-	root, err := c.service.Files.Get("root").Fields("id").Do()
+	_, err = c.service.Files.Update(folderID, nil).
+		RemoveParents(previousParents).
+		AddParents(newParentID).
+		Context(ctx).
+		Do()
 	if err != nil {
-		return "", handleGoogleError(err)
+		return fmt.Errorf("failed to move folder: %w", err)
 	}
 
-	isAtRoot := false
-	for _, parentID := range folder.Parents {
-		if parentID == root.Id {
-			isAtRoot = true
+	c.log.Info("Moved folder %s to parent %s", folderID, newParentID)
+	return nil
+}
+
+// ListFolders lists all folders within a parent folder
+func (c *Client) ListFolders(ctx context.Context, parentID string, recursive bool) ([]model.Folder, error) {
+	var allFolders []model.Folder
+
+	if parentID == "" {
+		parentID = "root"
+	}
+
+	folders, err := c.listFoldersInParent(ctx, parentID, "")
+	if err != nil {
+		return nil, err
+	}
+	allFolders = append(allFolders, folders...)
+
+	if recursive {
+		for _, folder := range folders {
+			subFolders, err := c.ListFolders(ctx, folder.FolderID, true)
+			if err != nil {
+				return nil, err
+			}
+			allFolders = append(allFolders, subFolders...)
+		}
+	}
+
+	return allFolders, nil
+}
+
+// listFoldersInParent is a helper to list folders in a specific parent
+func (c *Client) listFoldersInParent(ctx context.Context, parentID string, pathPrefix string) ([]model.Folder, error) {
+	query := fmt.Sprintf("'%s' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false", parentID)
+
+	var folders []model.Folder
+	pageToken := ""
+
+	for {
+		call := c.service.Files.List().
+			Q(query).
+			Fields("nextPageToken, files(id, name, parents, createdTime, modifiedTime)").
+			PageSize(1000).
+			Context(ctx)
+
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+
+		fileList, err := call.Do()
+		if err != nil {
+			return nil, fmt.Errorf("failed to list folders: %w", err)
+		}
+
+		for _, file := range fileList.Files {
+			path := pathPrefix + "/" + file.Name
+			normalizedPath := logger.NormalizePath(path)
+
+			folders = append(folders, model.Folder{
+				FolderID:       file.Id,
+				Provider:       model.ProviderGoogle,
+				OwnerEmail:     c.email,
+				FolderName:     file.Name,
+				ParentFolderID: parentID,
+				Path:           path,
+				NormalizedPath: normalizedPath,
+				LastSynced:     time.Now(),
+			})
+		}
+
+		pageToken = fileList.NextPageToken
+		if pageToken == "" {
 			break
 		}
 	}
 
-	if !isAtRoot {
-		logger.TaggedInfo(c.ownerEmail, "Sync folder found but not at root. Moving it now.")
-		c.rateLimiter.Wait(context.Background())
-		_, err = c.service.Files.Update(folder.Id, nil).
-			AddParents(root.Id).
-			RemoveParents(strings.Join(folder.Parents, ",")).
-			Do()
+	return folders, nil
+}
+
+// ListFiles lists all files within a folder
+func (c *Client) ListFiles(ctx context.Context, folderID string, recursive bool) ([]model.File, error) {
+	var allFiles []model.File
+
+	if folderID == "" {
+		folderID = "root"
+	}
+
+	files, err := c.listFilesInParent(ctx, folderID)
+	if err != nil {
+		return nil, err
+	}
+	allFiles = append(allFiles, files...)
+
+	if recursive {
+		folders, err := c.listFoldersInParent(ctx, folderID, "")
 		if err != nil {
-			return "", fmt.Errorf("failed to move 'synched-cloud-drives' to root: %w", handleGoogleError(err))
+			return nil, err
+		}
+
+		for _, folder := range folders {
+			subFiles, err := c.ListFiles(ctx, folder.FolderID, true)
+			if err != nil {
+				return nil, err
+			}
+			allFiles = append(allFiles, subFiles...)
 		}
 	}
-	return folder.Id, nil
+
+	return allFiles, nil
 }
 
-func (c *googleClient) CreateRootSyncFolder() (string, error) {
-	c.rateLimiter.Wait(context.Background())
-	folder := &drive.File{
-		Name:     "synched-cloud-drives",
-		MimeType: "application/vnd.google-apps.folder",
-	}
-	f, err := c.service.Files.Create(folder).Fields("id").Do()
-	if err != nil {
-		return "", handleGoogleError(err)
-	}
-	return f.Id, nil
-}
+// listFilesInParent is a helper to list files in a specific parent
+func (c *Client) listFilesInParent(ctx context.Context, parentID string) ([]model.File, error) {
+	query := fmt.Sprintf("'%s' in parents and mimeType!='application/vnd.google-apps.folder' and trashed=false", parentID)
 
-func (c *googleClient) ListFolders(folderID string, parentPath string, callback func(model.Folder) error) error {
-	query := fmt.Sprintf("'%s' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false", folderID)
-	fields := "nextPageToken, files(id, name, parents)"
+	var files []model.File
+	pageToken := ""
 
-	c.rateLimiter.Wait(context.Background())
-	return c.service.Files.List().Q(query).Fields(googleapi.Field(fields)).Pages(context.Background(), func(page *drive.FileList) error {
-		for _, f := range page.Files {
-			path := parentPath + "/" + f.Name
-			email, _ := c.GetUserEmail()
-			folder := model.Folder{
-				FolderID:       f.Id,
-				Provider:       c.GetProviderName(),
-				OwnerEmail:     email,
-				FolderName:     f.Name,
-				ParentFolderID: f.Parents[0],
-				Path:           path,
-				NormalizedPath: strings.ToLower(strings.ReplaceAll(path, "\\", "/")),
-			}
-			if err := callback(folder); err != nil {
-				return err // Stop iteration if callback returns an error
-			}
-			// Recurse into the subfolder
-			if err := c.ListFolders(f.Id, path, callback); err != nil {
-				return err
-			}
+	for {
+		call := c.service.Files.List().
+			Q(query).
+			Fields("nextPageToken, files(id, name, size, md5Checksum, mimeType, createdTime, modifiedTime)").
+			PageSize(1000).
+			Context(ctx)
+
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
 		}
-		c.rateLimiter.Wait(context.Background())
-		return nil
-	})
-}
 
-func (c *googleClient) ListFiles(folderID, parentPath string, callback func(model.File) error) error {
-	query := fmt.Sprintf("'%s' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false", folderID)
-	fields := "nextPageToken, files(id, name, size, md5Checksum, mimeType, createdTime, modifiedTime, parents)"
-
-	c.rateLimiter.Wait(context.Background())
-	return c.service.Files.List().Q(query).Fields(googleapi.Field(fields)).Pages(context.Background(), func(page *drive.FileList) error {
-		for _, f := range page.Files {
-			path := parentPath + "/" + f.Name
-			created, _ := time.Parse(time.RFC3339, f.CreatedTime)
-			modified, _ := time.Parse(time.RFC3339, f.ModifiedTime)
-			email, _ := c.GetUserEmail()
-
-			file := model.File{
-				FileID:         f.Id,
-				Provider:       c.GetProviderName(),
-				OwnerEmail:     email,
-				FileName:       f.Name,
-				FileSize:       f.Size,
-				ParentFolderID: f.Parents[0],
-				Path:           path,
-				NormalizedPath: strings.ToLower(strings.ReplaceAll(path, "\\", "/")),
-				CreatedOn:      created,
-				LastModified:   modified,
-			}
-
-			if _, isGoogleDoc := googleMimeTypeMap[f.MimeType]; isGoogleDoc {
-				file.HashAlgorithm = "SHA256" // Mark for local hashing via export
-			} else if f.Md5Checksum != "" {
-				file.FileHash = f.Md5Checksum
-				file.HashAlgorithm = "MD5"
-			} else {
-				file.HashAlgorithm = "SHA256" // Fallback for binary files without MD5
-			}
-
-			if err := callback(file); err != nil {
-				return err // Stop iteration
-			}
+		fileList, err := call.Do()
+		if err != nil {
+			return nil, fmt.Errorf("failed to list files: %w", err)
 		}
-		c.rateLimiter.Wait(context.Background())
-		return nil
-	})
+
+		for _, file := range fileList.Files {
+			hash := file.Md5Checksum
+			hashAlgo := "MD5"
+
+			// Handle Google Workspace files that don't have MD5
+			if hash == "" {
+				c.log.Warning("File '%s' (ID: %s) has no MD5 hash, will need fallback", file.Name, file.Id)
+				// We'll compute SHA256 hash during download
+				hash = "" // Will be computed later
+				hashAlgo = "SHA256"
+			}
+
+			size := int64(0)
+			if file.Size > 0 {
+				size = file.Size
+			}
+
+			createdTime := time.Now()
+			if file.CreatedTime != "" {
+				if t, err := time.Parse(time.RFC3339, file.CreatedTime); err == nil {
+					createdTime = t
+				}
+			}
+
+			modifiedTime := time.Now()
+			if file.ModifiedTime != "" {
+				if t, err := time.Parse(time.RFC3339, file.ModifiedTime); err == nil {
+					modifiedTime = t
+				}
+			}
+
+			files = append(files, model.File{
+				FileID:         file.Id,
+				Provider:       model.ProviderGoogle,
+				OwnerEmail:     c.email,
+				FileHash:       hash,
+				HashAlgorithm:  hashAlgo,
+				FileName:       file.Name,
+				FileSize:       size,
+				ParentFolderID: parentID,
+				CreatedOn:      createdTime,
+				LastModified:   modifiedTime,
+				LastSynced:     time.Now(),
+			})
+		}
+
+		pageToken = fileList.NextPageToken
+		if pageToken == "" {
+			break
+		}
+	}
+
+	return files, nil
 }
 
-func (c *googleClient) CreateFolder(parentFolderID, name string) (*model.Folder, error) {
-	c.rateLimiter.Wait(context.Background())
-	folder := &drive.File{
-		Name:     name,
-		MimeType: "application/vnd.google-apps.folder",
-		Parents:  []string{parentFolderID},
-	}
-	f, err := c.service.Files.Create(folder).Fields("id", "name", "parents").Do()
+// DownloadFile downloads a file from Google Drive
+func (c *Client) DownloadFile(ctx context.Context, fileID string) (io.ReadCloser, error) {
+	resp, err := c.service.Files.Get(fileID).
+		Context(ctx).
+		Download()
 	if err != nil {
-		return nil, handleGoogleError(err)
+		return nil, fmt.Errorf("failed to download file: %w", err)
 	}
-	email, _ := c.GetUserEmail()
-	return &model.Folder{
-		FolderID:       f.Id,
-		FolderName:     f.Name,
-		ParentFolderID: f.Parents[0],
-		Provider:       c.GetProviderName(),
-		OwnerEmail:     email,
-	}, nil
+
+	return resp.Body, nil
 }
 
-func (c *googleClient) DownloadFile(fileID string) (io.ReadCloser, int64, error) {
-	c.rateLimiter.Wait(context.Background())
-	file, err := c.service.Files.Get(fileID).Fields("size, mimeType").Do()
-	if err != nil {
-		return nil, 0, handleGoogleError(err)
-	}
-	// If it's a Google Doc, we must export it.
-	if _, isGoogleDoc := googleMimeTypeMap[file.MimeType]; isGoogleDoc {
-		return c.ExportFile(fileID, file.MimeType)
-	}
-
-	c.rateLimiter.Wait(context.Background())
-	resp, err := c.service.Files.Get(fileID).Download()
-	if err != nil {
-		return nil, 0, handleGoogleError(err)
-	}
-	return resp.Body, file.Size, nil
-}
-
-func (c *googleClient) ExportFile(fileID, mimeType string) (io.ReadCloser, int64, error) {
-	exportMimeType, ok := googleMimeTypeMap[mimeType]
-	if !ok {
-		return nil, 0, fmt.Errorf("no export mapping for google mime type: %s", mimeType)
-	}
-
-	c.rateLimiter.Wait(context.Background())
-	resp, err := c.service.Files.Export(fileID, exportMimeType).Download()
-	if err != nil {
-		return nil, 0, handleGoogleError(err)
-	}
-	// Export does not provide a Content-Length header, so size is unknown (-1).
-	return resp.Body, -1, nil
-}
-
-func (c *googleClient) UploadFile(parentFolderID, name string, content io.Reader, size int64) (*model.File, error) {
-	c.rateLimiter.Wait(context.Background())
+// UploadFile uploads a file to Google Drive
+func (c *Client) UploadFile(ctx context.Context, parentFolderID string, fileName string, reader io.Reader) (*model.File, error) {
 	file := &drive.File{
-		Name:    name,
+		Name:    fileName,
 		Parents: []string{parentFolderID},
 	}
-	// Use resumable uploads for better reliability. Chunk size can be tuned.
-	f, err := c.service.Files.Create(file).Media(content, googleapi.ChunkSize(8*1024*1024)).Do()
+
+	created, err := c.service.Files.Create(file).
+		Media(reader).
+		Fields("id, name, size, md5Checksum, createdTime, modifiedTime").
+		Context(ctx).
+		Do()
 	if err != nil {
-		return nil, handleGoogleError(err)
+		return nil, fmt.Errorf("failed to upload file: %w", err)
 	}
 
-	created, _ := time.Parse(time.RFC3339, f.CreatedTime)
-	modified, _ := time.Parse(time.RFC3339, f.ModifiedTime)
-	email, _ := c.GetUserEmail()
+	c.log.Info("Uploaded file '%s' (ID: %s)", fileName, created.Id)
+
+	size := int64(0)
+	if created.Size > 0 {
+		size = created.Size
+	}
+
+	createdTime := time.Now()
+	if created.CreatedTime != "" {
+		if t, err := time.Parse(time.RFC3339, created.CreatedTime); err == nil {
+			createdTime = t
+		}
+	}
+
+	modifiedTime := time.Now()
+	if created.ModifiedTime != "" {
+		if t, err := time.Parse(time.RFC3339, created.ModifiedTime); err == nil {
+			modifiedTime = t
+		}
+	}
 
 	return &model.File{
-		FileID:         f.Id,
-		Provider:       c.GetProviderName(),
-		OwnerEmail:     email,
-		FileName:       f.Name,
-		FileSize:       f.Size,
-		FileHash:       f.Md5Checksum,
+		FileID:         created.Id,
+		Provider:       model.ProviderGoogle,
+		OwnerEmail:     c.email,
+		FileHash:       created.Md5Checksum,
 		HashAlgorithm:  "MD5",
-		ParentFolderID: f.Parents[0],
-		CreatedOn:      created,
-		LastModified:   modified,
+		FileName:       created.Name,
+		FileSize:       size,
+		ParentFolderID: parentFolderID,
+		CreatedOn:      createdTime,
+		LastModified:   modifiedTime,
+		LastSynced:     time.Now(),
 	}, nil
 }
 
-func (c *googleClient) DeleteFile(fileID string) error {
-	c.rateLimiter.Wait(context.Background())
-	return handleGoogleError(c.service.Files.Delete(fileID).Do())
-}
-
-func (c *googleClient) Share(folderID, emailAddress string) (string, error) {
-	c.rateLimiter.Wait(context.Background())
-	perm := &drive.Permission{
-		Type:         "user",
-		Role:         "writer", // "writer" is the API term for "editor" role.
-		EmailAddress: emailAddress,
-	}
-	p, err := c.service.Permissions.Create(folderID, perm).SendNotificationEmail(false).Fields("id").Do()
+// DeleteFile deletes a file from Google Drive
+func (c *Client) DeleteFile(ctx context.Context, fileID string) error {
+	err := c.service.Files.Delete(fileID).Context(ctx).Do()
 	if err != nil {
-		// If permission already exists, API returns a 403 error. This is not a failure for us.
-		if gerr, ok := err.(*googleapi.Error); ok && gerr.Code == http.StatusForbidden {
-			return "permission-exists", nil // Use a special string to indicate success-if-exists
-		}
-		return "", handleGoogleError(err)
+		return fmt.Errorf("failed to delete file: %w", err)
 	}
-	return p.Id, nil
+
+	c.log.Info("Deleted file ID: %s", fileID)
+	return nil
 }
 
-func (c *googleClient) CheckShare(folderID, permissionID string) (bool, error) {
-	c.rateLimiter.Wait(context.Background())
-	_, err := c.service.Permissions.Get(folderID, permissionID).Fields("id").Do()
-	if err != nil {
-		if gerr, ok := err.(*googleapi.Error); ok && gerr.Code == http.StatusNotFound {
-			return false, nil // 404 means the permission is missing.
-		}
-		return false, handleGoogleError(err)
-	}
-	return true, nil
-}
-
-func (c *googleClient) TransferOwnership(fileID, emailAddress string) (bool, error) {
-	c.rateLimiter.Wait(context.Background())
-	perm := &drive.Permission{
-		Type:         "user",
-		Role:         "owner",
-		EmailAddress: emailAddress,
-	}
-	// TransferOwnership can fail for many reasons (e.g., domain policies, user not in domain).
-	_, err := c.service.Permissions.Create(fileID, perm).TransferOwnership(true).Do()
-	if err != nil {
-		// Log the reason but return false instead of an error, as this is an expected outcome.
-		logger.Warn("google", err, "native ownership transfer failed")
-		return false, nil
-	}
-	return true, nil
-}
-
-func (c *googleClient) MoveFile(fileID, currentParentID, newParentFolderID string) error {
-	c.rateLimiter.Wait(context.Background())
-	_, err := c.service.Files.Update(fileID, nil).
-		AddParents(newParentFolderID).
-		RemoveParents(currentParentID).
+// GetFileHash retrieves the hash of a file
+func (c *Client) GetFileHash(ctx context.Context, fileID string) (hash string, algorithm string, err error) {
+	file, err := c.service.Files.Get(fileID).
+		Fields("md5Checksum, mimeType").
+		Context(ctx).
 		Do()
-	return handleGoogleError(err)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get file metadata: %w", err)
+	}
+
+	// If MD5 is available, use it
+	if file.Md5Checksum != "" {
+		return file.Md5Checksum, "MD5", nil
+	}
+
+	// For Google Workspace files, we need to export and hash
+	c.log.Warning("File %s requires export for hashing (type: %s)", fileID, file.MimeType)
+
+	// Determine export MIME type
+	exportMimeType := c.getExportMimeType(file.MimeType)
+	if exportMimeType == "" {
+		return "", "", fmt.Errorf("cannot export file type: %s", file.MimeType)
+	}
+
+	// Download exported version
+	exported, err := c.ExportFile(ctx, fileID, exportMimeType)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to export file: %w", err)
+	}
+	defer exported.Close()
+
+	// Calculate SHA256 hash
+	hashValue, err := crypto.HashFile(exported)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to hash exported file: %w", err)
+	}
+
+	return hashValue, "SHA256", nil
 }
 
-// handleGoogleError checks for rate limit or server-side errors which are retryable.
-func handleGoogleError(err error) error {
-	if err == nil {
-		return nil
+// ExportFile exports a Google Workspace file to a standard format
+func (c *Client) ExportFile(ctx context.Context, fileID string, mimeType string) (io.ReadCloser, error) {
+	resp, err := c.service.Files.Export(fileID, mimeType).
+		Context(ctx).
+		Download()
+	if err != nil {
+		return nil, fmt.Errorf("failed to export file: %w", err)
 	}
-	if gerr, ok := err.(*googleapi.Error); ok {
-		// 403 can be rate limiting or other permission issues. 429 is definitely rate limiting.
-		if gerr.Code == 403 || gerr.Code == 429 || gerr.Code >= 500 {
-			// A simple retry strategy. Production code might use exponential backoff.
-			time.Sleep(2 * time.Second)
+
+	c.log.Info("Exported file ID: %s as %s", fileID, mimeType)
+	return resp.Body, nil
+}
+
+// getExportMimeType returns the appropriate export MIME type for Google Workspace files
+func (c *Client) getExportMimeType(workspaceMimeType string) string {
+	exports := map[string]string{
+		"application/vnd.google-apps.document":     "application/pdf",
+		"application/vnd.google-apps.spreadsheet":  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+		"application/vnd.google-apps.presentation": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		"application/vnd.google-apps.drawing":      "application/pdf",
+	}
+	return exports[workspaceMimeType]
+}
+
+// ShareFolder shares a folder with another user
+func (c *Client) ShareFolder(ctx context.Context, folderID string, targetEmail string, role string) error {
+	permission := &drive.Permission{
+		Type:         "user",
+		Role:         role,
+		EmailAddress: targetEmail,
+	}
+
+	_, err := c.service.Permissions.Create(folderID, permission).
+		SendNotificationEmail(false).
+		Context(ctx).
+		Do()
+	if err != nil {
+		return fmt.Errorf("failed to share folder: %w", err)
+	}
+
+	c.log.Info("Shared folder %s with %s (role: %s)", folderID, targetEmail, role)
+	return nil
+}
+
+// CheckFolderPermission checks if a user has access to a folder
+func (c *Client) CheckFolderPermission(ctx context.Context, folderID string, targetEmail string) (bool, error) {
+	permissions, err := c.service.Permissions.List(folderID).
+		Fields("permissions(emailAddress, role)").
+		Context(ctx).
+		Do()
+	if err != nil {
+		return false, fmt.Errorf("failed to list permissions: %w", err)
+	}
+
+	for _, perm := range permissions.Permissions {
+		if perm.EmailAddress == targetEmail {
+			return true, nil
 		}
 	}
-	return err
+
+	return false, nil
+}
+
+// GetQuota retrieves storage quota information
+func (c *Client) GetQuota(ctx context.Context) (*model.QuotaInfo, error) {
+	about, err := c.service.About.Get().
+		Fields("storageQuota").
+		Context(ctx).
+		Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get quota: %w", err)
+	}
+
+	if about.StorageQuota == nil {
+		return nil, fmt.Errorf("storage quota information not available")
+	}
+
+	total := about.StorageQuota.Limit
+	used := about.StorageQuota.Usage
+
+	percentage := 0.0
+	if total > 0 {
+		percentage = (float64(used) / float64(total)) * 100
+	}
+
+	return &model.QuotaInfo{
+		Email:          c.email,
+		Provider:       model.ProviderGoogle,
+		TotalBytes:     total,
+		UsedBytes:      used,
+		PercentageUsed: percentage,
+	}, nil
+}
+
+// TransferFileOwnership attempts to transfer file ownership (not supported in Google Drive API)
+func (c *Client) TransferFileOwnership(ctx context.Context, fileID string, targetEmail string) error {
+	// Google Drive API doesn't support direct ownership transfer via API
+	// We'll return an error to trigger the fallback mechanism
+	return fmt.Errorf("ownership transfer not supported by Google Drive API, use download/upload fallback")
+}
+
+// computeMD5 computes MD5 hash of a reader
+func computeMD5(reader io.Reader) (string, error) {
+	hasher := md5.New()
+	if _, err := io.Copy(hasher, reader); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(hasher.Sum(nil)), nil
 }
