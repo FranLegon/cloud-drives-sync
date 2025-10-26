@@ -11,8 +11,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
-	"github.comcom/manifoldco/promptui"
 )
 
 var initCmd = &cobra.Command{
