@@ -70,7 +70,7 @@ func PerformOAuthFlow(ctx context.Context, config *oauth2.Config, log *logger.Lo
 	authURL := config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
 
 	log.Info("Please visit this URL to authorize the application:")
-	log.Info(authURL)
+	log.Info("%s", authURL)
 
 	// Channel to receive the authorization code
 	codeChan := make(chan string, 1)

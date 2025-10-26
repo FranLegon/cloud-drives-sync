@@ -118,8 +118,8 @@ func (c *Client) getDefaultDriveID(ctx context.Context) (string, error) {
 
 // FindFoldersByName finds all folders with the given name
 func (c *Client) FindFoldersByName(ctx context.Context, name string, includeTrash bool) ([]model.Folder, error) {
-	// Search for folders with the given name
-	query := fmt.Sprintf("name:%s", name)
+	// Search for folders with the given name using Microsoft Graph search syntax
+	query := name
 
 	top := int32(999)
 	requestConfig := &drives.ItemSearchWithQRequestBuilderGetRequestConfiguration{
@@ -133,15 +133,24 @@ func (c *Client) FindFoldersByName(ctx context.Context, name string, includeTras
 		return nil, fmt.Errorf("failed to search for folders: %w", err)
 	}
 
+	c.log.Info("Search returned %d items for query: %s", len(items.GetValue()), name)
+
 	var folders []model.Folder
 	for _, item := range items.GetValue() {
 		// Only include folders
 		if item.GetFolder() == nil {
+			c.log.Info("Skipping non-folder item: %s", *item.GetName())
 			continue
 		}
 
 		// Skip trashed items if requested
 		if !includeTrash && item.GetDeleted() != nil {
+			continue
+		}
+
+		// Check if name matches exactly (search might return partial matches)
+		if item.GetName() == nil || *item.GetName() != name {
+			c.log.Info("Skipping folder with non-matching name: %s (wanted: %s)", *item.GetName(), name)
 			continue
 		}
 
@@ -159,6 +168,7 @@ func (c *Client) FindFoldersByName(ctx context.Context, name string, includeTras
 		})
 	}
 
+	c.log.Info("Found %d matching folder(s)", len(folders))
 	return folders, nil
 }
 
@@ -519,31 +529,41 @@ func (c *Client) ExportFile(ctx context.Context, fileID string, mimeType string)
 
 // ShareFolder shares a folder with another user
 func (c *Client) ShareFolder(ctx context.Context, folderID string, targetEmail string, role string) error {
-	// Create sharing invitation using the Invite request body
-	inviteBody := struct {
-		Recipients     []map[string]string `json:"recipients"`
-		Roles          []string            `json:"roles"`
-		SendInvitation bool                `json:"sendInvitation"`
-	}{
-		Recipients: []map[string]string{
-			{"email": targetEmail},
-		},
-		Roles:          []string{"write"},
-		SendInvitation: false,
-	}
-
 	// Map role to Microsoft Graph roles
-	if role == "editor" || role == "write" {
-		inviteBody.Roles = []string{"write"}
-	} else {
-		inviteBody.Roles = []string{"read"}
+	graphRole := "read"
+	if role == "writer" || role == "write" {
+		graphRole = "write"
 	}
 
-	// Note: Using Post with nil body since the SDK doesn't expose DriveItemInvite type
-	// This may need to be updated based on actual SDK version
-	_, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(folderID).Invite().Post(ctx, nil, nil)
+	// Create the invite request body
+	recipient := graphmodels.NewDriveRecipient()
+	recipient.SetEmail(&targetEmail)
+
+	postBody := drives.NewItemItemsItemInvitePostRequestBody()
+	postBody.SetRecipients([]graphmodels.DriveRecipientable{recipient})
+	postBody.SetRoles([]string{graphRole})
+	sendInvitation := true
+	postBody.SetSendInvitation(&sendInvitation)
+	requireSignIn := true
+	postBody.SetRequireSignIn(&requireSignIn)
+
+	// Send the invitation
+	result, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(folderID).Invite().Post(ctx, postBody, nil)
 	if err != nil {
 		return fmt.Errorf("failed to share folder: %w", err)
+	}
+
+	// Log the result details
+	if result != nil && len(result.GetValue()) > 0 {
+		for _, perm := range result.GetValue() {
+			permID := "unknown"
+			if perm.GetId() != nil {
+				permID = *perm.GetId()
+			}
+			c.log.Info("Created permission ID: %s for folder %s", permID, folderID)
+		}
+	} else {
+		c.log.Warning("Invite API returned no permissions - this may indicate the sharing failed silently")
 	}
 
 	c.log.Info("Shared folder %s with %s (role: %s)", folderID, targetEmail, role)

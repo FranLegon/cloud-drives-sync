@@ -672,7 +672,7 @@ func (tr *TaskRunner) ShareWithMain(ctx context.Context, clients map[string]api.
 				tr.log.DryRun("Would share sync folder with %s", backup.Email)
 			} else {
 				tr.log.Info("Sharing sync folder with %s", backup.Email)
-				if err := mainClient.ShareFolder(ctx, syncFolderID, backup.Email, "editor"); err != nil {
+				if err := mainClient.ShareFolder(ctx, syncFolderID, backup.Email, "writer"); err != nil {
 					tr.log.Error("Failed to share folder: %v", err)
 					continue
 				}

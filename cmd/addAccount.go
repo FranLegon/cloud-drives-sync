@@ -122,15 +122,26 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 		mainClient, _ = microsoft.NewClient(ctx, mainTokenSource)
 	}
 
-	// Find sync folder
-	folders, err := mainClient.FindFoldersByName(ctx, "synched-cloud-drives", false)
-	if err != nil || len(folders) == 0 {
-		log.Warning("Sync folder not found, skipping share step")
+	// Get or create sync folder
+	folderID, err := mainClient.GetOrCreateFolder(ctx, "synched-cloud-drives", "")
+	if err != nil {
+		log.Warning("Failed to get or create sync folder: %v", err)
 	} else {
-		if err := mainClient.ShareFolder(ctx, folders[0].FolderID, email, "editor"); err != nil {
+		// Share folder with the backup account
+		if err := mainClient.ShareFolder(ctx, folderID, email, "writer"); err != nil {
 			log.Error("Failed to share folder: %v", err)
 		} else {
 			log.Success("Shared sync folder with %s", email)
+
+			// Verify the permission was created
+			hasAccess, err := mainClient.CheckFolderPermission(ctx, folderID, email)
+			if err != nil {
+				log.Warning("Could not verify folder permission: %v", err)
+			} else if hasAccess {
+				log.Info("Verified: %s has access to the sync folder", email)
+			} else {
+				log.Warning("Permission created but verification failed - user may need to accept invitation")
+			}
 		}
 	}
 
