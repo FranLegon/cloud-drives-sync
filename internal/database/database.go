@@ -26,6 +26,7 @@ type Database interface {
 	GetFilesByHash(hash string, hashAlgorithm string, provider model.Provider) ([]model.File, error)
 	GetAllFiles(provider model.Provider, ownerEmail string) ([]model.File, error)
 	GetAllFilesByProvider(provider model.Provider) ([]model.File, error)
+	UpdateFileOwner(fileID string, provider model.Provider, newOwnerEmail string) error
 	DeleteFile(fileID string, provider model.Provider) error
 
 	// Folder operations
@@ -34,6 +35,8 @@ type Database interface {
 	GetFolderByPath(normalizedPath string, provider model.Provider) (*model.Folder, error)
 	GetFoldersByPath(normalizedPath string, provider model.Provider) ([]model.Folder, error)
 	GetAllFolders(provider model.Provider, ownerEmail string) ([]model.Folder, error)
+	GetAllFoldersByProvider(provider model.Provider) ([]model.Folder, error)
+	UpdateFolderOwner(folderID string, provider model.Provider, newOwnerEmail string) error
 	DeleteFolder(folderID string, provider model.Provider) error
 
 	// Duplicate detection
@@ -328,6 +331,25 @@ func (d *SQLiteDB) DeleteFile(fileID string, provider model.Provider) error {
 	return err
 }
 
+// UpdateFileOwner updates the owner of a file in the database
+func (d *SQLiteDB) UpdateFileOwner(fileID string, provider model.Provider, newOwnerEmail string) error {
+	query := `UPDATE files SET OwnerEmail = ? WHERE FileID = ? AND Provider = ?`
+	result, err := d.db.Exec(query, newOwnerEmail, fileID, provider)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return errors.New("file not found")
+	}
+
+	return nil
+}
+
 // UpsertFolder inserts or updates a folder record
 func (d *SQLiteDB) UpsertFolder(folder *model.Folder) error {
 	query := `
@@ -472,11 +494,62 @@ func (d *SQLiteDB) GetAllFolders(provider model.Provider, ownerEmail string) ([]
 	return folders, rows.Err()
 }
 
+// GetAllFoldersByProvider retrieves all folders for a provider regardless of owner
+func (d *SQLiteDB) GetAllFoldersByProvider(provider model.Provider) ([]model.Folder, error) {
+	query := `SELECT FolderID, Provider, OwnerEmail, FolderName, ParentFolderID, Path, NormalizedPath, LastSynced FROM folders WHERE Provider = ?`
+
+	rows, err := d.db.Query(query, provider)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var folders []model.Folder
+	for rows.Next() {
+		var folder model.Folder
+		err := rows.Scan(
+			&folder.FolderID,
+			&folder.Provider,
+			&folder.OwnerEmail,
+			&folder.FolderName,
+			&folder.ParentFolderID,
+			&folder.Path,
+			&folder.NormalizedPath,
+			&folder.LastSynced,
+		)
+		if err != nil {
+			return nil, err
+		}
+		folders = append(folders, folder)
+	}
+
+	return folders, rows.Err()
+}
+
 // DeleteFolder removes a folder from the database
 func (d *SQLiteDB) DeleteFolder(folderID string, provider model.Provider) error {
 	query := `DELETE FROM folders WHERE FolderID = ? AND Provider = ?`
 	_, err := d.db.Exec(query, folderID, provider)
 	return err
+}
+
+// UpdateFolderOwner updates the owner of a folder in the database
+func (d *SQLiteDB) UpdateFolderOwner(folderID string, provider model.Provider, newOwnerEmail string) error {
+	query := `UPDATE folders SET OwnerEmail = ? WHERE FolderID = ? AND Provider = ?`
+	result, err := d.db.Exec(query, newOwnerEmail, folderID, provider)
+	if err != nil {
+		return err
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return errors.New("folder not found")
+	}
+
+	return nil
 }
 
 // FindDuplicates finds all duplicate files within a provider

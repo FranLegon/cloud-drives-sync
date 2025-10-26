@@ -133,7 +133,8 @@ func (tr *TaskRunner) GetMetadata(ctx context.Context, clients map[string]api.Cl
 
 		// Upsert folders to database
 		for i := range allFolders {
-			if err := tr.db.UpsertFolder(&allFolders[i]); err != nil {
+			folder := &allFolders[i]
+			if err := tr.db.UpsertFolder(folder); err != nil {
 				tr.log.Error("Failed to upsert folder: %v", err)
 			}
 		}
@@ -315,7 +316,7 @@ func (tr *TaskRunner) SyncProviders(ctx context.Context, clients map[string]api.
 				tr.log.Info("Skipping conflict file that already exists: %s", path)
 				continue
 			}
-			
+
 			tr.log.Info("File exists in Google but not Microsoft: %s", path)
 			if err := tr.copyFile(ctx, googleClient, msClient, &gFile, model.ProviderMicrosoft); err != nil {
 				tr.log.Error("Failed to copy file: %v", err)
@@ -353,7 +354,7 @@ func (tr *TaskRunner) SyncProviders(ctx context.Context, clients map[string]api.
 				tr.log.Info("Skipping conflict file that already exists: %s", path)
 				continue
 			}
-			
+
 			tr.log.Info("File exists in Microsoft but not Google: %s", path)
 			if err := tr.copyFile(ctx, msClient, googleClient, &msFile, model.ProviderGoogle); err != nil {
 				tr.log.Error("Failed to copy file: %v", err)
@@ -384,6 +385,139 @@ func (tr *TaskRunner) SyncProviders(ctx context.Context, clients map[string]api.
 	}
 
 	tr.log.Success("Provider synchronization complete")
+
+	// Adjust ownership according to provider rules
+	tr.log.Info("Adjusting file and folder ownership...")
+	if err := tr.adjustOwnership(ctx, clients); err != nil {
+		tr.log.Error("Failed to adjust ownership: %v", err)
+	}
+
+	return nil
+}
+
+// adjustOwnership ensures proper ownership for all files and folders
+// Google: Main account owns folders, backup accounts own files
+// Microsoft: Backup account owns folders and files, main account is editor
+func (tr *TaskRunner) adjustOwnership(ctx context.Context, clients map[string]api.CloudClient) error {
+	for _, provider := range []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft} {
+		mainAccount, err := tr.config.GetMainAccount(provider)
+		if err != nil {
+			tr.log.Info("No main account for %s, skipping ownership adjustment", provider)
+			continue
+		}
+
+		backupAccounts := tr.config.GetBackupAccounts(provider)
+		if len(backupAccounts) == 0 {
+			tr.log.Warning("No backup accounts for %s, skipping ownership adjustment", provider)
+			continue
+		}
+
+		mainClient := clients[mainAccount.Email]
+
+		// Get all folders for this provider
+		folders, err := tr.db.GetAllFoldersByProvider(provider)
+		if err != nil {
+			tr.log.Error("Failed to get folders for %s: %v", provider, err)
+			continue
+		}
+
+		// Get all files for this provider
+		files, err := tr.db.GetAllFilesByProvider(provider)
+		if err != nil {
+			tr.log.Error("Failed to get files for %s: %v", provider, err)
+			continue
+		}
+
+		if provider == model.ProviderGoogle {
+			// Google: Main owns folders, backup owns files
+			tr.log.Info("Adjusting Google ownership: main owns folders, backup owns files")
+
+			// Transfer folder ownership to main account by recreating folders
+			for _, folder := range folders {
+				if folder.NormalizedPath == "" {
+					// Skip sync root folder
+					continue
+				}
+
+				if folder.OwnerEmail != mainAccount.Email {
+					tr.log.Info("Transferring folder ownership: %s from %s to %s", folder.FolderName, folder.OwnerEmail, mainAccount.Email)
+
+					// Recreate folder under correct owner
+					if err := tr.transferFolderOwnership(ctx, clients, &folder, folder.OwnerEmail, mainAccount.Email, backupAccounts); err != nil {
+						tr.log.Error("Failed to transfer folder %s ownership: %v", folder.FolderName, err)
+					}
+				} else {
+					// Folder already has correct owner, just ensure it's shared
+					for _, backup := range backupAccounts {
+						if err := mainClient.ShareFolder(ctx, folder.FolderID, backup.Email, "writer"); err != nil {
+							tr.log.Warning("Failed to share folder %s with %s: %v", folder.FolderName, backup.Email, err)
+						}
+					}
+				}
+			}
+
+			// Transfer file ownership to backup accounts (distribute evenly)
+			backupIndex := 0
+			for i := range files {
+				file := &files[i]
+				targetBackup := backupAccounts[backupIndex%len(backupAccounts)]
+
+				if file.OwnerEmail != targetBackup.Email {
+					tr.log.Info("Transferring file ownership: %s from %s to %s", file.FileName, file.OwnerEmail, targetBackup.Email)
+
+					// Get the current owner's client
+					currentOwnerClient := clients[file.OwnerEmail]
+					targetClient := clients[targetBackup.Email]
+
+					// Use transferOrCopyFileWithPath which preserves folder structure
+					if err := tr.transferOrCopyFileWithPath(ctx, currentOwnerClient, targetClient, file, targetBackup.Email); err != nil {
+						tr.log.Error("Failed to transfer file %s ownership: %v", file.FileName, err)
+					}
+				}
+
+				backupIndex++
+			}
+
+		} else {
+			// Microsoft: Backup owns everything, main is editor
+			tr.log.Info("Adjusting Microsoft ownership: backup owns all, main is editor")
+
+			backupAccount := backupAccounts[0] // Use first backup account
+			backupClient := clients[backupAccount.Email]
+
+			// Transfer folder ownership to backup account
+			for _, folder := range folders {
+				if folder.NormalizedPath == "" {
+					// Skip sync root folder
+					continue
+				}
+
+				if folder.OwnerEmail != backupAccount.Email {
+					tr.log.Warning("Folder %s owned by %s (expected %s) - OneDrive API doesn't support ownership transfer, folder is shared instead", folder.FolderName, folder.OwnerEmail, backupAccount.Email)
+				} // Share with main account
+				if err := backupClient.ShareFolder(ctx, folder.FolderID, mainAccount.Email, "write"); err != nil {
+					tr.log.Warning("Failed to share folder %s with %s: %v", folder.FolderName, mainAccount.Email, err)
+				}
+			}
+
+			// Transfer file ownership to backup account
+			for i := range files {
+				file := &files[i]
+				if file.OwnerEmail != backupAccount.Email {
+					tr.log.Info("Transferring file ownership: %s from %s to %s", file.FileName, file.OwnerEmail, backupAccount.Email)
+
+					// Get the current owner's client
+					currentOwnerClient := clients[file.OwnerEmail]
+
+					// Use transferOrCopyFileWithPath which preserves folder structure
+					if err := tr.transferOrCopyFileWithPath(ctx, currentOwnerClient, backupClient, file, backupAccount.Email); err != nil {
+						tr.log.Error("Failed to transfer file %s ownership: %v", file.FileName, err)
+					}
+				}
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -844,6 +978,300 @@ func (tr *TaskRunner) transferOrCopyFile(ctx context.Context, srcClient, dstClie
 	}
 
 	tr.log.Success("Copied and deleted file: %s", file.FileName)
+	return nil
+}
+
+// transferOrCopyFileWithPath transfers file ownership preserving folder structure
+func (tr *TaskRunner) transferOrCopyFileWithPath(ctx context.Context, srcClient, dstClient api.CloudClient, file *model.File, targetEmail string) error {
+	if tr.dryRun {
+		tr.log.DryRun("Would transfer file %s to %s", file.FileName, targetEmail)
+		return nil
+	}
+
+	// Try ownership transfer first
+	err := srcClient.TransferFileOwnership(ctx, file.FileID, targetEmail)
+	if err == nil {
+		tr.log.Success("Transferred ownership of %s to %s via API", file.FileName, targetEmail)
+		// Update database with new owner
+		if err := tr.db.UpdateFileOwner(file.FileID, file.Provider, targetEmail); err != nil {
+			tr.log.Error("Failed to update file %s owner in database: %v", file.FileName, err)
+		}
+		return nil
+	}
+
+	// Fallback: download and re-upload preserving folder structure
+	tr.log.Warning("API transfer failed for %s, using download/upload fallback", file.FileName)
+	tr.log.Info("[TRANSFER] Downloading file '%s' (ID: %s) from %s", file.FileName, file.FileID, file.OwnerEmail)
+
+	// Download file
+	reader, err := srcClient.DownloadFile(ctx, file.FileID)
+	if err != nil {
+		return fmt.Errorf("failed to download file: %w", err)
+	}
+	defer reader.Close()
+
+	tr.log.Info("[TRANSFER] Successfully downloaded file '%s'", file.FileName)
+
+	// Get the source folder to determine path
+	srcFolder, err := tr.db.GetFolder(file.ParentFolderID, file.Provider)
+	if err != nil {
+		return fmt.Errorf("failed to get source folder: %w", err)
+	}
+
+	// Find or create matching folder on destination
+	var destFolderID string
+	if srcFolder != nil && srcFolder.NormalizedPath != "" {
+		// Recreate complete folder structure on destination
+		tr.log.Info("[TRANSFER] Recreating folder structure '%s' for file %s", srcFolder.NormalizedPath, file.FileName)
+
+		// Get destination sync folder
+		syncFolders, err := dstClient.FindFoldersByName(ctx, SyncFolderName, false)
+		if err != nil || len(syncFolders) == 0 {
+			return fmt.Errorf("sync folder not found on destination")
+		}
+		destSyncFolderID := syncFolders[0].FolderID
+
+		// Recreate full folder path hierarchy
+		destFolderID, err = tr.recreateFolderPath(ctx, dstClient, srcFolder.NormalizedPath, destSyncFolderID, file.Provider, targetEmail)
+		if err != nil {
+			return fmt.Errorf("failed to recreate folder path: %w", err)
+		}
+		tr.log.Info("[TRANSFER] Folder structure recreated, uploading to folder ID: %s", destFolderID)
+	} else {
+		// Upload to sync folder root
+		folders, err := dstClient.FindFoldersByName(ctx, SyncFolderName, false)
+		if err != nil || len(folders) == 0 {
+			return fmt.Errorf("sync folder not found on destination")
+		}
+		destFolderID = folders[0].FolderID
+		tr.log.Info("[TRANSFER] Uploading to sync folder root")
+	}
+
+	// Upload to destination
+	tr.log.Info("[TRANSFER] Uploading file '%s' to %s (folder ID: %s)", file.FileName, targetEmail, destFolderID)
+	uploaded, err := dstClient.UploadFile(ctx, destFolderID, file.FileName, reader)
+	if err != nil {
+		return fmt.Errorf("failed to upload file: %w", err)
+	}
+	tr.log.Success("[TRANSFER] Successfully uploaded file '%s' (new ID: %s) to %s", file.FileName, uploaded.FileID, targetEmail)
+
+	// Delete from source
+	tr.log.Info("[TRANSFER] Deleting original file '%s' (ID: %s) from %s", file.FileName, file.FileID, file.OwnerEmail)
+	if err := srcClient.DeleteFile(ctx, file.FileID); err != nil {
+		tr.log.Error("Failed to delete source file after copy: %v", err)
+		// Don't fail - file was copied successfully
+	} else {
+		tr.log.Success("[TRANSFER] Successfully deleted original file from %s", file.OwnerEmail)
+	}
+
+	// Update database - remove old, add new
+	if err := tr.db.DeleteFile(file.FileID, file.Provider); err != nil {
+		tr.log.Error("Failed to remove old file from DB: %v", err)
+	}
+	if err := tr.db.UpsertFile(uploaded); err != nil {
+		tr.log.Error("Failed to save new file to DB: %v", err)
+	}
+
+	tr.log.Success("✓ Transferred %s from %s to %s via download/upload", file.FileName, file.OwnerEmail, targetEmail)
+	return nil
+}
+
+// recreateFolderPath recreates the complete folder hierarchy from a normalized path
+func (tr *TaskRunner) recreateFolderPath(ctx context.Context, client api.CloudClient, normalizedPath, syncFolderID string, provider model.Provider, ownerEmail string) (string, error) {
+	// Split the path into individual folder names
+	// Example: "/folder1/folder2/folder3" -> ["folder1", "folder2", "folder3"]
+	pathParts := strings.Split(strings.Trim(normalizedPath, "/"), "/")
+
+	tr.log.Info("[FOLDER-PATH] Creating folder hierarchy: %s", normalizedPath)
+
+	currentParentID := syncFolderID
+
+	// Create each folder in the hierarchy
+	for i, folderName := range pathParts {
+		if folderName == "" {
+			continue
+		}
+
+		// Check if folder already exists in database
+		destFolders, err := tr.db.GetAllFoldersByProvider(provider)
+		if err != nil {
+			return "", fmt.Errorf("failed to get folders: %w", err)
+		}
+
+		// Build the path up to this point
+		currentPath := "/" + strings.Join(pathParts[:i+1], "/")
+
+		var foundFolderID string
+		for _, f := range destFolders {
+			if f.NormalizedPath == currentPath && f.OwnerEmail == ownerEmail {
+				foundFolderID = f.FolderID
+				tr.log.Info("[FOLDER-PATH] Folder '%s' (path: %s) already exists (ID: %s)", folderName, currentPath, foundFolderID)
+				break
+			}
+		}
+
+		if foundFolderID != "" {
+			currentParentID = foundFolderID
+		} else {
+			// Create the folder
+			tr.log.Info("[FOLDER-PATH] Creating folder '%s' in parent %s", folderName, currentParentID)
+			newFolderID, err := client.GetOrCreateFolder(ctx, folderName, currentParentID)
+			if err != nil {
+				return "", fmt.Errorf("failed to create folder '%s': %w", folderName, err)
+			}
+			tr.log.Success("[FOLDER-PATH] Created folder '%s' (ID: %s)", folderName, newFolderID)
+
+			// Fetch and save folder to database
+			allFolders, err := client.ListFolders(ctx, currentParentID, false)
+			if err == nil {
+				for _, f := range allFolders {
+					if f.FolderID == newFolderID {
+						if err := tr.db.UpsertFolder(&f); err != nil {
+							tr.log.Error("Failed to save folder to DB: %v", err)
+						}
+						break
+					}
+				}
+			}
+
+			currentParentID = newFolderID
+		}
+	}
+
+	tr.log.Success("[FOLDER-PATH] Complete folder hierarchy created, final folder ID: %s", currentParentID)
+	return currentParentID, nil
+}
+
+// transferFolderOwnership transfers folder ownership by recreating it under the new owner
+func (tr *TaskRunner) transferFolderOwnership(ctx context.Context, clients map[string]api.CloudClient, folder *model.Folder, currentOwnerEmail, targetOwnerEmail string, shareWithAccounts []model.User) error {
+	if tr.dryRun {
+		tr.log.DryRun("Would transfer folder %s to %s", folder.FolderName, targetOwnerEmail)
+		return nil
+	}
+
+	currentClient := clients[currentOwnerEmail]
+	targetClient := clients[targetOwnerEmail]
+
+	// Get the sync folder on target account
+	syncFolders, err := targetClient.FindFoldersByName(ctx, SyncFolderName, false)
+	if err != nil || len(syncFolders) == 0 {
+		return fmt.Errorf("sync folder not found on target account")
+	}
+	targetSyncFolderID := syncFolders[0].FolderID
+
+	// Create new folder under target owner
+	tr.log.Info("Creating folder '%s' under %s", folder.FolderName, targetOwnerEmail)
+	newFolderID, err := targetClient.GetOrCreateFolder(ctx, folder.FolderName, targetSyncFolderID)
+	if err != nil {
+		return fmt.Errorf("failed to create new folder: %w", err)
+	}
+
+	// Get all files in the old folder
+	filesInFolder, err := currentClient.ListFiles(ctx, folder.FolderID, false)
+	if err != nil {
+		return fmt.Errorf("failed to list files in folder: %w", err)
+	}
+
+	tr.log.Info("Moving %d files from old folder to new folder", len(filesInFolder))
+
+	// Move each file to the new folder
+	for i := range filesInFolder {
+		file := &filesInFolder[i]
+
+		// Download file from old folder
+		reader, err := currentClient.DownloadFile(ctx, file.FileID)
+		if err != nil {
+			tr.log.Error("Failed to download file %s: %v", file.FileName, err)
+			continue
+		}
+
+		// Upload to new folder
+		uploaded, err := targetClient.UploadFile(ctx, newFolderID, file.FileName, reader)
+		reader.Close()
+		if err != nil {
+			tr.log.Error("Failed to upload file %s to new folder: %v", file.FileName, err)
+			continue
+		}
+
+		// Delete from old folder
+		if err := currentClient.DeleteFile(ctx, file.FileID); err != nil {
+			tr.log.Error("Failed to delete file %s from old folder: %v", file.FileName, err)
+		}
+
+		// Update database
+		if err := tr.db.DeleteFile(file.FileID, file.Provider); err != nil {
+			tr.log.Error("Failed to remove old file from DB: %v", err)
+		}
+		if err := tr.db.UpsertFile(uploaded); err != nil {
+			tr.log.Error("Failed to save new file to DB: %v", err)
+		}
+
+		tr.log.Info("Moved file %s to new folder", file.FileName)
+	}
+
+	// Get all subfolders in the old folder
+	subfoldersInFolder, err := currentClient.ListFolders(ctx, folder.FolderID, false)
+	if err != nil {
+		return fmt.Errorf("failed to list subfolders: %w", err)
+	}
+
+	// Recursively transfer subfolders
+	for i := range subfoldersInFolder {
+		subfolder := &subfoldersInFolder[i]
+		tr.log.Info("Recursively transferring subfolder: %s", subfolder.FolderName)
+
+		// Create subfolder in new location
+		newSubfolderID, err := targetClient.GetOrCreateFolder(ctx, subfolder.FolderName, newFolderID)
+		if err != nil {
+			tr.log.Error("Failed to create subfolder %s: %v", subfolder.FolderName, err)
+			continue
+		}
+
+		// Update subfolder's parent to point to new folder for recursive call
+		subfolderCopy := *subfolder
+		subfolderCopy.ParentFolderID = newSubfolderID
+
+		// Recursively transfer this subfolder's contents
+		if err := tr.transferFolderOwnership(ctx, clients, &subfolderCopy, currentOwnerEmail, targetOwnerEmail, shareWithAccounts); err != nil {
+			tr.log.Error("Failed to transfer subfolder %s: %v", subfolder.FolderName, err)
+		}
+	}
+
+	// Share new folder with specified accounts
+	for _, account := range shareWithAccounts {
+		if err := targetClient.ShareFolder(ctx, newFolderID, account.Email, "writer"); err != nil {
+			tr.log.Warning("Failed to share new folder with %s: %v", account.Email, err)
+		} else {
+			tr.log.Info("Shared new folder with %s", account.Email)
+		}
+	}
+
+	// Delete old folder
+	tr.log.Info("Deleting old folder '%s' owned by %s", folder.FolderName, currentOwnerEmail)
+	if err := currentClient.DeleteFile(ctx, folder.FolderID); err != nil {
+		tr.log.Error("Failed to delete old folder: %v", err)
+		// Don't return error - folder contents were moved successfully
+	}
+
+	// Update database with new folder
+	if err := tr.db.DeleteFolder(folder.FolderID, folder.Provider); err != nil {
+		tr.log.Error("Failed to remove old folder from DB: %v", err)
+	}
+
+	// Fetch new folder details and save to database
+	newFolders, err := targetClient.ListFolders(ctx, targetSyncFolderID, false)
+	if err == nil {
+		for _, f := range newFolders {
+			if f.FolderID == newFolderID {
+				if err := tr.db.UpsertFolder(&f); err != nil {
+					tr.log.Error("Failed to save new folder to DB: %v", err)
+				}
+				break
+			}
+		}
+	}
+
+	tr.log.Success("Successfully transferred folder %s to %s", folder.FolderName, targetOwnerEmail)
 	return nil
 }
 
