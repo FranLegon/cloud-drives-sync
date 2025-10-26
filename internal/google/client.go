@@ -200,11 +200,21 @@ func (c *Client) ListFolders(ctx context.Context, parentID string, recursive boo
 
 	if recursive {
 		for _, folder := range folders {
-			subFolders, err := c.ListFolders(ctx, folder.FolderID, true)
+			// Pass the current folder's path as prefix for subfolders
+			subFolders, err := c.listFoldersInParent(ctx, folder.FolderID, folder.Path)
 			if err != nil {
 				return nil, err
 			}
 			allFolders = append(allFolders, subFolders...)
+
+			// Recursively get sub-subfolders
+			for _, subfolder := range subFolders {
+				deeperFolders, err := c.ListFolders(ctx, subfolder.FolderID, true)
+				if err != nil {
+					return nil, err
+				}
+				allFolders = append(allFolders, deeperFolders...)
+			}
 		}
 	}
 

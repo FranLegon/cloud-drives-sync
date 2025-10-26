@@ -53,3 +53,13 @@ type QuotaInfo struct {
 	UsedBytes      int64    `json:"used_bytes"`
 	PercentageUsed float64  `json:"percentage_used"`
 }
+
+// ComputedHash represents computed hash values for file comparison across providers
+type ComputedHash struct {
+	FileID           string    `json:"file_id"`
+	Provider         Provider  `json:"provider"`
+	GoogleMD5Hash    string    `json:"google_md5_hash"`    // MD5 in hex format (Google native)
+	MicrosoftB64Hash string    `json:"microsoft_b64_hash"` // SHA1/quickXor in base64 (Microsoft native)
+	MySha256Hash     string    `json:"my_sha256_hash"`     // SHA256 in hex format (universal comparison)
+	ComputedAt       time.Time `json:"computed_at"`
+}

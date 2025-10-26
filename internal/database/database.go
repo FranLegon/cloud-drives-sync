@@ -25,17 +25,23 @@ type Database interface {
 	GetFile(fileID string, provider model.Provider) (*model.File, error)
 	GetFilesByHash(hash string, hashAlgorithm string, provider model.Provider) ([]model.File, error)
 	GetAllFiles(provider model.Provider, ownerEmail string) ([]model.File, error)
+	GetAllFilesByProvider(provider model.Provider) ([]model.File, error)
 	DeleteFile(fileID string, provider model.Provider) error
 
 	// Folder operations
 	UpsertFolder(folder *model.Folder) error
 	GetFolder(folderID string, provider model.Provider) (*model.Folder, error)
 	GetFolderByPath(normalizedPath string, provider model.Provider) (*model.Folder, error)
+	GetFoldersByPath(normalizedPath string, provider model.Provider) ([]model.Folder, error)
 	GetAllFolders(provider model.Provider, ownerEmail string) ([]model.Folder, error)
 	DeleteFolder(folderID string, provider model.Provider) error
 
 	// Duplicate detection
 	FindDuplicates(provider model.Provider) (map[string][]model.File, error)
+
+	// Computed hash operations
+	UpsertComputedHash(fileID string, provider model.Provider, googleMD5, microsoftB64, sha256 string) error
+	GetComputedHash(fileID string, provider model.Provider) (*model.ComputedHash, error)
 }
 
 // SQLiteDB implements the Database interface using SQLite with SQLCipher
@@ -101,6 +107,17 @@ func (d *SQLiteDB) createTables() error {
 		PRIMARY KEY (FolderID, Provider)
 	);`
 
+	computedHashesTable := `
+	CREATE TABLE IF NOT EXISTS computed_hashes (
+		FileID TEXT NOT NULL,
+		Provider TEXT NOT NULL,
+		GoogleMD5Hash TEXT,
+		MicrosoftB64Hash TEXT,
+		MySha256Hash TEXT NOT NULL,
+		ComputedAt DATETIME DEFAULT CURRENT_TIMESTAMP,
+		PRIMARY KEY (FileID, Provider)
+	);`
+
 	if _, err := d.db.Exec(filesTable); err != nil {
 		return fmt.Errorf("failed to create files table: %w", err)
 	}
@@ -109,12 +126,17 @@ func (d *SQLiteDB) createTables() error {
 		return fmt.Errorf("failed to create folders table: %w", err)
 	}
 
+	if _, err := d.db.Exec(computedHashesTable); err != nil {
+		return fmt.Errorf("failed to create computed_hashes table: %w", err)
+	}
+
 	// Create indexes for common queries
 	indexes := []string{
 		"CREATE INDEX IF NOT EXISTS idx_files_hash ON files(FileHash, HashAlgorithm, Provider);",
 		"CREATE INDEX IF NOT EXISTS idx_files_owner ON files(OwnerEmail, Provider);",
 		"CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(NormalizedPath, Provider);",
 		"CREATE INDEX IF NOT EXISTS idx_folders_owner ON folders(OwnerEmail, Provider);",
+		"CREATE INDEX IF NOT EXISTS idx_computed_hashes_sha256 ON computed_hashes(MySha256Hash);",
 	}
 
 	for _, idx := range indexes {
@@ -264,6 +286,41 @@ func (d *SQLiteDB) GetAllFiles(provider model.Provider, ownerEmail string) ([]mo
 	return files, rows.Err()
 }
 
+// GetAllFilesByProvider retrieves all files for a provider regardless of owner
+func (d *SQLiteDB) GetAllFilesByProvider(provider model.Provider) ([]model.File, error) {
+	query := `SELECT FileID, Provider, OwnerEmail, FileHash, HashAlgorithm, FileName, FileSize, ParentFolderID, CreatedOn, LastModified, LastSynced FROM files WHERE Provider = ?`
+
+	rows, err := d.db.Query(query, provider)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []model.File
+	for rows.Next() {
+		var file model.File
+		err := rows.Scan(
+			&file.FileID,
+			&file.Provider,
+			&file.OwnerEmail,
+			&file.FileHash,
+			&file.HashAlgorithm,
+			&file.FileName,
+			&file.FileSize,
+			&file.ParentFolderID,
+			&file.CreatedOn,
+			&file.LastModified,
+			&file.LastSynced,
+		)
+		if err != nil {
+			return nil, err
+		}
+		files = append(files, file)
+	}
+
+	return files, rows.Err()
+}
+
 // DeleteFile removes a file from the database
 func (d *SQLiteDB) DeleteFile(fileID string, provider model.Provider) error {
 	query := `DELETE FROM files WHERE FileID = ? AND Provider = ?`
@@ -351,6 +408,38 @@ func (d *SQLiteDB) GetFolderByPath(normalizedPath string, provider model.Provide
 	return &folder, nil
 }
 
+// GetFoldersByPath retrieves all folders with a specific normalized path and provider
+func (d *SQLiteDB) GetFoldersByPath(normalizedPath string, provider model.Provider) ([]model.Folder, error) {
+	query := `SELECT FolderID, Provider, OwnerEmail, FolderName, ParentFolderID, Path, NormalizedPath, LastSynced FROM folders WHERE NormalizedPath = ? AND Provider = ?`
+
+	rows, err := d.db.Query(query, normalizedPath, provider)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var folders []model.Folder
+	for rows.Next() {
+		var folder model.Folder
+		err := rows.Scan(
+			&folder.FolderID,
+			&folder.Provider,
+			&folder.OwnerEmail,
+			&folder.FolderName,
+			&folder.ParentFolderID,
+			&folder.Path,
+			&folder.NormalizedPath,
+			&folder.LastSynced,
+		)
+		if err != nil {
+			return nil, err
+		}
+		folders = append(folders, folder)
+	}
+
+	return folders, rows.Err()
+}
+
 // GetAllFolders retrieves all folders for a provider and owner
 func (d *SQLiteDB) GetAllFolders(provider model.Provider, ownerEmail string) ([]model.Folder, error) {
 	query := `SELECT FolderID, Provider, OwnerEmail, FolderName, ParentFolderID, Path, NormalizedPath, LastSynced FROM folders WHERE Provider = ? AND OwnerEmail = ?`
@@ -436,6 +525,47 @@ func (d *SQLiteDB) FindDuplicates(provider model.Provider) (map[string][]model.F
 	}
 
 	return duplicates, rows.Err()
+}
+
+// UpsertComputedHash inserts or updates computed hash values for a file
+func (d *SQLiteDB) UpsertComputedHash(fileID string, provider model.Provider, googleMD5, microsoftB64, sha256 string) error {
+	query := `
+	INSERT INTO computed_hashes (FileID, Provider, GoogleMD5Hash, MicrosoftB64Hash, MySha256Hash, ComputedAt)
+	VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(FileID, Provider) DO UPDATE SET
+		GoogleMD5Hash = excluded.GoogleMD5Hash,
+		MicrosoftB64Hash = excluded.MicrosoftB64Hash,
+		MySha256Hash = excluded.MySha256Hash,
+		ComputedAt = CURRENT_TIMESTAMP;
+	`
+
+	_, err := d.db.Exec(query, fileID, provider, googleMD5, microsoftB64, sha256)
+	return err
+}
+
+// GetComputedHash retrieves computed hash values for a file
+func (d *SQLiteDB) GetComputedHash(fileID string, provider model.Provider) (*model.ComputedHash, error) {
+	query := `SELECT FileID, Provider, GoogleMD5Hash, MicrosoftB64Hash, MySha256Hash, ComputedAt FROM computed_hashes WHERE FileID = ? AND Provider = ?`
+
+	var hash model.ComputedHash
+	err := d.db.QueryRow(query, fileID, provider).Scan(
+		&hash.FileID,
+		&hash.Provider,
+		&hash.GoogleMD5Hash,
+		&hash.MicrosoftB64Hash,
+		&hash.MySha256Hash,
+		&hash.ComputedAt,
+	)
+
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	return &hash, nil
 }
 
 // SetupDatabase initializes the database with proper user/password (for SQLCipher)

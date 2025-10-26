@@ -2,8 +2,13 @@ package task
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"sort"
+	"strings"
 	"time"
 
 	"cloud-drives-sync/internal/api"
@@ -109,6 +114,14 @@ func (tr *TaskRunner) GetMetadata(ctx context.Context, clients map[string]api.Cl
 		}
 
 		syncFolderID := folders[0].FolderID
+
+		// Store the sync folder itself in the database
+		syncFolderRecord := folders[0]
+		syncFolderRecord.Path = ""
+		syncFolderRecord.NormalizedPath = ""
+		if err := tr.db.UpsertFolder(&syncFolderRecord); err != nil {
+			tr.log.Error("Failed to upsert sync folder: %v", err)
+		}
 
 		// List all folders recursively
 		allFolders, err := client.ListFolders(ctx, syncFolderID, true)
@@ -251,16 +264,20 @@ func (tr *TaskRunner) SyncProviders(ctx context.Context, clients map[string]api.
 	googleClient := clients[googleMain.Email]
 	msClient := clients[msMain.Email]
 
-	// Get all files from both providers
-	googleFiles, err := tr.db.GetAllFiles(model.ProviderGoogle, googleMain.Email)
+	// Get ALL files from both providers (not just main account)
+	// For Google: files can be owned by different accounts
+	// For Microsoft: backup accounts access shared folders, files show as owned by them but are actually in main's folder
+	googleFiles, err := tr.db.GetAllFilesByProvider(model.ProviderGoogle)
 	if err != nil {
 		return fmt.Errorf("failed to get Google files: %w", err)
 	}
+	tr.log.Info("Found %d total files in Google Drive", len(googleFiles))
 
-	msFiles, err := tr.db.GetAllFiles(model.ProviderMicrosoft, msMain.Email)
+	msFiles, err := tr.db.GetAllFilesByProvider(model.ProviderMicrosoft)
 	if err != nil {
 		return fmt.Errorf("failed to get Microsoft files: %w", err)
 	}
+	tr.log.Info("Found %d total files in Microsoft OneDrive", len(msFiles))
 
 	// Create maps by normalized path
 	googleByPath := make(map[string]model.File)
@@ -270,6 +287,9 @@ func (tr *TaskRunner) SyncProviders(ctx context.Context, clients map[string]api.
 		if folder != nil {
 			path := folder.NormalizedPath + "/" + logger.NormalizePath(f.FileName)
 			googleByPath[path] = f
+			tr.log.Info("Google file: %s -> %s (owner: %s)", f.FileName, path, f.OwnerEmail)
+		} else {
+			tr.log.Warning("Could not find folder %s for Google file %s", f.ParentFolderID, f.FileName)
 		}
 	}
 
@@ -279,35 +299,86 @@ func (tr *TaskRunner) SyncProviders(ctx context.Context, clients map[string]api.
 		if folder != nil {
 			path := folder.NormalizedPath + "/" + logger.NormalizePath(f.FileName)
 			msByPath[path] = f
+			tr.log.Info("Microsoft file: %s -> %s (owner: %s)", f.FileName, path, f.OwnerEmail)
+		} else {
+			tr.log.Warning("Could not find folder %s for Microsoft file %s", f.ParentFolderID, f.FileName)
 		}
 	}
 
+	tr.log.Info("Google files by path: %d, Microsoft files by path: %d", len(googleByPath), len(msByPath))
+
 	// Sync: copy missing files from Google to Microsoft
 	for path, gFile := range googleByPath {
-		if _, exists := msByPath[path]; !exists {
+		if msFile, exists := msByPath[path]; !exists {
+			// Skip conflict files - they were already created during hash mismatch handling
+			if strings.Contains(gFile.FileName, "_conflict_") {
+				tr.log.Info("Skipping conflict file that already exists: %s", path)
+				continue
+			}
+			
 			tr.log.Info("File exists in Google but not Microsoft: %s", path)
 			if err := tr.copyFile(ctx, googleClient, msClient, &gFile, model.ProviderMicrosoft); err != nil {
 				tr.log.Error("Failed to copy file: %v", err)
 			}
 		} else {
-			// Check for conflicts (same path, different hash)
-			msFile := msByPath[path]
-			if gFile.FileHash != msFile.FileHash {
-				tr.log.Warning("Conflict detected at path: %s", path)
-				// Rename and copy
+			// File exists in both - compare using SHA256 hashes
+			gHash, err := tr.getOrEnsureComputedHash(ctx, googleClient, &gFile)
+			if err != nil {
+				tr.log.Warning("Failed to compute hash for Google file %s: %v", path, err)
+				continue
+			}
+
+			msHash, err := tr.getOrEnsureComputedHash(ctx, msClient, &msFile)
+			if err != nil {
+				tr.log.Warning("Failed to compute hash for Microsoft file %s: %v", path, err)
+				continue
+			}
+
+			if gHash != msHash {
+				tr.log.Warning("Hash mismatch at path %s (Google SHA256: %s, MS SHA256: %s) - creating conflict copy", path, gHash, msHash)
 				if err := tr.copyFileWithConflictRename(ctx, googleClient, msClient, &gFile, model.ProviderMicrosoft); err != nil {
 					tr.log.Error("Failed to handle conflict: %v", err)
 				}
+			} else {
+				tr.log.Info("File %s already exists with matching SHA256 hash - skipping", path)
 			}
 		}
 	}
 
 	// Sync: copy missing files from Microsoft to Google
 	for path, msFile := range msByPath {
-		if _, exists := googleByPath[path]; !exists {
+		if gFile, exists := googleByPath[path]; !exists {
+			// Skip conflict files - they were already created during hash mismatch handling
+			if strings.Contains(msFile.FileName, "_conflict_") {
+				tr.log.Info("Skipping conflict file that already exists: %s", path)
+				continue
+			}
+			
 			tr.log.Info("File exists in Microsoft but not Google: %s", path)
 			if err := tr.copyFile(ctx, msClient, googleClient, &msFile, model.ProviderGoogle); err != nil {
 				tr.log.Error("Failed to copy file: %v", err)
+			}
+		} else {
+			// File exists in both - compare using SHA256 hashes
+			msHash, err := tr.getOrEnsureComputedHash(ctx, msClient, &msFile)
+			if err != nil {
+				tr.log.Warning("Failed to compute hash for Microsoft file %s: %v", path, err)
+				continue
+			}
+
+			gHash, err := tr.getOrEnsureComputedHash(ctx, googleClient, &gFile)
+			if err != nil {
+				tr.log.Warning("Failed to compute hash for Google file %s: %v", path, err)
+				continue
+			}
+
+			if msHash != gHash {
+				tr.log.Warning("Hash mismatch at path %s (MS SHA256: %s, Google SHA256: %s) - creating conflict copy", path, msHash, gHash)
+				if err := tr.copyFileWithConflictRename(ctx, msClient, googleClient, &msFile, model.ProviderGoogle); err != nil {
+					tr.log.Error("Failed to handle conflict: %v", err)
+				}
+			} else {
+				tr.log.Info("File %s already exists with matching SHA256 hash - skipping", path)
 			}
 		}
 	}
@@ -323,6 +394,31 @@ func (tr *TaskRunner) copyFile(ctx context.Context, srcClient, dstClient api.Clo
 		return nil
 	}
 
+	// Get source folder to recreate folder structure
+	srcFolder, err := tr.db.GetFolder(file.ParentFolderID, file.Provider)
+	if err != nil {
+		return fmt.Errorf("failed to get source folder: %w", err)
+	}
+
+	// Get or create destination folder with same path
+	var dstFolderID string
+	if srcFolder != nil && srcFolder.NormalizedPath != "" {
+		tr.log.Info("Recreating folder structure '%s' in %s for file %s", srcFolder.NormalizedPath, dstProvider, file.FileName)
+		// Create folder hierarchy in destination
+		dstFolderID, err = tr.getOrCreateFolderPath(ctx, dstClient, srcFolder.NormalizedPath, dstProvider)
+		if err != nil {
+			return fmt.Errorf("failed to create destination folder: %w", err)
+		}
+	} else {
+		tr.log.Info("Uploading file %s to sync root (no subfolder)", file.FileName)
+		// Upload to sync root
+		folders, err := dstClient.FindFoldersByName(ctx, SyncFolderName, false)
+		if err != nil || len(folders) == 0 {
+			return fmt.Errorf("sync folder not found on destination")
+		}
+		dstFolderID = folders[0].FolderID
+	}
+
 	// Download from source
 	reader, err := srcClient.DownloadFile(ctx, file.FileID)
 	if err != nil {
@@ -330,17 +426,15 @@ func (tr *TaskRunner) copyFile(ctx context.Context, srcClient, dstClient api.Clo
 	}
 	defer reader.Close()
 
-	// Get destination folder (create if needed)
-	// Simplified: upload to sync root for now
-	folders, err := dstClient.FindFoldersByName(ctx, SyncFolderName, false)
-	if err != nil || len(folders) == 0 {
-		return fmt.Errorf("sync folder not found on destination")
-	}
-
 	// Upload to destination
-	uploaded, err := dstClient.UploadFile(ctx, folders[0].FolderID, file.FileName, reader)
+	uploaded, err := dstClient.UploadFile(ctx, dstFolderID, file.FileName, reader)
 	if err != nil {
 		return fmt.Errorf("failed to upload file: %w", err)
+	}
+
+	// Set proper ownership/permissions
+	if err := tr.setFileOwnership(ctx, dstClient, uploaded.FileID, dstProvider); err != nil {
+		tr.log.Warning("Failed to set ownership for %s: %v", uploaded.FileName, err)
 	}
 
 	// Save to database
@@ -350,6 +444,207 @@ func (tr *TaskRunner) copyFile(ctx context.Context, srcClient, dstClient api.Clo
 
 	tr.log.Success("Copied file: %s", file.FileName)
 	return nil
+}
+
+// getOrCreateFolderPath creates folder hierarchy matching the given path
+func (tr *TaskRunner) getOrCreateFolderPath(ctx context.Context, client api.CloudClient, folderPath string, provider model.Provider) (string, error) {
+	// Get sync root folder
+	syncFolders, err := client.FindFoldersByName(ctx, SyncFolderName, false)
+	if err != nil || len(syncFolders) == 0 {
+		return "", fmt.Errorf("sync folder not found")
+	}
+	syncRootID := syncFolders[0].FolderID
+
+	// If path is empty, return sync root
+	if folderPath == "" || folderPath == "/" {
+		return syncRootID, nil
+	}
+
+	// Split path and create folders recursively
+	parts := strings.Split(strings.Trim(folderPath, "/"), "/")
+	parentID := syncRootID
+	currentPath := ""
+
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+
+		currentPath = currentPath + "/" + part
+		normalizedPath := logger.NormalizePath(currentPath)
+
+		// Always create/get folder through API (database ID may not be accessible by current client)
+		folderID, err := client.GetOrCreateFolder(ctx, part, parentID)
+		if err != nil {
+			return "", fmt.Errorf("failed to create folder %s: %w", part, err)
+		}
+
+		// Save to database
+		dstEmail, _ := client.GetUserEmail(ctx)
+		folder := &model.Folder{
+			FolderID:       folderID,
+			Provider:       provider,
+			OwnerEmail:     dstEmail,
+			FolderName:     part,
+			ParentFolderID: parentID,
+			Path:           currentPath,
+			NormalizedPath: normalizedPath,
+			LastSynced:     time.Now(),
+		}
+		if err := tr.db.UpsertFolder(folder); err != nil {
+			tr.log.Warning("Failed to save folder to DB: %v", err)
+		}
+
+		// Set folder ownership/permissions
+		if err := tr.setFolderOwnership(ctx, client, folderID, provider); err != nil {
+			tr.log.Warning("Failed to set folder ownership: %v", err)
+		}
+
+		parentID = folderID
+	}
+
+	return parentID, nil
+}
+
+// setFileOwnership sets proper ownership/permissions for a file
+func (tr *TaskRunner) setFileOwnership(ctx context.Context, client api.CloudClient, fileID string, provider model.Provider) error {
+	mainAccount, err := tr.config.GetMainAccount(provider)
+	if err != nil {
+		return err
+	}
+
+	backupAccounts := tr.config.GetBackupAccounts(provider)
+	currentEmail, _ := client.GetUserEmail(ctx)
+
+	if provider == model.ProviderGoogle {
+		// For Google: main account should own everything
+		if currentEmail != mainAccount.Email {
+			// Transfer ownership to main account
+			if err := client.TransferFileOwnership(ctx, fileID, mainAccount.Email); err != nil {
+				return fmt.Errorf("failed to transfer ownership: %w", err)
+			}
+		}
+		// Backup accounts should be editors (sharing happens at folder level)
+	} else {
+		// For Microsoft: backup accounts should own everything
+		if currentEmail == mainAccount.Email && len(backupAccounts) > 0 {
+			// Transfer ownership to first backup account
+			if err := client.TransferFileOwnership(ctx, fileID, backupAccounts[0].Email); err != nil {
+				return fmt.Errorf("failed to transfer ownership: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// setFolderOwnership sets proper ownership/permissions for a folder
+func (tr *TaskRunner) setFolderOwnership(ctx context.Context, client api.CloudClient, folderID string, provider model.Provider) error {
+	mainAccount, err := tr.config.GetMainAccount(provider)
+	if err != nil {
+		return err
+	}
+
+	backupAccounts := tr.config.GetBackupAccounts(provider)
+	currentEmail, _ := client.GetUserEmail(ctx)
+
+	if provider == model.ProviderGoogle {
+		// For Google: main account should own folders, backups should be editors
+		if currentEmail != mainAccount.Email {
+			// Transfer ownership to main account
+			if err := client.TransferFileOwnership(ctx, folderID, mainAccount.Email); err != nil {
+				return fmt.Errorf("failed to transfer folder ownership: %w", err)
+			}
+		}
+
+		// Share with backup accounts as editors
+		for _, backup := range backupAccounts {
+			if err := client.ShareFolder(ctx, folderID, backup.Email, "writer"); err != nil {
+				tr.log.Warning("Failed to share folder with %s: %v", backup.Email, err)
+			}
+		}
+	} else {
+		// For Microsoft: backup accounts should own folders, main should be editor
+		if currentEmail == mainAccount.Email && len(backupAccounts) > 0 {
+			// Transfer ownership to first backup account
+			if err := client.TransferFileOwnership(ctx, folderID, backupAccounts[0].Email); err != nil {
+				return fmt.Errorf("failed to transfer folder ownership: %w", err)
+			}
+
+			// Share with main account as editor
+			if err := client.ShareFolder(ctx, folderID, mainAccount.Email, "write"); err != nil {
+				tr.log.Warning("Failed to share folder with main account: %v", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// computeFileHash downloads a file and computes all hash formats for cross-provider comparison
+func (tr *TaskRunner) computeFileHash(ctx context.Context, client api.CloudClient, file *model.File) (*model.ComputedHash, error) {
+	// Check if already computed
+	existing, err := tr.db.GetComputedHash(file.FileID, file.Provider)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check existing hash: %w", err)
+	}
+	if existing != nil && existing.MySha256Hash != "" {
+		return existing, nil
+	}
+
+	// Download file and compute hashes
+	tr.log.Info("Computing hashes for %s...", file.FileName)
+	reader, err := client.DownloadFile(ctx, file.FileID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download file: %w", err)
+	}
+	defer reader.Close()
+
+	// Create hash writers
+	md5Hash := md5.New()
+	sha256Hash := sha256.New()
+
+	// Use TeeReader to compute both hashes simultaneously
+	multiWriter := io.MultiWriter(md5Hash, sha256Hash)
+	if _, err := io.Copy(multiWriter, reader); err != nil {
+		return nil, fmt.Errorf("failed to compute hashes: %w", err)
+	}
+
+	// Get hash values
+	googleMD5 := hex.EncodeToString(md5Hash.Sum(nil))
+	mySha256 := hex.EncodeToString(sha256Hash.Sum(nil))
+
+	// Microsoft hash is what's already in the file record (if from Microsoft)
+	microsoftB64 := ""
+	if file.Provider == model.ProviderMicrosoft {
+		microsoftB64 = file.FileHash // Keep the original quickXorHash or SHA1
+	}
+
+	// Save computed hashes
+	if err := tr.db.UpsertComputedHash(file.FileID, file.Provider, googleMD5, microsoftB64, mySha256); err != nil {
+		tr.log.Warning("Failed to save computed hash: %v", err)
+	}
+
+	computed := &model.ComputedHash{
+		FileID:           file.FileID,
+		Provider:         file.Provider,
+		GoogleMD5Hash:    googleMD5,
+		MicrosoftB64Hash: microsoftB64,
+		MySha256Hash:     mySha256,
+		ComputedAt:       time.Now(),
+	}
+
+	tr.log.Info("Computed SHA256: %s", mySha256)
+	return computed, nil
+}
+
+// getOrEnsureComputedHash gets or computes the hash for a file
+func (tr *TaskRunner) getOrEnsureComputedHash(ctx context.Context, client api.CloudClient, file *model.File) (string, error) {
+	computed, err := tr.computeFileHash(ctx, client, file)
+	if err != nil {
+		return "", err
+	}
+	return computed.MySha256Hash, nil
 }
 
 // copyFileWithConflictRename copies a file with conflict rename

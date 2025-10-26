@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"cloud-drives-sync/internal/api"
@@ -138,8 +139,14 @@ func (c *Client) FindFoldersByName(ctx context.Context, name string, includeTras
 	var folders []model.Folder
 	for _, item := range items.GetValue() {
 		// Only include folders
-		if item.GetFolder() == nil {
+		if item.GetFolder() == nil && item.GetRemoteItem() == nil {
 			c.log.Info("Skipping non-folder item: %s", *item.GetName())
+			continue
+		}
+
+		// For remote items, check if the remote item is a folder
+		if item.GetRemoteItem() != nil && item.GetRemoteItem().GetFolder() == nil {
+			c.log.Info("Skipping remote non-folder item: %s", *item.GetName())
 			continue
 		}
 
@@ -234,7 +241,53 @@ func (c *Client) ListFolders(ctx context.Context, parentID string, recursive boo
 		parentID = "root"
 	}
 
-	folders, err := c.listFoldersInParent(ctx, parentID, "")
+	// Check if the starting folder itself is a remote item
+	actualParentID := parentID
+	actualDriveID := c.driveID
+
+	if parentID != "root" {
+		// Check if the folder ID contains a drive ID (format: driveId!itemId)
+		// This happens when a shared folder from another drive appears in search results
+		if strings.Contains(parentID, "!") {
+			parts := strings.SplitN(parentID, "!", 2)
+			if len(parts) == 2 {
+				potentialDriveID := parts[0]
+				// If this drive ID is different from the current user's drive, it's a shared folder
+				if potentialDriveID != c.driveID {
+					c.log.Info("Folder ID %s belongs to a different drive (%s), accessing via that drive", parentID, potentialDriveID)
+					actualDriveID = potentialDriveID
+					actualParentID = parentID
+				}
+			}
+		}
+
+		parentItem, err := c.graphClient.Drives().ByDriveId(actualDriveID).Items().ByDriveItemId(actualParentID).Get(ctx, nil)
+		if err != nil {
+			// Item might not exist directly - try to access via search to get full details
+			c.log.Warning("Cannot get folder %s directly, it might be a shared folder placeholder: %v", actualParentID, err)
+
+			// Try using it directly without resolution - if it fails, the error will propagate
+			folders, err := c.listFoldersInParentDirect(ctx, actualDriveID, actualParentID, "")
+			if err != nil {
+				return nil, fmt.Errorf("failed to list folders: %w", err)
+			}
+			return folders, nil
+		}
+
+		// If it's a remote item, use the actual remote drive and item IDs
+		if parentItem.GetRemoteItem() != nil {
+			remoteItem := parentItem.GetRemoteItem()
+			if remoteItem.GetParentReference() != nil && remoteItem.GetParentReference().GetDriveId() != nil {
+				actualDriveID = *remoteItem.GetParentReference().GetDriveId()
+			}
+			if remoteItem.GetId() != nil {
+				actualParentID = *remoteItem.GetId()
+			}
+			c.log.Info("Parent folder is a shared folder, using remote drive %s", actualDriveID)
+		}
+	}
+
+	folders, err := c.listFoldersInParentDirect(ctx, actualDriveID, actualParentID, "")
 	if err != nil {
 		return nil, err
 	}
@@ -242,20 +295,95 @@ func (c *Client) ListFolders(ctx context.Context, parentID string, recursive boo
 
 	if recursive {
 		for _, folder := range folders {
-			subFolders, err := c.ListFolders(ctx, folder.FolderID, true)
+			// Pass the current folder's path as prefix for subfolders
+			subFolders, err := c.listFoldersInParentDirect(ctx, actualDriveID, folder.FolderID, folder.Path)
 			if err != nil {
 				return nil, err
 			}
 			allFolders = append(allFolders, subFolders...)
+
+			// Recursively get sub-subfolders
+			for _, subfolder := range subFolders {
+				deeperFolders, err := c.ListFolders(ctx, subfolder.FolderID, true)
+				if err != nil {
+					return nil, err
+				}
+				allFolders = append(allFolders, deeperFolders...)
+			}
 		}
 	}
 
 	return allFolders, nil
 }
 
+// listFoldersInParentDirect is a helper to list folders in a specific parent, with explicit driveID
+func (c *Client) listFoldersInParentDirect(ctx context.Context, driveID string, parentID string, pathPrefix string) ([]model.Folder, error) {
+	items, err := c.graphClient.Drives().ByDriveId(driveID).Items().ByDriveItemId(parentID).Children().Get(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list folders: %w", err)
+	}
+
+	var folders []model.Folder
+	for _, item := range items.GetValue() {
+		// Only include folders
+		if item.GetFolder() == nil {
+			continue
+		}
+
+		path := pathPrefix + "/" + *item.GetName()
+		normalizedPath := logger.NormalizePath(path)
+
+		folders = append(folders, model.Folder{
+			FolderID:       *item.GetId(),
+			Provider:       model.ProviderMicrosoft,
+			OwnerEmail:     c.email,
+			FolderName:     *item.GetName(),
+			ParentFolderID: parentID,
+			Path:           path,
+			NormalizedPath: normalizedPath,
+			LastSynced:     time.Now(),
+		})
+	}
+
+	return folders, nil
+}
+
 // listFoldersInParent is a helper to list folders in a specific parent
 func (c *Client) listFoldersInParent(ctx context.Context, parentID string, pathPrefix string) ([]model.Folder, error) {
-	items, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(parentID).Children().Get(ctx, nil)
+	// First, get the parent item to check if it's a remote item (shared folder)
+	var items graphmodels.DriveItemCollectionResponseable
+	var err error
+
+	parentItem, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(parentID).Get(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get parent item: %w", err)
+	}
+
+	// Check if this is a remote item (shared folder from another drive)
+	if parentItem.GetRemoteItem() != nil {
+		remoteItem := parentItem.GetRemoteItem()
+		remoteDriveID := ""
+		remoteItemID := ""
+
+		if remoteItem.GetParentReference() != nil && remoteItem.GetParentReference().GetDriveId() != nil {
+			remoteDriveID = *remoteItem.GetParentReference().GetDriveId()
+		}
+		if remoteItem.GetId() != nil {
+			remoteItemID = *remoteItem.GetId()
+		}
+
+		if remoteDriveID != "" && remoteItemID != "" {
+			c.log.Info("Accessing remote folder via drives/%s/items/%s", remoteDriveID, remoteItemID)
+			// Access the shared folder via the remote drive
+			items, err = c.graphClient.Drives().ByDriveId(remoteDriveID).Items().ByDriveItemId(remoteItemID).Children().Get(ctx, nil)
+		} else {
+			return nil, fmt.Errorf("remote item missing driveId or id")
+		}
+	} else {
+		// Normal folder in current drive
+		items, err = c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(parentID).Children().Get(ctx, nil)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to list folders: %w", err)
 	}
@@ -293,14 +421,59 @@ func (c *Client) ListFiles(ctx context.Context, folderID string, recursive bool)
 		folderID = "root"
 	}
 
-	files, err := c.listFilesInParent(ctx, folderID)
+	// Check if the starting folder itself is a remote item
+	actualFolderID := folderID
+	actualDriveID := c.driveID
+
+	if folderID != "root" {
+		// Check if the folder ID contains a drive ID (format: driveId!itemId)
+		// This happens when a shared folder from another drive appears in search results
+		if strings.Contains(folderID, "!") {
+			parts := strings.SplitN(folderID, "!", 2)
+			if len(parts) == 2 {
+				potentialDriveID := parts[0]
+				// If this drive ID is different from the current user's drive, it's a shared folder
+				if potentialDriveID != c.driveID {
+					c.log.Info("Folder ID %s belongs to a different drive (%s), accessing via that drive", folderID, potentialDriveID)
+					actualDriveID = potentialDriveID
+					actualFolderID = folderID
+				}
+			}
+		}
+
+		folderItem, err := c.graphClient.Drives().ByDriveId(actualDriveID).Items().ByDriveItemId(actualFolderID).Get(ctx, nil)
+		if err != nil {
+			// Item might not exist directly - try to access it anyway
+			c.log.Warning("Cannot get folder %s directly, attempting direct access: %v", actualFolderID, err)
+
+			files, err := c.listFilesInParentDirect(ctx, actualDriveID, actualFolderID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to list files: %w", err)
+			}
+			return files, nil
+		}
+
+		// If it's a remote item, use the actual remote drive and item IDs
+		if folderItem.GetRemoteItem() != nil {
+			remoteItem := folderItem.GetRemoteItem()
+			if remoteItem.GetParentReference() != nil && remoteItem.GetParentReference().GetDriveId() != nil {
+				actualDriveID = *remoteItem.GetParentReference().GetDriveId()
+			}
+			if remoteItem.GetId() != nil {
+				actualFolderID = *remoteItem.GetId()
+			}
+			c.log.Info("Folder is a shared folder, using remote drive %s", actualDriveID)
+		}
+	}
+
+	files, err := c.listFilesInParentDirect(ctx, actualDriveID, actualFolderID)
 	if err != nil {
 		return nil, err
 	}
 	allFiles = append(allFiles, files...)
 
 	if recursive {
-		folders, err := c.listFoldersInParent(ctx, folderID, "")
+		folders, err := c.listFoldersInParentDirect(ctx, actualDriveID, actualFolderID, "")
 		if err != nil {
 			return nil, err
 		}
@@ -317,9 +490,108 @@ func (c *Client) ListFiles(ctx context.Context, folderID string, recursive bool)
 	return allFiles, nil
 }
 
+// listFilesInParentDirect is a helper to list files in a specific parent, with explicit driveID
+func (c *Client) listFilesInParentDirect(ctx context.Context, driveID string, parentID string) ([]model.File, error) {
+	items, err := c.graphClient.Drives().ByDriveId(driveID).Items().ByDriveItemId(parentID).Children().Get(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list files: %w", err)
+	}
+
+	var files []model.File
+	for _, item := range items.GetValue() {
+		// Skip folders
+		if item.GetFolder() != nil {
+			continue
+		}
+
+		hash := ""
+		hashAlgo := "quickXorHash"
+
+		// Get hash from file metadata
+		if item.GetFile() != nil && item.GetFile().GetHashes() != nil {
+			if item.GetFile().GetHashes().GetQuickXorHash() != nil {
+				hash = *item.GetFile().GetHashes().GetQuickXorHash()
+			} else if item.GetFile().GetHashes().GetSha1Hash() != nil {
+				hash = *item.GetFile().GetHashes().GetSha1Hash()
+				hashAlgo = "SHA1"
+			}
+		}
+
+		// If no hash available, we'll need to download and compute
+		if hash == "" {
+			c.log.Warning("File '%s' (ID: %s) has no hash, will need fallback", *item.GetName(), *item.GetId())
+			hashAlgo = "SHA256"
+		}
+
+		size := int64(0)
+		if item.GetSize() != nil {
+			size = *item.GetSize()
+		}
+
+		createdTime := time.Now()
+		if item.GetCreatedDateTime() != nil {
+			createdTime = *item.GetCreatedDateTime()
+		}
+
+		modifiedTime := time.Now()
+		if item.GetLastModifiedDateTime() != nil {
+			modifiedTime = *item.GetLastModifiedDateTime()
+		}
+
+		files = append(files, model.File{
+			FileID:         *item.GetId(),
+			Provider:       model.ProviderMicrosoft,
+			OwnerEmail:     c.email,
+			FileHash:       hash,
+			HashAlgorithm:  hashAlgo,
+			FileName:       *item.GetName(),
+			FileSize:       size,
+			ParentFolderID: parentID,
+			CreatedOn:      createdTime,
+			LastModified:   modifiedTime,
+			LastSynced:     time.Now(),
+		})
+	}
+
+	return files, nil
+}
+
 // listFilesInParent is a helper to list files in a specific parent
 func (c *Client) listFilesInParent(ctx context.Context, parentID string) ([]model.File, error) {
-	items, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(parentID).Children().Get(ctx, nil)
+	// First, get the parent item to check if it's a remote item (shared folder)
+	var items graphmodels.DriveItemCollectionResponseable
+	var err error
+
+	parentItem, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(parentID).Get(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get parent item: %w", err)
+	}
+
+	// Check if this is a remote item (shared folder from another drive)
+	if parentItem.GetRemoteItem() != nil {
+		remoteItem := parentItem.GetRemoteItem()
+		remoteDriveID := ""
+		remoteItemID := ""
+
+		if remoteItem.GetParentReference() != nil && remoteItem.GetParentReference().GetDriveId() != nil {
+			remoteDriveID = *remoteItem.GetParentReference().GetDriveId()
+		}
+		if remoteItem.GetId() != nil {
+			remoteItemID = *remoteItem.GetId()
+		}
+
+		if remoteDriveID != "" && remoteItemID != "" {
+			c.log.Info("Accessing remote folder files via drives/%s/items/%s", remoteDriveID, remoteItemID)
+			// Access the shared folder via the remote drive
+			items, err = c.graphClient.Drives().ByDriveId(remoteDriveID).Items().ByDriveItemId(remoteItemID).Children().Get(ctx, nil)
+		} else {
+			return nil, fmt.Errorf("remote item missing driveId or id")
+		}
+	} else {
+		// Normal folder in current drive
+		items, err = c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(parentID).Children().Get(ctx, nil)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to list files: %w", err)
 	}
