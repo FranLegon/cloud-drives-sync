@@ -21,7 +21,7 @@ const (
 	argon2KeyLen  = 32 // 256 bits for AES-256
 
 	// Salt file name
-	SaltFileName = "config.salt"
+	SaltFileName = "bin/config.salt"
 	saltLength   = 32
 )
 

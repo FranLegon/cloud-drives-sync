@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	ConfigFileName = "config.json.enc"
+	ConfigFileName = "bin/config.json.enc"
 )
 
 // ClientCredentials represents OAuth client credentials

@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	DBFileName = "metadata.db"
+	DBFileName = "bin/metadata.db"
 	DBUser     = "owner"
 )
 
