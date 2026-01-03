@@ -1,0 +1,267 @@
+package cmd
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/FranLegon/cloud-drives-sync/internal/auth"
+	"github.com/FranLegon/cloud-drives-sync/internal/config"
+	"github.com/FranLegon/cloud-drives-sync/internal/database"
+	"github.com/FranLegon/cloud-drives-sync/internal/google"
+	"github.com/FranLegon/cloud-drives-sync/internal/logger"
+	"github.com/FranLegon/cloud-drives-sync/internal/model"
+	"github.com/manifoldco/promptui"
+	"github.com/spf13/cobra"
+	"golang.org/x/oauth2"
+)
+
+var initCmd = &cobra.Command{
+	Use:   "init",
+	Short: "Initialize the application or add a main account",
+	Long: `Initialize the application for first-time use by setting up encryption,
+creating configuration files, and initializing the database. Can also be used
+to add main accounts for Google Drive and Microsoft OneDrive.`,
+	RunE: runInit,
+}
+
+func init() {
+	rootCmd.AddCommand(initCmd)
+}
+
+func runInit(cmd *cobra.Command, args []string) error {
+	// Check if this is first-time initialization
+	if !config.ConfigExists() {
+		logger.Info("First-time initialization")
+		return firstTimeInit()
+	}
+
+	// Existing installation - add main account
+	logger.Info("Adding a main account to existing configuration")
+	return addMainAccount()
+}
+
+func firstTimeInit() error {
+	// Prompt for master password
+	prompt := promptui.Prompt{
+		Label: "Create Master Password",
+		Mask:  '*',
+	}
+	password, err := prompt.Run()
+	if err != nil {
+		return fmt.Errorf("failed to read password: %w", err)
+	}
+
+	confirmPrompt := promptui.Prompt{
+		Label: "Confirm Master Password",
+		Mask:  '*',
+	}
+	confirmPassword, err := confirmPrompt.Run()
+	if err != nil {
+		return fmt.Errorf("failed to read password confirmation: %w", err)
+	}
+
+	if password != confirmPassword {
+		return fmt.Errorf("passwords do not match")
+	}
+
+	// Prompt for client credentials
+	logger.Info("Enter API client credentials (leave blank to skip provider)")
+
+	googleIDPrompt := promptui.Prompt{Label: "Google Client ID"}
+	googleID, _ := googleIDPrompt.Run()
+
+	googleSecretPrompt := promptui.Prompt{Label: "Google Client Secret", Mask: '*'}
+	googleSecret, _ := googleSecretPrompt.Run()
+
+	msIDPrompt := promptui.Prompt{Label: "Microsoft Client ID"}
+	msID, _ := msIDPrompt.Run()
+
+	msSecretPrompt := promptui.Prompt{Label: "Microsoft Client Secret", Mask: '*'}
+	msSecret, _ := msSecretPrompt.Run()
+
+	telegramIDPrompt := promptui.Prompt{Label: "Telegram API ID"}
+	telegramID, _ := telegramIDPrompt.Run()
+
+	telegramHashPrompt := promptui.Prompt{Label: "Telegram API Hash", Mask: '*'}
+	telegramHash, _ := telegramHashPrompt.Run()
+
+	telegramPhonePrompt := promptui.Prompt{Label: "Telegram Phone"}
+	telegramPhone, _ := telegramPhonePrompt.Run()
+
+	// Create configuration
+	cfg := &model.Config{
+		GoogleClient: model.GoogleClient{
+			ID:     googleID,
+			Secret: googleSecret,
+		},
+		MicrosoftClient: model.MicrosoftClient{
+			ID:     msID,
+			Secret: msSecret,
+		},
+		TelegramClient: model.TelegramClient{
+			APIID:   telegramID,
+			APIHash: telegramHash,
+			Phone:   telegramPhone,
+		},
+		Users: []model.User{},
+	}
+
+	// Save configuration
+	if err := config.SaveConfig(cfg, password); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+	logger.Info("Configuration saved successfully")
+
+	// Create database
+	if err := database.CreateDB(password); err != nil {
+		return fmt.Errorf("failed to create database: %w", err)
+	}
+	logger.Info("Database created successfully")
+
+	// Initialize database schema
+	db, err := database.Open(password)
+	if err != nil {
+		return fmt.Errorf("failed to open database: %w", err)
+	}
+	defer db.Close()
+
+	if err := db.Initialize(); err != nil {
+		return fmt.Errorf("failed to initialize database: %w", err)
+	}
+	logger.Info("Database schema initialized")
+
+	logger.Info("Initialization complete! You can now add accounts using the 'init' command")
+	return nil
+}
+
+func addMainAccount() error {
+	// Prompt for password
+	prompt := promptui.Prompt{
+		Label: "Master Password",
+		Mask:  '*',
+	}
+	password, err := prompt.Run()
+	if err != nil {
+		return fmt.Errorf("failed to read password: %w", err)
+	}
+
+	// Load configuration
+	cfg, err := config.LoadConfig(password)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Prompt for provider
+	providerPrompt := promptui.Select{
+		Label: "Select Provider",
+		Items: []string{"Google", "Microsoft"},
+	}
+	_, provider, err := providerPrompt.Run()
+	if err != nil {
+		return fmt.Errorf("failed to select provider: %w", err)
+	}
+
+	// Check if main account already exists
+	var mainExists bool
+	for _, user := range cfg.Users {
+		if string(user.Provider) == provider && user.IsMain {
+			mainExists = true
+			break
+		}
+	}
+
+	if mainExists {
+		return fmt.Errorf("main account for %s already exists", provider)
+	}
+
+	// Perform OAuth flow
+	ctx := context.Background()
+	var oauthConfig *oauth2.Config
+	var email string
+
+	switch provider {
+	case "Google":
+		oauthConfig = auth.GetGoogleOAuthConfig(cfg.GoogleClient.ID, cfg.GoogleClient.Secret)
+	case "Microsoft":
+		oauthConfig = auth.GetMicrosoftOAuthConfig(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret)
+	default:
+		return fmt.Errorf("unsupported provider: %s", provider)
+	}
+
+	// Start OAuth server
+	server := auth.NewOAuthServer()
+	if err := server.Start(); err != nil {
+		return fmt.Errorf("failed to start OAuth server: %w", err)
+	}
+	defer server.Stop()
+
+	// Generate state and auth URL
+	state := auth.GenerateStateToken()
+	authURL := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline)
+
+	logger.Info("Please visit the following URL to authorize:")
+	fmt.Println(authURL)
+
+	// Wait for callback
+	code, err := server.WaitForCode(state, 120)
+	if err != nil {
+		return fmt.Errorf("authorization failed: %w", err)
+	}
+
+	// Exchange code for token
+	token, err := auth.ExchangeCode(ctx, oauthConfig, code)
+	if err != nil {
+		return fmt.Errorf("failed to exchange code: %w", err)
+	}
+
+	// Get user email
+	switch provider {
+	case "Google":
+		email, err = auth.GetGoogleUserEmail(ctx, token, oauthConfig)
+		if err != nil {
+			return fmt.Errorf("failed to get user email: %w", err)
+		}
+	case "Microsoft":
+		email, err = auth.GetMicrosoftUserEmail(ctx, token, oauthConfig)
+		if err != nil {
+			return fmt.Errorf("failed to get user email: %w", err)
+		}
+	}
+
+	logger.Info("Authorized as: %s", email)
+
+	// Add user to config
+	user := model.User{
+		Provider:     model.Provider(provider),
+		Email:        email,
+		IsMain:       true,
+		RefreshToken: token.RefreshToken,
+	}
+	config.AddUser(cfg, user)
+
+	// Save updated configuration
+	if err := config.SaveConfig(cfg, password); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	logger.Info("Main account added successfully")
+
+	// For Google, create the sync folder
+	if provider == "Google" {
+		client, err := google.NewClient(&user, oauthConfig)
+		if err != nil {
+			return fmt.Errorf("failed to create client: %w", err)
+		}
+
+		// Check if sync folder exists
+		if err := client.PreFlightCheck(); err != nil {
+			// Folder doesn't exist, create it
+			logger.Info("Creating sync folder...")
+			if _, err := client.CreateSyncFolder(); err != nil {
+				return fmt.Errorf("failed to create sync folder: %w", err)
+			}
+		}
+	}
+
+	return nil
+}

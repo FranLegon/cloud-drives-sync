@@ -1,0 +1,33 @@
+# Binaries
+cloud-drives-sync
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Go workspace file
+go.work
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Configuration and data files (should not be committed)
+config.json.enc
+config.salt
+metadata.db
+metadata.db-shm
+metadata.db-wal
+
+# Temporary files
+install_deps.sh
