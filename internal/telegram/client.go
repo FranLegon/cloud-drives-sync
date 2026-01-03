@@ -2,88 +2,129 @@ package telegram
 
 import (
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
+	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
+)
+
+const (
+	maxFileSize = 2000 * 1024 * 1024 // 2GB Telegram limit
 )
 
 // Client represents a Telegram client
 type Client struct {
-	user *model.User
+	user   *model.User
+	apiID  string
+	apiHash string
+	userID int64
+	chatID int64
 }
 
 // NewClient creates a new Telegram client
-func NewClient(user *model.User) (*Client, error) {
-	return &Client{
-		user: user,
-	}, nil
+func NewClient(user *model.User, apiID string, apiHash string) (*Client, error) {
+	// Note: Full TDLib integration requires native C++ libraries
+	// This is a simplified implementation that provides the interface structure
+	
+	if user.SessionData == "" {
+		logger.WarningTagged([]string{"Telegram", user.Phone}, "No session data - authentication required")
+		return nil, fmt.Errorf("telegram authentication required - please configure session")
+	}
+
+	c := &Client{
+		user:    user,
+		apiID:   apiID,
+		apiHash: apiHash,
+		// In a full implementation, these would be initialized from TDLib
+		userID:  0,
+		chatID:  0,
+	}
+
+	return c, nil
 }
 
 // PreFlightCheck verifies the Telegram connection
 func (c *Client) PreFlightCheck() error {
-	// TODO: Implement Telegram pre-flight check
+	// Note: Full implementation would verify TDLib connection
+	// For now, just check that session data exists
+	if c.user.SessionData == "" {
+		return fmt.Errorf("no session data - authentication required")
+	}
+	
+	logger.InfoTagged([]string{"Telegram", c.user.Phone}, "Pre-flight check passed (simplified implementation)")
 	return nil
 }
 
-// ListFiles lists files
+// ListFiles lists files in Saved Messages
 func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
-	return nil, errors.New("not implemented")
+	// Note: Full implementation would use TDLib to get chat history
+	// This is a placeholder that demonstrates the structure
+	return nil, fmt.Errorf("telegram file listing requires TDLib native libraries (not currently installed)")
 }
 
-// DownloadFile downloads a file
+// DownloadFile downloads a file from Telegram
 func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
-	return errors.New("not implemented")
+	// Note: Full implementation would use TDLib
+	return fmt.Errorf("telegram file download requires TDLib native libraries (not currently installed)")
 }
 
-// UploadFile uploads a file
+// UploadFile uploads a file to Telegram Saved Messages
 func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64) (*model.File, error) {
-	return nil, errors.New("not implemented")
+	if size > maxFileSize {
+		return nil, fmt.Errorf("file too large: %d bytes (max: %d)", size, maxFileSize)
+	}
+
+	// Note: Full implementation would use TDLib to send message with document
+	return nil, fmt.Errorf("telegram file upload requires TDLib native libraries (not currently installed)")
 }
 
-// DeleteFile deletes a file
+// DeleteFile deletes a file from Saved Messages
 func (c *Client) DeleteFile(fileID string) error {
-	return errors.New("not implemented")
+	// Note: Full implementation would use TDLib
+	return fmt.Errorf("telegram file deletion requires TDLib native libraries (not currently installed)")
 }
 
-// MoveFile moves a file (not supported)
+// MoveFile is not supported in Telegram
 func (c *Client) MoveFile(fileID, targetFolderID string) error {
-	return errors.New("not supported")
+	return errors.New("not supported - Telegram doesn't have folders")
 }
 
-// ListFolders lists folders (not applicable)
+// ListFolders returns empty (Telegram doesn't have folders)
 func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 	return nil, nil
 }
 
-// CreateFolder creates a folder (not applicable)
+// CreateFolder is not supported
 func (c *Client) CreateFolder(parentID, name string) (*model.Folder, error) {
-	return nil, errors.New("not supported")
+	return nil, errors.New("not supported - Telegram doesn't have folders")
 }
 
-// DeleteFolder deletes a folder (not applicable)
+// DeleteFolder is not supported
 func (c *Client) DeleteFolder(folderID string) error {
-	return errors.New("not supported")
+	return errors.New("not supported - Telegram doesn't have folders")
 }
 
-// GetSyncFolderID returns the sync folder ID (not applicable)
+// GetSyncFolderID returns empty (not applicable)
 func (c *Client) GetSyncFolderID() (string, error) {
 	return "", nil
 }
 
-// ShareFolder shares a folder (not applicable)
+// ShareFolder is not supported
 func (c *Client) ShareFolder(folderID, email string, role string) error {
-	return errors.New("not supported")
+	return errors.New("not supported - Telegram doesn't have folder sharing")
 }
 
-// VerifyPermissions verifies permissions (not applicable)
+// VerifyPermissions is not applicable
 func (c *Client) VerifyPermissions() error {
 	return nil
 }
 
-// GetQuota returns quota information
+// GetQuota returns quota information (not applicable for Telegram)
 func (c *Client) GetQuota() (*api.QuotaInfo, error) {
 	// Telegram doesn't have traditional quotas
+	// Return unlimited
 	return &api.QuotaInfo{
 		Total: -1,
 		Used:  0,
@@ -93,12 +134,13 @@ func (c *Client) GetQuota() (*api.QuotaInfo, error) {
 
 // GetFileMetadata retrieves file metadata
 func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
-	return nil, errors.New("not implemented")
+	// Note: Full implementation would use TDLib
+	return nil, fmt.Errorf("telegram file metadata requires TDLib native libraries (not currently installed)")
 }
 
 // TransferOwnership is not supported
 func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
-	return errors.New("not supported")
+	return errors.New("not supported - Telegram doesn't have ownership concept")
 }
 
 // GetUserEmail returns empty (Telegram uses phone)

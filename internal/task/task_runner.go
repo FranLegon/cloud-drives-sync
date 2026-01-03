@@ -50,9 +50,13 @@ func (r *Runner) GetOrCreateClient(user *model.User) (api.CloudClient, error) {
 		}
 		client, err = google.NewClient(user, config)
 	case model.ProviderMicrosoft:
-		client, err = microsoft.NewClient(user)
+		config := &oauth2.Config{
+			ClientID:     r.config.MicrosoftClient.ID,
+			ClientSecret: r.config.MicrosoftClient.Secret,
+		}
+		client, err = microsoft.NewClient(user, config)
 	case model.ProviderTelegram:
-		client, err = telegram.NewClient(user)
+		client, err = telegram.NewClient(user, r.config.TelegramClient.APIID, r.config.TelegramClient.APIHash)
 	default:
 		return nil, fmt.Errorf("unsupported provider: %s", user.Provider)
 	}
