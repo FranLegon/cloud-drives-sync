@@ -186,8 +186,28 @@ func (c *Client) GetOrCreateFolder(ctx context.Context, name string, parentID st
 		parentID = "root"
 	}
 
+	// Extract drive ID from parent if it's a shared folder
+	driveID := c.driveID
+	if strings.Contains(parentID, "!") {
+		parts := strings.SplitN(parentID, "!", 2)
+		if len(parts) == 2 && parts[0] != c.driveID {
+			driveID = parts[0]
+			c.log.Info("Using shared drive ID %s for folder operations", driveID)
+		}
+	}
+
+	return c.GetOrCreateFolderInDrive(ctx, driveID, name, parentID)
+}
+
+// GetOrCreateFolderInDrive gets or creates a folder with explicit drive ID
+func (c *Client) GetOrCreateFolderInDrive(ctx context.Context, driveID string, name string, parentID string) (string, error) {
+	// If no parent specified, use root
+	if parentID == "" {
+		parentID = "root"
+	}
+
 	// List children of parent to find existing folder
-	items, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(parentID).Children().Get(ctx, nil)
+	items, err := c.graphClient.Drives().ByDriveId(driveID).Items().ByDriveItemId(parentID).Children().Get(ctx, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to list folder children: %w", err)
 	}
@@ -203,7 +223,7 @@ func (c *Client) GetOrCreateFolder(ctx context.Context, name string, parentID st
 	newFolder.SetName(&name)
 	newFolder.SetFolder(graphmodels.NewFolder())
 
-	created, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(parentID).Children().Post(ctx, newFolder, nil)
+	created, err := c.graphClient.Drives().ByDriveId(driveID).Items().ByDriveItemId(parentID).Children().Post(ctx, newFolder, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create folder: %w", err)
 	}
@@ -672,6 +692,16 @@ func (c *Client) UploadFile(ctx context.Context, parentFolderID string, fileName
 		parentFolderID = "root"
 	}
 
+	// Extract drive ID from parent folder if it's a shared folder
+	driveID := c.driveID
+	if strings.Contains(parentFolderID, "!") {
+		parts := strings.SplitN(parentFolderID, "!", 2)
+		if len(parts) == 2 && parts[0] != c.driveID {
+			driveID = parts[0]
+			c.log.Info("Uploading to shared drive ID %s", driveID)
+		}
+	}
+
 	// Read all data (for small files)
 	data, err := io.ReadAll(reader)
 	if err != nil {
@@ -687,24 +717,24 @@ func (c *Client) UploadFile(ctx context.Context, parentFolderID string, fileName
 	var createdItem graphmodels.DriveItemable
 	if parentFolderID == "root" {
 		// Use drive root children
-		createdItem, err = c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId("root").Children().Post(ctx, fileItem, nil)
+		createdItem, err = c.graphClient.Drives().ByDriveId(driveID).Items().ByDriveItemId("root").Children().Post(ctx, fileItem, nil)
 	} else {
-		createdItem, err = c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(parentFolderID).Children().Post(ctx, fileItem, nil)
+		createdItem, err = c.graphClient.Drives().ByDriveId(driveID).Items().ByDriveItemId(parentFolderID).Children().Post(ctx, fileItem, nil)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file: %w", err)
 	}
 
 	// Upload content
-	_, err = c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(*createdItem.GetId()).Content().Put(ctx, data, nil)
+	_, err = c.graphClient.Drives().ByDriveId(driveID).Items().ByDriveItemId(*createdItem.GetId()).Content().Put(ctx, data, nil)
 	if err != nil {
 		// Try to clean up the created item
-		_ = c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(*createdItem.GetId()).Delete(ctx, nil)
+		_ = c.graphClient.Drives().ByDriveId(driveID).Items().ByDriveItemId(*createdItem.GetId()).Delete(ctx, nil)
 		return nil, fmt.Errorf("failed to upload file content: %w", err)
 	}
 
 	// Refresh metadata after upload
-	created, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(*createdItem.GetId()).Get(ctx, nil)
+	created, err := c.graphClient.Drives().ByDriveId(driveID).Items().ByDriveItemId(*createdItem.GetId()).Get(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get updated file metadata: %w", err)
 	}

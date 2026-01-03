@@ -1047,6 +1047,14 @@ func (tr *TaskRunner) transferOrCopyFileWithPath(ctx context.Context, srcClient,
 		tr.log.Info("[TRANSFER] Uploading to sync folder root")
 	}
 
+	// Delete original file first if it exists (to avoid "Name already exists" error)
+	tr.log.Info("[TRANSFER] Deleting original file '%s' (ID: %s) from %s before upload", file.FileName, file.FileID, file.OwnerEmail)
+	if err := srcClient.DeleteFile(ctx, file.FileID); err != nil {
+		tr.log.Warning("Failed to delete original file before upload: %v - attempting upload anyway", err)
+	} else {
+		tr.log.Success("[TRANSFER] Successfully deleted original file from %s", file.OwnerEmail)
+	}
+
 	// Upload to destination
 	tr.log.Info("[TRANSFER] Uploading file '%s' to %s (folder ID: %s)", file.FileName, targetEmail, destFolderID)
 	uploaded, err := dstClient.UploadFile(ctx, destFolderID, file.FileName, reader)
@@ -1054,15 +1062,6 @@ func (tr *TaskRunner) transferOrCopyFileWithPath(ctx context.Context, srcClient,
 		return fmt.Errorf("failed to upload file: %w", err)
 	}
 	tr.log.Success("[TRANSFER] Successfully uploaded file '%s' (new ID: %s) to %s", file.FileName, uploaded.FileID, targetEmail)
-
-	// Delete from source
-	tr.log.Info("[TRANSFER] Deleting original file '%s' (ID: %s) from %s", file.FileName, file.FileID, file.OwnerEmail)
-	if err := srcClient.DeleteFile(ctx, file.FileID); err != nil {
-		tr.log.Error("Failed to delete source file after copy: %v", err)
-		// Don't fail - file was copied successfully
-	} else {
-		tr.log.Success("[TRANSFER] Successfully deleted original file from %s", file.OwnerEmail)
-	}
 
 	// Update database - remove old, add new
 	if err := tr.db.DeleteFile(file.FileID, file.Provider); err != nil {
