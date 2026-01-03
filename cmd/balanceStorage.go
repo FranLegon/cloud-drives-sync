@@ -29,7 +29,7 @@ func runBalanceStorage(cmd *cobra.Command, args []string) error {
 
 	// TODO: Implement storage balancing logic
 	logger.Info("Storage balancing not yet fully implemented")
-	logger.Info("This would check quotas (95% threshold) and move large files to accounts with more space")
+	logger.Info("This would check quotas (95%% threshold) and move large files to accounts with more space")
 
 	return nil
 }
