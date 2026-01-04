@@ -49,9 +49,13 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return printConfigAsJson()
 	}
 
-	// Existing installation - add main account
-	logger.Info("Adding a main account to existing configuration")
-	return addMainAccount()
+	// If jsonFlag is set, update credentials
+	if jsonFlag != "" {
+		return updateCredentialsFromJson()
+	}
+
+	// Existing installation - interactive menu
+	return interactiveUpdate()
 }
 
 func firstTimeInit() error {
@@ -179,47 +183,155 @@ func firstTimeInit() error {
 	return nil
 }
 
-func addMainAccount() error {
-	var password string
-	var err error
-
-	if passwordFlag != "" {
-		password = passwordFlag
-	} else {
-		// Prompt for password
-		prompt := promptui.Prompt{
-			Label: "Master Password",
-			Mask:  '*',
-		}
-		password, err = prompt.Run()
-		if err != nil {
-			return fmt.Errorf("failed to read password: %w", err)
-		}
+func interactiveUpdate() error {
+	password, err := getPassword()
+	if err != nil {
+		return err
 	}
 
-	// Load configuration
+	// Load configuration to check current state
 	cfg, err := config.LoadConfig(password)
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Prompt for provider
-	// Only Google can be the main account
-	provider := "Google"
-	fmt.Println("Adding Google as the main account provider.")
+	prompt := promptui.Select{
+		Label: "Configuration already exists. What would you like to do?",
+		Items: []string{"Update Client Credentials", "Update Main Account", "Cancel"},
+	}
 
+	_, result, err := prompt.Run()
+	if err != nil {
+		return fmt.Errorf("prompt failed: %w", err)
+	}
+
+	switch result {
+	case "Update Client Credentials":
+		return updateClientCredentialsInteractive(cfg, password)
+	case "Update Main Account":
+		return updateMainAccount(cfg, password)
+	case "Cancel":
+		return nil
+	}
+
+	return nil
+}
+
+func updateClientCredentialsInteractive(cfg *model.Config, password string) error {
+	logger.Info("Enter new API client credentials (leave blank to keep existing)")
+
+	// Google
+	googleIDPrompt := promptui.Prompt{Label: fmt.Sprintf("Google Client ID [%s]", maskString(cfg.GoogleClient.ID)), AllowEdit: true}
+	googleID, _ := googleIDPrompt.Run()
+	if googleID != "" {
+		cfg.GoogleClient.ID = googleID
+	}
+
+	googleSecretPrompt := promptui.Prompt{Label: "Google Client Secret (leave blank to keep existing)", Mask: '*'}
+	googleSecret, _ := googleSecretPrompt.Run()
+	if googleSecret != "" {
+		cfg.GoogleClient.Secret = googleSecret
+	}
+
+	// Microsoft
+	msIDPrompt := promptui.Prompt{Label: fmt.Sprintf("Microsoft Client ID [%s]", maskString(cfg.MicrosoftClient.ID)), AllowEdit: true}
+	msID, _ := msIDPrompt.Run()
+	if msID != "" {
+		cfg.MicrosoftClient.ID = msID
+	}
+
+	msSecretPrompt := promptui.Prompt{Label: "Microsoft Client Secret (leave blank to keep existing)", Mask: '*'}
+	msSecret, _ := msSecretPrompt.Run()
+	if msSecret != "" {
+		cfg.MicrosoftClient.Secret = msSecret
+	}
+
+	// Telegram
+	telegramIDPrompt := promptui.Prompt{Label: fmt.Sprintf("Telegram API ID [%s]", maskString(cfg.TelegramClient.APIID)), AllowEdit: true}
+	telegramID, _ := telegramIDPrompt.Run()
+	if telegramID != "" {
+		cfg.TelegramClient.APIID = telegramID
+	}
+
+	telegramHashPrompt := promptui.Prompt{Label: "Telegram API Hash (leave blank to keep existing)", Mask: '*'}
+	telegramHash, _ := telegramHashPrompt.Run()
+	if telegramHash != "" {
+		cfg.TelegramClient.APIHash = telegramHash
+	}
+
+	telegramPhonePrompt := promptui.Prompt{Label: fmt.Sprintf("Telegram Phone [%s]", cfg.TelegramClient.Phone), AllowEdit: true}
+	telegramPhone, _ := telegramPhonePrompt.Run()
+	if telegramPhone != "" {
+		cfg.TelegramClient.Phone = telegramPhone
+	}
+
+	if err := config.SaveConfig(cfg, password); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+	logger.Info("Client credentials updated successfully")
+	return nil
+}
+
+func updateCredentialsFromJson() error {
+	password, err := getPassword()
+	if err != nil {
+		return err
+	}
+
+	cfg, err := config.LoadConfig(password)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	var newCfg model.Config
+	if err := json.Unmarshal([]byte(jsonFlag), &newCfg); err != nil {
+		return fmt.Errorf("failed to parse JSON configuration: %w", err)
+	}
+
+	// Update credentials
+	if newCfg.GoogleClient.ID != "" { cfg.GoogleClient.ID = newCfg.GoogleClient.ID }
+	if newCfg.GoogleClient.Secret != "" { cfg.GoogleClient.Secret = newCfg.GoogleClient.Secret }
+	if newCfg.MicrosoftClient.ID != "" { cfg.MicrosoftClient.ID = newCfg.MicrosoftClient.ID }
+	if newCfg.MicrosoftClient.Secret != "" { cfg.MicrosoftClient.Secret = newCfg.MicrosoftClient.Secret }
+	if newCfg.TelegramClient.APIID != "" { cfg.TelegramClient.APIID = newCfg.TelegramClient.APIID }
+	if newCfg.TelegramClient.APIHash != "" { cfg.TelegramClient.APIHash = newCfg.TelegramClient.APIHash }
+	if newCfg.TelegramClient.Phone != "" { cfg.TelegramClient.Phone = newCfg.TelegramClient.Phone }
+
+	if err := config.SaveConfig(cfg, password); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+	logger.Info("Client credentials updated from JSON successfully")
+	return nil
+}
+
+func updateMainAccount(cfg *model.Config, password string) error {
 	// Check if main account already exists
-	var mainExists bool
-	for _, user := range cfg.Users {
+	var mainUser *model.User
+	var mainIndex int
+	mainExists := false
+	for i, user := range cfg.Users {
 		if user.IsMain {
+			mainUser = &cfg.Users[i]
+			mainIndex = i
 			mainExists = true
 			break
 		}
 	}
 
 	if mainExists {
-		return fmt.Errorf("a main account already exists (only one main account is allowed)")
+		prompt := promptui.Prompt{
+			Label:     fmt.Sprintf("Main account %s already exists. Replace it? (y/N)", mainUser.Email),
+			IsConfirm: true,
+		}
+		_, err := prompt.Run()
+		if err != nil {
+			return nil // User cancelled
+		}
 	}
+
+	// Only Google can be the main account
+	provider := "Google"
+	fmt.Println("Adding Google as the main account provider.")
 
 	// Perform OAuth flow
 	ctx := context.Background()
@@ -277,6 +389,12 @@ func addMainAccount() error {
 
 	logger.Info("Authorized as: %s", email)
 
+	// If mainExists, remove old main account from slice
+	if mainExists {
+		// Remove the old main account
+		cfg.Users = append(cfg.Users[:mainIndex], cfg.Users[mainIndex+1:]...)
+	}
+
 	// Add user to config
 	user := model.User{
 		Provider:     model.Provider(provider),
@@ -291,7 +409,7 @@ func addMainAccount() error {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
 
-	logger.Info("Main account added successfully")
+	logger.Info("Main account added/updated successfully")
 
 	// For Google, create the sync folder
 	if provider == "Google" {
@@ -311,6 +429,24 @@ func addMainAccount() error {
 	}
 
 	return nil
+}
+
+func getPassword() (string, error) {
+	if passwordFlag != "" {
+		return passwordFlag, nil
+	}
+	prompt := promptui.Prompt{
+		Label: "Master Password",
+		Mask:  '*',
+	}
+	return prompt.Run()
+}
+
+func maskString(s string) string {
+	if len(s) <= 4 {
+		return "****"
+	}
+	return s[:2] + "****" + s[len(s)-2:]
 }
 
 func printConfigAsJson() error {
