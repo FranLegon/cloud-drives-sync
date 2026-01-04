@@ -19,8 +19,8 @@ go get github.com/Azure/azure-sdk-for-go/sdk/azidentity@v1.7.0
 # Telegram API client for Go (TDLib bindings or similar)
 go get github.com/zelenin/go-tdlib@v0.7.2
 
-# The SQLite driver for Go (with built-in SQLCipher support)
-go get github.com/mutecomm/go-sqlcipher/v4
+# The SQLite driver for Go (with SQLCipher support via build tags)
+go get github.com/mattn/go-sqlite3@v1.14.22
 
 # Provides cryptographic functions, including Argon2id for key derivation
 go get golang.org/x/crypto@v0.24.0

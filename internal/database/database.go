@@ -10,11 +10,12 @@ import (
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
-	_ "github.com/mutecomm/go-sqlcipher/v4"
+	_ "github.com/mattn/go-sqlite3"
 )
 
 const (
 	DBFileName = "metadata.db"
+	DBUser     = "owner"
 )
 
 // DB represents the database connection
@@ -38,9 +39,9 @@ func Open(masterPassword string) (*DB, error) {
 	// Escape password for URL
 	escapedPwd := url.QueryEscape(masterPassword)
 
-	// For SQLCipher (via mutecomm/go-sqlcipher), we use _pragma_key
-	// We set page size to 4096 which is standard for SQLCipher 4
-	connStr := fmt.Sprintf("file:%s?_pragma_key=%s&_pragma_cipher_page_size=4096", dbPath, escapedPwd)
+	// For SQLCipher, we use the password with PRAGMA key or _key query param
+	// We also include _auth_user per requirements, although it's for User Auth extension
+	connStr := fmt.Sprintf("file:%s?_auth_user=%s&_key=%s", dbPath, DBUser, escapedPwd)
 
 	conn, err := sql.Open("sqlite3", connStr)
 	if err != nil {
