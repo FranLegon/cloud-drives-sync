@@ -46,27 +46,27 @@ func runRemoveDuplicates(cmd *cobra.Command, args []string) error {
 	providers := []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram}
 
 	for _, provider := range providers {
-		hashes, err := db.GetDuplicateHashes(provider)
+		ids, err := db.GetDuplicateCalculatedIDs(provider)
 		if err != nil {
 			logger.ErrorTagged([]string{string(provider)}, "Failed to query duplicates: %v", err)
 			continue
 		}
 
-		if len(hashes) == 0 {
+		if len(ids) == 0 {
 			logger.InfoTagged([]string{string(provider)}, "No duplicates found")
 			continue
 		}
 
-		logger.InfoTagged([]string{string(provider)}, "Found %d duplicate file groups", len(hashes))
+		logger.InfoTagged([]string{string(provider)}, "Found %d duplicate file groups", len(ids))
 
-		for _, hash := range hashes {
-			files, err := db.GetFilesByHash(hash, provider)
+		for _, id := range ids {
+			files, err := db.GetFilesByCalculatedID(id, provider)
 			if err != nil {
 				continue
 			}
 
 			// Display files
-			fmt.Printf("\n[%s] Duplicate files (hash: %s):\n", provider, hash)
+			fmt.Printf("\n[%s] Duplicate files (CalculatedID: %s):\n", provider, id)
 			var fileNames []string
 			for i, file := range files {
 				label := fmt.Sprintf("%d. %s (ID: %s, Size: %d, Created: %s)",
@@ -155,21 +155,21 @@ func runRemoveDuplicatesUnsafe(cmd *cobra.Command, args []string) error {
 	totalDeleted := 0
 
 	for _, provider := range providers {
-		hashes, err := db.GetDuplicateHashes(provider)
+		ids, err := db.GetDuplicateCalculatedIDs(provider)
 		if err != nil {
 			logger.ErrorTagged([]string{string(provider)}, "Failed to query duplicates: %v", err)
 			continue
 		}
 
-		if len(hashes) == 0 {
+		if len(ids) == 0 {
 			logger.InfoTagged([]string{string(provider)}, "No duplicates found")
 			continue
 		}
 
-		logger.InfoTagged([]string{string(provider)}, "Found %d duplicate file groups", len(hashes))
+		logger.InfoTagged([]string{string(provider)}, "Found %d duplicate file groups", len(ids))
 
-		for _, hash := range hashes {
-			files, err := db.GetFilesByHash(hash, provider)
+		for _, id := range ids {
+			files, err := db.GetFilesByCalculatedID(id, provider)
 			if err != nil {
 				continue
 			}

@@ -316,13 +316,27 @@ func updateCredentialsFromJson() error {
 	}
 
 	// Update credentials
-	if newCfg.GoogleClient.ID != "" { cfg.GoogleClient.ID = newCfg.GoogleClient.ID }
-	if newCfg.GoogleClient.Secret != "" { cfg.GoogleClient.Secret = newCfg.GoogleClient.Secret }
-	if newCfg.MicrosoftClient.ID != "" { cfg.MicrosoftClient.ID = newCfg.MicrosoftClient.ID }
-	if newCfg.MicrosoftClient.Secret != "" { cfg.MicrosoftClient.Secret = newCfg.MicrosoftClient.Secret }
-	if newCfg.TelegramClient.APIID != "" { cfg.TelegramClient.APIID = newCfg.TelegramClient.APIID }
-	if newCfg.TelegramClient.APIHash != "" { cfg.TelegramClient.APIHash = newCfg.TelegramClient.APIHash }
-	if newCfg.TelegramClient.Phone != "" { cfg.TelegramClient.Phone = newCfg.TelegramClient.Phone }
+	if newCfg.GoogleClient.ID != "" {
+		cfg.GoogleClient.ID = newCfg.GoogleClient.ID
+	}
+	if newCfg.GoogleClient.Secret != "" {
+		cfg.GoogleClient.Secret = newCfg.GoogleClient.Secret
+	}
+	if newCfg.MicrosoftClient.ID != "" {
+		cfg.MicrosoftClient.ID = newCfg.MicrosoftClient.ID
+	}
+	if newCfg.MicrosoftClient.Secret != "" {
+		cfg.MicrosoftClient.Secret = newCfg.MicrosoftClient.Secret
+	}
+	if newCfg.TelegramClient.APIID != "" {
+		cfg.TelegramClient.APIID = newCfg.TelegramClient.APIID
+	}
+	if newCfg.TelegramClient.APIHash != "" {
+		cfg.TelegramClient.APIHash = newCfg.TelegramClient.APIHash
+	}
+	if newCfg.TelegramClient.Phone != "" {
+		cfg.TelegramClient.Phone = newCfg.TelegramClient.Phone
+	}
 
 	if err := config.SaveConfig(cfg, password); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)

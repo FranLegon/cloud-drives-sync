@@ -148,16 +148,17 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 		for _, f := range fileList.Files {
 			file := &model.File{
-				ID:             f.Id,
-				Name:           f.Name,
-				Size:           f.Size,
-				Hash:           f.Md5Checksum,
-				HashAlgorithm:  "MD5",
-				Provider:       model.ProviderGoogle,
-				UserEmail:      c.user.Email,
-				CreatedTime:    parseTime(f.CreatedTime),
-				ModifiedTime:   parseTime(f.ModifiedTime),
-				ParentFolderID: folderID,
+				ID:              f.Id,
+				Name:            f.Name,
+				Size:            f.Size,
+				GoogleDriveHash: f.Md5Checksum,
+				GoogleDriveID:   f.Id,
+				CalculatedID:    fmt.Sprintf("%s-%d", f.Name, f.Size),
+				Provider:        model.ProviderGoogle,
+				UserEmail:       c.user.Email,
+				CreatedTime:     parseTime(f.CreatedTime),
+				ModifiedTime:    parseTime(f.ModifiedTime),
+				ParentFolderID:  folderID,
 			}
 
 			if len(f.Owners) > 0 {
@@ -251,16 +252,17 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	}
 
 	result := &model.File{
-		ID:             createdFile.Id,
-		Name:           createdFile.Name,
-		Size:           createdFile.Size,
-		Hash:           createdFile.Md5Checksum,
-		HashAlgorithm:  "MD5",
-		Provider:       model.ProviderGoogle,
-		UserEmail:      c.user.Email,
-		CreatedTime:    parseTime(createdFile.CreatedTime),
-		ModifiedTime:   parseTime(createdFile.ModifiedTime),
-		ParentFolderID: folderID,
+		ID:              createdFile.Id,
+		Name:            createdFile.Name,
+		Size:            createdFile.Size,
+		GoogleDriveHash: createdFile.Md5Checksum,
+		GoogleDriveID:   createdFile.Id,
+		CalculatedID:    fmt.Sprintf("%s-%d", createdFile.Name, createdFile.Size),
+		Provider:        model.ProviderGoogle,
+		UserEmail:       c.user.Email,
+		CreatedTime:     parseTime(createdFile.CreatedTime),
+		ModifiedTime:    parseTime(createdFile.ModifiedTime),
+		ParentFolderID:  folderID,
 	}
 
 	if len(createdFile.Owners) > 0 {
@@ -374,15 +376,16 @@ func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
 	}
 
 	file := &model.File{
-		ID:            f.Id,
-		Name:          f.Name,
-		Size:          f.Size,
-		Hash:          f.Md5Checksum,
-		HashAlgorithm: "MD5",
-		Provider:      model.ProviderGoogle,
-		UserEmail:     c.user.Email,
-		CreatedTime:   parseTime(f.CreatedTime),
-		ModifiedTime:  parseTime(f.ModifiedTime),
+		ID:              f.Id,
+		Name:            f.Name,
+		Size:            f.Size,
+		GoogleDriveHash: f.Md5Checksum,
+		GoogleDriveID:   f.Id,
+		CalculatedID:    fmt.Sprintf("%s-%d", f.Name, f.Size),
+		Provider:        model.ProviderGoogle,
+		UserEmail:       c.user.Email,
+		CreatedTime:     parseTime(f.CreatedTime),
+		ModifiedTime:    parseTime(f.ModifiedTime),
 	}
 
 	if len(f.Parents) > 0 {
@@ -394,7 +397,7 @@ func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
 	}
 
 	// If no MD5 hash (e.g., Google Docs), need to download and hash
-	if file.Hash == "" {
+	if file.GoogleDriveHash == "" {
 		logger.InfoTagged([]string{"Google", c.user.Email}, "No native hash for file %s, will need to calculate SHA-256", f.Name)
 	}
 

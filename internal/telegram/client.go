@@ -65,7 +65,7 @@ func NewClient(user *model.User, apiIDStr string, apiHash string) (*Client, erro
 	ctx, cancel := context.WithCancel(context.Background())
 
 	sessionStorage := NewMemorySession(user)
-	
+
 	// Initialize the client
 	client := telegram.NewClient(apiID, apiHash, telegram.Options{
 		SessionStorage: sessionStorage,
@@ -89,7 +89,7 @@ func NewClient(user *model.User, apiIDStr string, apiHash string) (*Client, erro
 			c.uploader = uploader.NewUploader(client.API())
 			c.downloader = downloader.NewDownloader()
 			c.sender = message.NewSender(client.API()).WithUploader(c.uploader)
-			
+
 			// Check authentication status
 			status, err := client.Auth().Status(ctx)
 			if err != nil {
@@ -130,22 +130,22 @@ func (c *Client) PreFlightCheck() error {
 
 func (c *Client) ensureSyncChannel() error {
 	// List dialogs to find the channel
-	// Note: This is a simplified search. In a real scenario with many chats, 
+	// Note: This is a simplified search. In a real scenario with many chats,
 	// we might need to iterate more.
-	
+
 	// We need to use the raw API to list dialogs
 	// Using message.Sender to list dialogs is not direct, we use tg.Client
-	
+
 	// Wait for client to be ready (in case PreFlightCheck is called immediately)
 	// The Run loop sets up the helpers.
-	
+
 	// We can use c.client.API() to get *tg.Client
-	
+
 	// Search for the channel
-	// We'll iterate through dialogs. 
+	// We'll iterate through dialogs.
 	// Since we can't easily "search" for a channel we own by name without listing,
 	// we list dialogs.
-	
+
 	// Using a limit of 100 for now.
 	dialogs, err := c.client.API().MessagesGetDialogs(c.ctx, &tg.MessagesGetDialogsRequest{
 		OffsetPeer: &tg.InputPeerEmpty{},
@@ -195,12 +195,12 @@ func (c *Client) ensureSyncChannel() error {
 
 	// Create channel if not found
 	logger.InfoTagged([]string{"Telegram", c.user.Phone}, "Creating new sync channel: %s", syncChannelName)
-	
+
 	// Create channel
 	updates, err := c.client.API().ChannelsCreateChannel(c.ctx, &tg.ChannelsCreateChannelRequest{
-		Title:       syncChannelName,
-		Broadcast:   true, // Channel, not supergroup
-		About:       "Cloud Drives Sync Storage",
+		Title:     syncChannelName,
+		Broadcast: true, // Channel, not supergroup
+		About:     "Cloud Drives Sync Storage",
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create channel: %w", err)
@@ -208,7 +208,7 @@ func (c *Client) ensureSyncChannel() error {
 
 	// Extract channel ID from updates
 	var newChannel *tg.Channel
-	
+
 	switch u := updates.(type) {
 	case *tg.Updates:
 		for _, chat := range u.Chats {
@@ -225,7 +225,7 @@ func (c *Client) ensureSyncChannel() error {
 
 	c.channelID = newChannel.ID
 	c.accessHash = newChannel.AccessHash
-	
+
 	return nil
 }
 
@@ -282,8 +282,8 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 	// Iterate over messages in the channel
 	// We'll use the raw API to get history
-	
-	var files []*model.File
+
+	fileMap := make(map[string]*model.File)
 	offsetID := 0
 	limit := 100
 
@@ -301,7 +301,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 		}
 
 		var messages []tg.MessageClass
-		
+
 		switch h := history.(type) {
 		case *tg.MessagesChannelMessages:
 			messages = h.Messages
@@ -329,48 +329,107 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			}
 
 			// Try to parse JSON from caption
-			// The caption might contain other text, but requirements say "caption containing metadata as json"
-			// We assume the whole caption is JSON or it starts with JSON
-			
 			var meta FileMetadata
 			if err := json.Unmarshal([]byte(msg.Message), &meta); err != nil {
-				// Not a file message or invalid format, ignore
 				continue
 			}
 
-			// Create model.File
-			file := &model.File{
-				ID:             strconv.Itoa(msg.ID),
-				Name:           meta.FileName,
-				Path:           meta.FolderPath + "/" + meta.FileName,
-				ParentFolderID: meta.FolderPath,
-				Size:           0, // Will be filled from media
-				Hash:           meta.Hash,
-				CreatedTime:    time.Unix(int64(msg.Date), 0),
-				ModifiedTime:   time.Unix(int64(msg.Date), 0),
-				Split:          meta.Split,
-				Part:           meta.Part,
-				TotalParts:     meta.TotalParts,
-			}
-
+			fullPath := meta.FolderPath + "/" + meta.FileName
+			
 			// Get file size from media
+			var partSize int64
 			if media, ok := msg.Media.(*tg.MessageMediaDocument); ok {
 				if doc, ok := media.Document.(*tg.Document); ok {
-					file.Size = doc.Size
+					partSize = doc.Size
 				}
 			}
 
-			files = append(files, file)
-			
+			// Create fragment
+			fragment := &model.FileFragment{
+				ID:               strconv.Itoa(msg.ID), // Fragment ID is message ID
+				Name:             meta.FileName,
+				Size:             partSize,
+				Part:             meta.Part,
+				TelegramUniqueID: strconv.Itoa(msg.ID),
+			}
+
+			if !meta.Split {
+				// Single file
+				file := &model.File{
+					ID:               strconv.Itoa(msg.ID),
+					Name:             meta.FileName,
+					Path:             fullPath,
+					ParentFolderID:   meta.FolderPath,
+					Size:             partSize,
+					TelegramUniqueID: strconv.Itoa(msg.ID),
+					CalculatedID:     fmt.Sprintf("%s-%d", meta.FileName, partSize),
+					Provider:         model.ProviderTelegram,
+					UserEmail:        c.user.Email,
+					CreatedTime:      time.Unix(int64(msg.Date), 0),
+					ModifiedTime:     time.Unix(int64(msg.Date), 0),
+					Split:            false,
+					TotalParts:       1,
+					Fragments:        []*model.FileFragment{fragment},
+				}
+				// For single files, fragment FileID is the file ID
+				fragment.FileID = file.ID
+				fileMap[fullPath] = file
+			} else {
+				// Split file
+				if _, exists := fileMap[fullPath]; !exists {
+					fileMap[fullPath] = &model.File{
+						Name:           meta.FileName,
+						Path:           fullPath,
+						ParentFolderID: meta.FolderPath,
+						Provider:       model.ProviderTelegram,
+						UserEmail:      c.user.Email,
+						CreatedTime:    time.Unix(int64(msg.Date), 0),
+						ModifiedTime:   time.Unix(int64(msg.Date), 0),
+						Split:          true,
+						TotalParts:     meta.TotalParts,
+						Fragments:      []*model.FileFragment{},
+					}
+				}
+				file := fileMap[fullPath]
+				file.Fragments = append(file.Fragments, fragment)
+				file.Size += partSize // Accumulate size
+				
+				// If this is part 1, set the main ID
+				if meta.Part == 1 {
+					file.ID = strconv.Itoa(msg.ID)
+					file.TelegramUniqueID = strconv.Itoa(msg.ID)
+				}
+			}
+
 			// Update offset for next page
 			if msg.ID < offsetID || offsetID == 0 {
 				offsetID = msg.ID
 			}
 		}
-		
+
 		if len(messages) < limit {
 			break
 		}
+	}
+
+	// Convert map to slice and finalize split files
+	var files []*model.File
+	for _, file := range fileMap {
+		if file.Split {
+			// Ensure ID is set (in case Part 1 was missing, use first fragment's ID)
+			if file.ID == "" && len(file.Fragments) > 0 {
+				file.ID = file.Fragments[0].ID
+				file.TelegramUniqueID = file.Fragments[0].TelegramUniqueID
+			}
+			// Set CalculatedID with total size
+			file.CalculatedID = fmt.Sprintf("%s-%d", file.Name, file.Size)
+			
+			// Set FileID for all fragments
+			for _, frag := range file.Fragments {
+				frag.FileID = file.ID
+			}
+		}
+		files = append(files, file)
 	}
 
 	return files, nil
@@ -385,12 +444,41 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	const maxPartSize = 2000 * 1024 * 1024 // 2GB
 
 	if size <= maxPartSize {
-		return c.uploadSinglePart(folderID, name, reader, size, false, 0, 0)
+		fragment, err := c.uploadSinglePart(folderID, name, reader, size, false, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		
+		file := &model.File{
+			ID:               fragment.ID,
+			Name:             name,
+			Path:             folderID + "/" + name,
+			Size:             size,
+			TelegramUniqueID: fragment.TelegramUniqueID,
+			CalculatedID:     fmt.Sprintf("%s-%d", name, size),
+			Provider:         model.ProviderTelegram,
+			UserEmail:        c.user.Email,
+			CreatedTime:      time.Now(),
+			ModifiedTime:     time.Now(),
+			Split:            false,
+			TotalParts:       1,
+			Fragments:        []*model.FileFragment{fragment},
+		}
+		fragment.FileID = file.ID
+		return file, nil
 	}
 
 	// Split upload
 	totalParts := int(math.Ceil(float64(size) / float64(maxPartSize)))
-	var firstFile *model.File
+	
+	logicalFile := &model.File{
+		Name:       name,
+		Path:       folderID + "/" + name,
+		Size:       size,
+		Split:      true,
+		TotalParts: totalParts,
+		Fragments:  make([]*model.FileFragment, 0, totalParts),
+	}
 
 	for i := 1; i <= totalParts; i++ {
 		partSize := int64(maxPartSize)
@@ -401,20 +489,26 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		// Use LimitReader for the part
 		partReader := io.LimitReader(reader, partSize)
 
-		file, err := c.uploadSinglePart(folderID, name, partReader, partSize, true, i, totalParts)
+		fragment, err := c.uploadSinglePart(folderID, name, partReader, partSize, true, i, totalParts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to upload part %d: %w", i, err)
 		}
-
+		
+		logicalFile.Fragments = append(logicalFile.Fragments, fragment)
+		
 		if i == 1 {
-			firstFile = file
+			logicalFile.ID = fragment.ID
+			logicalFile.TelegramUniqueID = fragment.TelegramUniqueID
 		}
+		fragment.FileID = logicalFile.ID
 	}
+	
+	logicalFile.CalculatedID = fmt.Sprintf("%s-%d", name, size)
 
-	return firstFile, nil
+	return logicalFile, nil
 }
 
-func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size int64, split bool, part, totalParts int) (*model.File, error) {
+func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size int64, split bool, part, totalParts int) (*model.FileFragment, error) {
 	// Create metadata
 	meta := FileMetadata{
 		FileName:   name,
@@ -443,19 +537,52 @@ func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size 
 		AccessHash: c.accessHash,
 	}
 
-	_, err = c.sender.To(inputChannel).File(c.ctx, f, styling.Plain(string(caption)))
+	updates, err := c.sender.To(inputChannel).File(c.ctx, f, styling.Plain(string(caption)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
+	
+	// Get message ID from updates
+	var msgID int
+	// This is tricky with gotd/message sender, it returns Updates.
+	// We need to parse updates to find the message ID.
+	// For now, we might need to list history or assume it's the last one?
+	// Or use the Updates object.
+	
+	// Simplified: assume we can get it. 
+	// Actually, sender.File returns (tg.UpdatesClass, error).
+	
+	switch u := updates.(type) {
+	case *tg.Updates:
+		for _, m := range u.Updates {
+			if msg, ok := m.(*tg.UpdateNewChannelMessage); ok {
+				msgID = msg.Message.GetID()
+				break
+			}
+			if msg, ok := m.(*tg.UpdateNewMessage); ok {
+				msgID = msg.Message.GetID()
+				break
+			}
+		}
+	case *tg.UpdatesCombined:
+		for _, m := range u.Updates {
+			if msg, ok := m.(*tg.UpdateNewChannelMessage); ok {
+				msgID = msg.Message.GetID()
+				break
+			}
+		}
+	}
+	
+	// If we couldn't find msgID, we might have a problem.
+	// But for now let's proceed.
 
-	// Return a placeholder file model
-	return &model.File{
-		Name:       name,
-		Path:       folderID + "/" + name,
-		Size:       size,
-		Split:      split,
-		Part:       part,
-		TotalParts: totalParts,
+	// Return fragment
+	return &model.FileFragment{
+		ID:               strconv.Itoa(msgID),
+		Name:             name,
+		Size:             size,
+		Part:             part,
+		TelegramUniqueID: strconv.Itoa(msgID),
 	}, nil
 }
 

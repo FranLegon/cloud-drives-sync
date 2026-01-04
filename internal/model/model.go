@@ -51,22 +51,37 @@ type Config struct {
 
 // File represents a file in cloud storage
 type File struct {
-	ID              string
-	Name            string
-	Path            string
-	Size            int64
-	Hash            string
-	HashAlgorithm   string
-	Provider        Provider
-	UserEmail       string
-	UserPhone       string
-	CreatedTime     time.Time
-	ModifiedTime    time.Time
-	OwnerEmail      string
-	ParentFolderID  string
-	Split           bool
-	Part            int
-	TotalParts      int
+	ID                   string
+	Name                 string
+	Path                 string
+	Size                 int64
+	GoogleDriveHash      string
+	GoogleDriveID        string
+	OneDriveHash         string
+	OneDriveID           string
+	TelegramUniqueID     string
+	CalculatedSHA256Hash string
+	CalculatedID         string
+	Provider             Provider
+	UserEmail            string
+	UserPhone            string
+	CreatedTime          time.Time
+	ModifiedTime         time.Time
+	OwnerEmail           string
+	ParentFolderID       string
+	Split                bool
+	TotalParts           int
+	Fragments            []*FileFragment
+}
+
+// FileFragment represents a part of a split file
+type FileFragment struct {
+	ID               string
+	FileID           string
+	Name             string
+	Size             int64
+	Part             int
+	TelegramUniqueID string
 }
 
 // Folder represents a folder in cloud storage

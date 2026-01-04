@@ -146,6 +146,8 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			ID:             *item.GetId(),
 			Name:           *item.GetName(),
 			Size:           *item.GetSize(),
+			OneDriveID:     *item.GetId(),
+			CalculatedID:   fmt.Sprintf("%s-%d", *item.GetName(), *item.GetSize()),
 			Provider:       model.ProviderMicrosoft,
 			UserEmail:      c.user.Email,
 			ParentFolderID: folderID,
@@ -161,11 +163,9 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 		if item.GetFile() != nil && item.GetFile().GetHashes() != nil {
 			hashes := item.GetFile().GetHashes()
 			if hashes.GetQuickXorHash() != nil {
-				file.Hash = *hashes.GetQuickXorHash()
-				file.HashAlgorithm = "QuickXorHash"
+				file.OneDriveHash = *hashes.GetQuickXorHash()
 			} else if hashes.GetSha1Hash() != nil {
-				file.Hash = *hashes.GetSha1Hash()
-				file.HashAlgorithm = "SHA1"
+				file.OneDriveHash = *hashes.GetSha1Hash()
 			}
 		}
 
@@ -331,11 +331,13 @@ func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
 	}
 
 	file := &model.File{
-		ID:        *item.GetId(),
-		Name:      *item.GetName(),
-		Size:      *item.GetSize(),
-		Provider:  model.ProviderMicrosoft,
-		UserEmail: c.user.Email,
+		ID:           *item.GetId(),
+		Name:         *item.GetName(),
+		Size:         *item.GetSize(),
+		OneDriveID:   *item.GetId(),
+		CalculatedID: fmt.Sprintf("%s-%d", *item.GetName(), *item.GetSize()),
+		Provider:     model.ProviderMicrosoft,
+		UserEmail:    c.user.Email,
 	}
 
 	if item.GetCreatedDateTime() != nil {
@@ -351,11 +353,9 @@ func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
 	if item.GetFile() != nil && item.GetFile().GetHashes() != nil {
 		hashes := item.GetFile().GetHashes()
 		if hashes.GetQuickXorHash() != nil {
-			file.Hash = *hashes.GetQuickXorHash()
-			file.HashAlgorithm = "QuickXorHash"
+			file.OneDriveHash = *hashes.GetQuickXorHash()
 		} else if hashes.GetSha1Hash() != nil {
-			file.Hash = *hashes.GetSha1Hash()
-			file.HashAlgorithm = "SHA1"
+			file.OneDriveHash = *hashes.GetSha1Hash()
 		}
 	}
 

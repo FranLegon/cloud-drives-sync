@@ -130,6 +130,13 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 		if err := r.db.InsertFile(file); err != nil {
 			logger.WarningTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to insert file %s: %v", file.Name, err)
 		}
+		
+		// Insert fragments if any
+		for _, fragment := range file.Fragments {
+			if err := r.db.InsertFileFragment(fragment); err != nil {
+				logger.WarningTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to insert fragment for file %s: %v", file.Name, err)
+			}
+		}
 	}
 
 	logger.InfoTagged([]string{string(user.Provider), user.Email + user.Phone}, "Found %d files in folder %s", len(files), folderID)
@@ -164,27 +171,27 @@ func (r *Runner) CheckForDuplicates() error {
 	foundDuplicates := false
 
 	for _, provider := range providers {
-		hashes, err := r.db.GetDuplicateHashes(provider)
+		ids, err := r.db.GetDuplicateCalculatedIDs(provider)
 		if err != nil {
 			logger.ErrorTagged([]string{string(provider)}, "Failed to query duplicates: %v", err)
 			continue
 		}
 
-		if len(hashes) == 0 {
+		if len(ids) == 0 {
 			logger.InfoTagged([]string{string(provider)}, "No duplicates found")
 			continue
 		}
 
 		foundDuplicates = true
-		logger.InfoTagged([]string{string(provider)}, "Found %d duplicate file groups", len(hashes))
+		logger.InfoTagged([]string{string(provider)}, "Found %d duplicate file groups", len(ids))
 
-		for _, hash := range hashes {
-			files, err := r.db.GetFilesByHash(hash, provider)
+		for _, id := range ids {
+			files, err := r.db.GetFilesByCalculatedID(id, provider)
 			if err != nil {
 				continue
 			}
 
-			fmt.Printf("\n[%s] Duplicate files (hash: %s):\n", provider, hash)
+			fmt.Printf("\n[%s] Duplicate files (CalculatedID: %s):\n", provider, id)
 			for i, file := range files {
 				fmt.Printf("  %d. %s (ID: %s, Size: %d, Created: %s)\n",
 					i+1, file.Path, file.ID, file.Size, file.CreatedTime.Format("2006-01-02"))
@@ -690,10 +697,10 @@ func (r *Runner) SyncProviders() error {
 					logger.DryRun("Would copy %s from %s to %s", path, masterFile.Provider, provider)
 				}
 			} else {
-				// File exists, check hash for conflict
+				// File exists, check calculated ID for conflict
 				existingFile := fileMap[provider]
-				if existingFile.Hash != masterFile.Hash {
-					logger.Warning("Conflict detected for %s in %s (Hash mismatch)", path, provider)
+				if existingFile.CalculatedID != masterFile.CalculatedID {
+					logger.Warning("Conflict detected for %s in %s (CalculatedID mismatch)", path, provider)
 					// Logic to rename and upload would go here
 				}
 			}

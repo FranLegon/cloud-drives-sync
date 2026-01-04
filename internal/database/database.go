@@ -33,11 +33,11 @@ func GetDBPath() string {
 // Open opens a connection to the encrypted SQLite database
 func Open(masterPassword string) (*DB, error) {
 	dbPath := GetDBPath()
-	
+
 	// For SQLCipher, we use the password with PRAGMA key
 	// Note: go-sqlite3 can be built with SQLCipher support using build tags
 	connStr := fmt.Sprintf("file:%s?_auth&_auth_user=%s&_auth_pass=%s", dbPath, DBUser, masterPassword)
-	
+
 	conn, err := sql.Open("sqlite3", connStr)
 	if err != nil {
 		return nil, err
@@ -75,8 +75,13 @@ func (db *DB) Initialize() error {
 		name TEXT NOT NULL,
 		path TEXT NOT NULL,
 		size INTEGER NOT NULL,
-		hash TEXT NOT NULL,
-		hash_algorithm TEXT NOT NULL,
+		googledrive_hash TEXT,
+		googledrive_id TEXT,
+		onedrive_hash TEXT,
+		onedrive_id TEXT,
+		telegram_unique_id TEXT,
+		calculated_sha256_hash TEXT,
+		calculated_id TEXT,
 		provider TEXT NOT NULL,
 		user_email TEXT,
 		user_phone TEXT,
@@ -85,13 +90,22 @@ func (db *DB) Initialize() error {
 		owner_email TEXT,
 		parent_folder_id TEXT,
 		split BOOLEAN DEFAULT 0,
-		part INTEGER DEFAULT 0,
 		total_parts INTEGER DEFAULT 0
 	);
 
-	CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash);
+	CREATE INDEX IF NOT EXISTS idx_files_calculated_id ON files(calculated_id);
 	CREATE INDEX IF NOT EXISTS idx_files_provider ON files(provider);
 	CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
+
+	CREATE TABLE IF NOT EXISTS files_fragments (
+		id TEXT PRIMARY KEY,
+		file_id TEXT NOT NULL,
+		name TEXT NOT NULL,
+		size INTEGER NOT NULL,
+		part INTEGER NOT NULL,
+		telegram_unique_id TEXT,
+		FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+	);
 
 	CREATE TABLE IF NOT EXISTS folders (
 		id TEXT PRIMARY KEY,
@@ -116,17 +130,35 @@ func (db *DB) Initialize() error {
 func (db *DB) InsertFile(file *model.File) error {
 	query := `
 	INSERT OR REPLACE INTO files (
-		id, name, path, size, hash, hash_algorithm, provider, 
-		user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
-		split, part, total_parts
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		id, name, path, size, 
+		googledrive_hash, googledrive_id, onedrive_hash, onedrive_id, telegram_unique_id,
+		calculated_sha256_hash, calculated_id,
+		provider, user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
+		split, total_parts
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := db.conn.Exec(query,
-		file.ID, file.Name, file.Path, file.Size, file.Hash, file.HashAlgorithm,
+		file.ID, file.Name, file.Path, file.Size,
+		file.GoogleDriveHash, file.GoogleDriveID, file.OneDriveHash, file.OneDriveID, file.TelegramUniqueID,
+		file.CalculatedSHA256Hash, file.CalculatedID,
 		string(file.Provider), file.UserEmail, file.UserPhone,
 		file.CreatedTime, file.ModifiedTime, file.OwnerEmail, file.ParentFolderID,
-		file.Split, file.Part, file.TotalParts,
+		file.Split, file.TotalParts,
+	)
+	return err
+}
+
+// InsertFileFragment inserts a file fragment record into the database
+func (db *DB) InsertFileFragment(fragment *model.FileFragment) error {
+	query := `
+	INSERT OR REPLACE INTO files_fragments (
+		id, file_id, name, size, part, telegram_unique_id
+	) VALUES (?, ?, ?, ?, ?, ?)
+	`
+
+	_, err := db.conn.Exec(query,
+		fragment.ID, fragment.FileID, fragment.Name, fragment.Size, fragment.Part, fragment.TelegramUniqueID,
 	)
 	return err
 }
@@ -146,18 +178,20 @@ func (db *DB) InsertFolder(folder *model.Folder) error {
 	return err
 }
 
-// GetFilesByHash returns all files with a specific hash
-func (db *DB) GetFilesByHash(hash string, provider model.Provider) ([]*model.File, error) {
+// GetFilesByCalculatedID returns all files with a specific calculated ID
+func (db *DB) GetFilesByCalculatedID(calculatedID string, provider model.Provider) ([]*model.File, error) {
 	query := `
-	SELECT id, name, path, size, hash, hash_algorithm, provider,
-		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
-		   split, part, total_parts
+	SELECT id, name, path, size, 
+		   googledrive_hash, googledrive_id, onedrive_hash, onedrive_id, telegram_unique_id,
+		   calculated_sha256_hash, calculated_id,
+		   provider, user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
+		   split, total_parts
 	FROM files
-	WHERE hash = ? AND provider = ?
+	WHERE calculated_id = ? AND provider = ?
 	ORDER BY created_time ASC
 	`
 
-	rows, err := db.conn.Query(query, hash, string(provider))
+	rows, err := db.conn.Query(query, calculatedID, string(provider))
 	if err != nil {
 		return nil, err
 	}
@@ -168,10 +202,12 @@ func (db *DB) GetFilesByHash(hash string, provider model.Provider) ([]*model.Fil
 		file := &model.File{}
 		var providerStr string
 		err := rows.Scan(
-			&file.ID, &file.Name, &file.Path, &file.Size, &file.Hash, &file.HashAlgorithm,
+			&file.ID, &file.Name, &file.Path, &file.Size,
+			&file.GoogleDriveHash, &file.GoogleDriveID, &file.OneDriveHash, &file.OneDriveID, &file.TelegramUniqueID,
+			&file.CalculatedSHA256Hash, &file.CalculatedID,
 			&providerStr, &file.UserEmail, &file.UserPhone, &file.CreatedTime,
 			&file.ModifiedTime, &file.OwnerEmail, &file.ParentFolderID,
-			&file.Split, &file.Part, &file.TotalParts,
+			&file.Split, &file.TotalParts,
 		)
 		if err != nil {
 			return nil, err
@@ -186,9 +222,11 @@ func (db *DB) GetFilesByHash(hash string, provider model.Provider) ([]*model.Fil
 // GetAllFiles returns all files for a provider
 func (db *DB) GetAllFiles(provider model.Provider) ([]*model.File, error) {
 	query := `
-	SELECT id, name, path, size, hash, hash_algorithm, provider,
-		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
-		   split, part, total_parts
+	SELECT id, name, path, size, 
+		   googledrive_hash, googledrive_id, onedrive_hash, onedrive_id, telegram_unique_id,
+		   calculated_sha256_hash, calculated_id,
+		   provider, user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
+		   split, total_parts
 	FROM files
 	WHERE provider = ?
 	ORDER BY path ASC
@@ -205,10 +243,12 @@ func (db *DB) GetAllFiles(provider model.Provider) ([]*model.File, error) {
 		file := &model.File{}
 		var providerStr string
 		err := rows.Scan(
-			&file.ID, &file.Name, &file.Path, &file.Size, &file.Hash, &file.HashAlgorithm,
+			&file.ID, &file.Name, &file.Path, &file.Size,
+			&file.GoogleDriveHash, &file.GoogleDriveID, &file.OneDriveHash, &file.OneDriveID, &file.TelegramUniqueID,
+			&file.CalculatedSHA256Hash, &file.CalculatedID,
 			&providerStr, &file.UserEmail, &file.UserPhone, &file.CreatedTime,
 			&file.ModifiedTime, &file.OwnerEmail, &file.ParentFolderID,
-			&file.Split, &file.Part, &file.TotalParts,
+			&file.Split, &file.TotalParts,
 		)
 		if err != nil {
 			return nil, err
@@ -223,9 +263,11 @@ func (db *DB) GetAllFiles(provider model.Provider) ([]*model.File, error) {
 // GetFilesByUserEmail returns all files for a specific user email
 func (db *DB) GetFilesByUserEmail(provider model.Provider, email string) ([]*model.File, error) {
 	query := `
-	SELECT id, name, path, size, hash, hash_algorithm, provider,
-		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
-		   split, part, total_parts
+	SELECT id, name, path, size, 
+		   googledrive_hash, googledrive_id, onedrive_hash, onedrive_id, telegram_unique_id,
+		   calculated_sha256_hash, calculated_id,
+		   provider, user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
+		   split, total_parts
 	FROM files
 	WHERE provider = ? AND user_email = ?
 	ORDER BY size DESC
@@ -242,10 +284,12 @@ func (db *DB) GetFilesByUserEmail(provider model.Provider, email string) ([]*mod
 		file := &model.File{}
 		var providerStr string
 		err := rows.Scan(
-			&file.ID, &file.Name, &file.Path, &file.Size, &file.Hash, &file.HashAlgorithm,
+			&file.ID, &file.Name, &file.Path, &file.Size,
+			&file.GoogleDriveHash, &file.GoogleDriveID, &file.OneDriveHash, &file.OneDriveID, &file.TelegramUniqueID,
+			&file.CalculatedSHA256Hash, &file.CalculatedID,
 			&providerStr, &file.UserEmail, &file.UserPhone, &file.CreatedTime,
 			&file.ModifiedTime, &file.OwnerEmail, &file.ParentFolderID,
-			&file.Split, &file.Part, &file.TotalParts,
+			&file.Split, &file.TotalParts,
 		)
 		if err != nil {
 			return nil, err
@@ -271,13 +315,13 @@ func (db *DB) DeleteFolder(id string) error {
 	return err
 }
 
-// GetDuplicateHashes returns hashes that appear more than once for a provider
-func (db *DB) GetDuplicateHashes(provider model.Provider) ([]string, error) {
+// GetDuplicateCalculatedIDs returns calculated IDs that appear more than once for a provider
+func (db *DB) GetDuplicateCalculatedIDs(provider model.Provider) ([]string, error) {
 	query := `
-	SELECT hash
+	SELECT calculated_id
 	FROM files
 	WHERE provider = ?
-	GROUP BY hash
+	GROUP BY calculated_id
 	HAVING COUNT(*) > 1
 	`
 
@@ -287,16 +331,16 @@ func (db *DB) GetDuplicateHashes(provider model.Provider) ([]string, error) {
 	}
 	defer rows.Close()
 
-	var hashes []string
+	var ids []string
 	for rows.Next() {
-		var hash string
-		if err := rows.Scan(&hash); err != nil {
+		var id string
+		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
-		hashes = append(hashes, hash)
+		ids = append(ids, id)
 	}
 
-	return hashes, rows.Err()
+	return ids, rows.Err()
 }
 
 // ClearProvider removes all files and folders for a provider
@@ -328,7 +372,7 @@ func DBExists() bool {
 // CreateDB creates a new encrypted database
 func CreateDB(masterPassword string) error {
 	dbPath := GetDBPath()
-	
+
 	// Create database file
 	connStr := fmt.Sprintf("file:%s?_auth&_auth_user=%s&_auth_pass=%s", dbPath, DBUser, masterPassword)
 	conn, err := sql.Open("sqlite3", connStr)
@@ -353,8 +397,11 @@ func CreateDB(masterPassword string) error {
 // GetFileByID retrieves a file by its ID
 func (db *DB) GetFileByID(id string) (*model.File, error) {
 	query := `
-	SELECT id, name, path, size, hash, hash_algorithm, provider,
-		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id
+	SELECT id, name, path, size, 
+		   googledrive_hash, googledrive_id, onedrive_hash, onedrive_id, telegram_unique_id,
+		   calculated_sha256_hash, calculated_id,
+		   provider, user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
+		   split, total_parts
 	FROM files
 	WHERE id = ?
 	`
@@ -362,9 +409,12 @@ func (db *DB) GetFileByID(id string) (*model.File, error) {
 	file := &model.File{}
 	var providerStr string
 	err := db.conn.QueryRow(query, id).Scan(
-		&file.ID, &file.Name, &file.Path, &file.Size, &file.Hash, &file.HashAlgorithm,
+		&file.ID, &file.Name, &file.Path, &file.Size,
+		&file.GoogleDriveHash, &file.GoogleDriveID, &file.OneDriveHash, &file.OneDriveID, &file.TelegramUniqueID,
+		&file.CalculatedSHA256Hash, &file.CalculatedID,
 		&providerStr, &file.UserEmail, &file.UserPhone, &file.CreatedTime,
 		&file.ModifiedTime, &file.OwnerEmail, &file.ParentFolderID,
+		&file.Split, &file.TotalParts,
 	)
 	if err != nil {
 		return nil, err
@@ -376,9 +426,11 @@ func (db *DB) GetFileByID(id string) (*model.File, error) {
 // GetAllFilesAcrossProviders returns all files across all providers
 func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 	query := `
-	SELECT id, name, path, size, hash, hash_algorithm, provider,
-		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
-		   split, part, total_parts
+	SELECT id, name, path, size, 
+		   googledrive_hash, googledrive_id, onedrive_hash, onedrive_id, telegram_unique_id,
+		   calculated_sha256_hash, calculated_id,
+		   provider, user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
+		   split, total_parts
 	FROM files
 	ORDER BY provider, path ASC
 	`
@@ -394,10 +446,12 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 		file := &model.File{}
 		var providerStr string
 		err := rows.Scan(
-			&file.ID, &file.Name, &file.Path, &file.Size, &file.Hash, &file.HashAlgorithm,
+			&file.ID, &file.Name, &file.Path, &file.Size,
+			&file.GoogleDriveHash, &file.GoogleDriveID, &file.OneDriveHash, &file.OneDriveID, &file.TelegramUniqueID,
+			&file.CalculatedSHA256Hash, &file.CalculatedID,
 			&providerStr, &file.UserEmail, &file.UserPhone, &file.CreatedTime,
 			&file.ModifiedTime, &file.OwnerEmail, &file.ParentFolderID,
-			&file.Split, &file.Part, &file.TotalParts,
+			&file.Split, &file.TotalParts,
 		)
 		if err != nil {
 			return nil, err
@@ -407,6 +461,37 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 	}
 
 	return files, rows.Err()
+}
+
+// GetFileFragments returns all fragments for a given file ID
+func (db *DB) GetFileFragments(fileID string) ([]*model.FileFragment, error) {
+	query := `
+	SELECT id, file_id, name, size, part, telegram_unique_id
+	FROM files_fragments
+	WHERE file_id = ?
+	ORDER BY part ASC
+	`
+
+	rows, err := db.conn.Query(query, fileID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var fragments []*model.FileFragment
+	for rows.Next() {
+		fragment := &model.FileFragment{}
+		err := rows.Scan(
+			&fragment.ID, &fragment.FileID, &fragment.Name, &fragment.Size,
+			&fragment.Part, &fragment.TelegramUniqueID,
+		)
+		if err != nil {
+			return nil, err
+		}
+		fragments = append(fragments, fragment)
+	}
+
+	return fragments, rows.Err()
 }
 
 // UpdateFileModifiedTime updates the modified time of a file
