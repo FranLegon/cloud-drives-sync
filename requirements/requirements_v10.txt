@@ -188,6 +188,9 @@ The application must only interact with files and folders contained within speci
 *   **`--help`, `-h`**
     *   A modifier flag that can be used with any command (e.g., `cloud-drives-sync free-main --help`) to get more information on how it works.
 
+*   **`--password`, `-p`**
+    *   A global flag that allows the user to provide the master password non-interactively for scripting purposes. If omitted, the tool will prompt for the password interactively.
+
 #### **6. Provider-Specific Notes**
 
 **Google Drive:**

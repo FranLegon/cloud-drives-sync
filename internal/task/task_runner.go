@@ -451,166 +451,159 @@ func (r *Runner) BalanceStorage() error {
 func (r *Runner) FreeMain() error {
 	logger.Info("Freeing up main account storage...")
 
-	// Group users by provider
-	usersByProvider := make(map[model.Provider][]model.User)
-	for _, user := range r.config.Users {
-		usersByProvider[user.Provider] = append(usersByProvider[user.Provider], user)
+	// Find main account (Google)
+	var mainUser *model.User
+	for i := range r.config.Users {
+		if r.config.Users[i].IsMain && r.config.Users[i].Provider == model.ProviderGoogle {
+			mainUser = &r.config.Users[i]
+			break
+		}
 	}
 
-	for provider, users := range usersByProvider {
-		if provider != model.ProviderGoogle {
-			logger.Info("Skipping %s (not supported for free-main)", provider)
-			continue
+	if mainUser == nil {
+		logger.Warning("No Google main account found")
+		return nil
+	}
+
+	// Find backup accounts for Google
+	var backupUsers []model.User
+	for _, user := range r.config.Users {
+		if !user.IsMain && user.Provider == model.ProviderGoogle {
+			backupUsers = append(backupUsers, user)
 		}
+	}
 
-		// Find main account
-		var mainUser *model.User
-		var backupUsers []model.User
+	if len(backupUsers) == 0 {
+		logger.Warning("No Google backup accounts found")
+		return nil
+	}
 
-		for i := range users {
-			if users[i].IsMain {
-				mainUser = &users[i]
-			} else {
-				backupUsers = append(backupUsers, users[i])
-			}
-		}
+	logger.Info("Processing Google (Main: %s)", mainUser.Email)
 
-		if mainUser == nil {
-			logger.Warning("No main account found for %s", provider)
-			continue
-		}
+	// Initialize main client
+	mainClient, err := r.GetOrCreateClient(mainUser)
+	if err != nil {
+		logger.Error("Failed to create client for main account: %v", err)
+		return err
+	}
 
-		if len(backupUsers) == 0 {
-			logger.Warning("No backup accounts found for %s", provider)
-			continue
-		}
+	// Get backup accounts status
+	type BackupStatus struct {
+		User   model.User
+		Client api.CloudClient
+		Quota  *api.QuotaInfo
+		Free   int64
+	}
 
-		logger.Info("Processing %s (Main: %s)", provider, mainUser.Email)
+	var targets []*BackupStatus
 
-		// Initialize main client
-		mainClient, err := r.GetOrCreateClient(mainUser)
+	for _, user := range backupUsers {
+		client, err := r.GetOrCreateClient(&user)
 		if err != nil {
-			logger.Error("Failed to create client for main account: %v", err)
+			logger.Error("Failed to create client for %s: %v", user.Email, err)
 			continue
 		}
 
-		// Get backup accounts status
-		type BackupStatus struct {
-			User   model.User
-			Client api.CloudClient
-			Quota  *api.QuotaInfo
-			Free   int64
-		}
-
-		var targets []*BackupStatus
-
-		for _, user := range backupUsers {
-			client, err := r.GetOrCreateClient(&user)
-			if err != nil {
-				logger.Error("Failed to create client for %s: %v", user.Email, err)
-				continue
-			}
-
-			quota, err := client.GetQuota()
-			if err != nil {
-				logger.Error("Failed to get quota for %s: %v", user.Email, err)
-				continue
-			}
-
-			free := quota.Total - quota.Used
-			// Only consider accounts with some free space
-			if free > 0 {
-				targets = append(targets, &BackupStatus{
-					User:   user,
-					Client: client,
-					Quota:  quota,
-					Free:   free,
-				})
-			}
-		}
-
-		if len(targets) == 0 {
-			logger.Warning("No backup accounts with free space available for %s", provider)
-			continue
-		}
-
-		// List files in main account
-		syncFolderID, err := mainClient.GetSyncFolderID()
+		quota, err := client.GetQuota()
 		if err != nil {
-			logger.Error("Failed to get sync folder: %v", err)
+			logger.Error("Failed to get quota for %s: %v", user.Email, err)
 			continue
 		}
 
-		files, err := r.getAllFilesRecursive(mainClient, syncFolderID)
-		if err != nil {
-			logger.Error("Failed to list files recursively: %v", err)
-			continue
+		free := quota.Total - quota.Used
+		// Only consider accounts with some free space
+		if free > 0 {
+			targets = append(targets, &BackupStatus{
+				User:   user,
+				Client: client,
+				Quota:  quota,
+				Free:   free,
+			})
 		}
+	}
 
-		// Filter files owned by main user
-		var candidates []*model.File
-		for _, f := range files {
-			if f.OwnerEmail == mainUser.Email {
-				candidates = append(candidates, f)
-			}
+	if len(targets) == 0 {
+		logger.Warning("No backup accounts with free space available for Google")
+		return nil
+	}
+
+	// List files in main account
+	syncFolderID, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		logger.Error("Failed to get sync folder: %v", err)
+		return err
+	}
+
+	files, err := r.getAllFilesRecursive(mainClient, syncFolderID)
+	if err != nil {
+		logger.Error("Failed to list files recursively: %v", err)
+		return err
+	}
+
+	// Filter files owned by main user
+	var candidates []*model.File
+	for _, f := range files {
+		if f.OwnerEmail == mainUser.Email {
+			candidates = append(candidates, f)
 		}
+	}
 
-		if len(candidates) == 0 {
-			logger.Info("No files found in main account to move")
-			continue
-		}
+	if len(candidates) == 0 {
+		logger.Info("No files found in main account to move")
+		return nil
+	}
 
-		// Sort files by size (descending) to move big chunks first
-		sort.Slice(candidates, func(i, j int) bool {
-			return candidates[i].Size > candidates[j].Size
+	// Sort files by size (descending) to move big chunks first
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Size > candidates[j].Size
+	})
+
+	// Move files
+	for _, file := range candidates {
+		// Sort targets by free space (descending) - re-sort each time as space changes
+		sort.Slice(targets, func(i, j int) bool {
+			return targets[i].Free > targets[j].Free
 		})
 
-		// Move files
-		for _, file := range candidates {
-			// Sort targets by free space (descending) - re-sort each time as space changes
-			sort.Slice(targets, func(i, j int) bool {
-				return targets[i].Free > targets[j].Free
-			})
-
-			// Find best target
-			var target *BackupStatus
-			for _, t := range targets {
-				if t.Free > file.Size {
-					target = t
-					break
-				}
+		// Find best target
+		var target *BackupStatus
+		for _, t := range targets {
+			if t.Free > file.Size {
+				target = t
+				break
 			}
+		}
 
-			if target == nil {
-				logger.Warning("No backup account has enough space for file %s (%d bytes)", file.Name, file.Size)
-				continue
-			}
+		if target == nil {
+			logger.Warning("No backup account has enough space for file %s (%d bytes)", file.Name, file.Size)
+			continue
+		}
 
-			// Move file
-			if !r.safeMode {
-				logger.InfoTagged([]string{string(provider), mainUser.Email}, "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
-				err := mainClient.TransferOwnership(file.ID, target.User.Email)
-				if err != nil {
-					if err == api.ErrOwnershipTransferPending {
-						logger.InfoTagged([]string{string(provider), mainUser.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
-						if err := target.Client.AcceptOwnership(file.ID); err != nil {
-							logger.Error("Failed to accept ownership: %v", err)
-							continue
-						}
-					} else {
-						logger.Error("Failed to transfer ownership: %v", err)
+		// Move file
+		if !r.safeMode {
+			logger.InfoTagged([]string{"Google", mainUser.Email}, "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+			err := mainClient.TransferOwnership(file.ID, target.User.Email)
+			if err != nil {
+				if err == api.ErrOwnershipTransferPending {
+					logger.InfoTagged([]string{"Google", mainUser.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
+					if err := target.Client.AcceptOwnership(file.ID); err != nil {
+						logger.Error("Failed to accept ownership: %v", err)
 						continue
 					}
+				} else {
+					logger.Error("Failed to transfer ownership: %v", err)
+					continue
 				}
-			} else {
-				logger.DryRunTagged([]string{string(provider), mainUser.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
 			}
-
-			// Update local state
-			target.Free -= file.Size
-			target.Quota.Used += file.Size
+		} else {
+			logger.DryRunTagged([]string{"Google", mainUser.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
 		}
+
+		// Update local state
+		target.Free -= file.Size
+		target.Quota.Used += file.Size
 	}
+
 	return nil
 }
 
@@ -641,4 +634,71 @@ func (r *Runner) getAllFilesRecursive(client api.CloudClient, folderID string) (
 	}
 
 	return allFiles, nil
+}
+
+// SyncProviders synchronizes files across all providers
+func (r *Runner) SyncProviders() error {
+	logger.Info("Synchronizing providers...")
+
+	// Get all files
+	files, err := r.db.GetAllFilesAcrossProviders()
+	if err != nil {
+		return fmt.Errorf("failed to get files: %w", err)
+	}
+
+	// Group by normalized path
+	filesByPath := make(map[string]map[model.Provider]*model.File)
+	for _, f := range files {
+		if _, ok := filesByPath[f.Path]; !ok {
+			filesByPath[f.Path] = make(map[model.Provider]*model.File)
+		}
+		filesByPath[f.Path][f.Provider] = f
+	}
+
+	// Check for missing files
+	providers := []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram}
+
+	for path, fileMap := range filesByPath {
+		// Determine master file (prioritize Google, then Microsoft, then Telegram)
+		var masterFile *model.File
+		
+		if f, ok := fileMap[model.ProviderGoogle]; ok {
+			masterFile = f
+		} else if f, ok := fileMap[model.ProviderMicrosoft]; ok {
+			masterFile = f
+		} else if f, ok := fileMap[model.ProviderTelegram]; ok {
+			masterFile = f
+		}
+
+		if masterFile == nil {
+			continue
+		}
+
+		for _, provider := range providers {
+			if _, exists := fileMap[provider]; !exists {
+				// File missing in this provider
+				logger.Info("File %s missing in %s", path, provider)
+				
+				if !r.safeMode {
+					// Logic to copy file would go here:
+					// 1. Get source client
+					// 2. Get destination client (find account with space)
+					// 3. Download from source
+					// 4. Upload to destination
+					logger.Info("Copying %s from %s to %s (Not fully implemented)", path, masterFile.Provider, provider)
+				} else {
+					logger.DryRun("Would copy %s from %s to %s", path, masterFile.Provider, provider)
+				}
+			} else {
+				// File exists, check hash for conflict
+				existingFile := fileMap[provider]
+				if existingFile.Hash != masterFile.Hash {
+					logger.Warning("Conflict detected for %s in %s (Hash mismatch)", path, provider)
+					// Logic to rename and upload would go here
+				}
+			}
+		}
+	}
+
+	return nil
 }

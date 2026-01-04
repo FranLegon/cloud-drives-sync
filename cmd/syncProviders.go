@@ -30,10 +30,5 @@ func runSyncProviders(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// TODO: Implement cross-provider sync logic
-	logger.Info("Cross-provider synchronization not yet fully implemented")
-	logger.Info("This would compare files across providers using normalized paths and hashes")
-	logger.Info("Missing files would be uploaded, conflicts would be renamed")
-
-	return nil
+	return runner.SyncProviders()
 }

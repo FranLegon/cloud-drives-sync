@@ -153,26 +153,21 @@ func addMainAccount() error {
 	}
 
 	// Prompt for provider
-	providerPrompt := promptui.Select{
-		Label: "Select Provider",
-		Items: []string{"Google", "Microsoft"},
-	}
-	_, provider, err := providerPrompt.Run()
-	if err != nil {
-		return fmt.Errorf("failed to select provider: %w", err)
-	}
+	// Only Google can be the main account
+	provider := "Google"
+	fmt.Println("Adding Google as the main account provider.")
 
 	// Check if main account already exists
 	var mainExists bool
 	for _, user := range cfg.Users {
-		if string(user.Provider) == provider && user.IsMain {
+		if user.IsMain {
 			mainExists = true
 			break
 		}
 	}
 
 	if mainExists {
-		return fmt.Errorf("main account for %s already exists", provider)
+		return fmt.Errorf("a main account already exists (only one main account is allowed)")
 	}
 
 	// Perform OAuth flow

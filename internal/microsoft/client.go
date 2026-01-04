@@ -90,12 +90,30 @@ func (c *Client) PreFlightCheck() error {
 	ctx := context.Background()
 	
 	if !c.user.IsMain && c.user.SyncFolderName != "" {
-		// For backup accounts, verify folder exists
-		// Note: Simplified implementation - would list and find folder
-		logger.InfoTagged([]string{"Microsoft", c.user.Email}, "Pre-flight check for folder '%s' (simplified)", c.user.SyncFolderName)
-		c.syncFolderID = "placeholder-id"
+		// List root children to find the sync folder
+		result, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId("root").Children().Get(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to list root: %w", err)
+		}
+		
+		found := false
+		for _, item := range result.GetValue() {
+			if item.GetName() != nil && *item.GetName() == c.user.SyncFolderName && item.GetFolder() != nil {
+				c.syncFolderID = *item.GetId()
+				found = true
+				break
+			}
+		}
+		
+		if !found {
+			return fmt.Errorf("sync folder '%s' not found", c.user.SyncFolderName)
+		}
+		
+		logger.InfoTagged([]string{"Microsoft", c.user.Email}, "Found sync folder '%s' (%s)", c.user.SyncFolderName, c.syncFolderID)
 		return nil
 	} else if c.user.IsMain {
+		// Should not happen as per new requirements (Main is Google only)
+		// But keeping for safety
 		_, err := c.graphClient.Me().Drive().Get(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("failed to access drive: %w", err)

@@ -9,6 +9,7 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/config"
 	"github.com/FranLegon/cloud-drives-sync/internal/google"
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
+	"github.com/FranLegon/cloud-drives-sync/internal/microsoft"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
@@ -40,12 +41,10 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to select provider: %w", err)
 	}
 
-	// Check if main account exists (except for Telegram)
-	if provider != "Telegram" {
-		mainAccount := config.GetMainAccount(cfg, model.Provider(provider))
-		if mainAccount == nil {
-			return fmt.Errorf("no main account found for %s - please add one using 'init' first", provider)
-		}
+	// Check if main account exists (must be Google)
+	mainAccount := config.GetMainAccount(cfg, model.ProviderGoogle)
+	if mainAccount == nil {
+		return fmt.Errorf("no main account found - please add a Google main account using 'init' first")
 	}
 
 	// Perform OAuth flow
@@ -143,9 +142,10 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 
 	case "Microsoft":
 		// Prompt for sync folder name
+		defaultName := fmt.Sprintf("sync-cloud-drives-%s", email)
 		folderPrompt := promptui.Prompt{
-			Label:   "Sync Folder Name (e.g., synched-cloud-drives-1)",
-			Default: "synched-cloud-drives-1",
+			Label:   "Sync Folder Name",
+			Default: defaultName,
 		}
 		syncFolderName, err := folderPrompt.Run()
 		if err != nil {
@@ -153,8 +153,21 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 		}
 		user.SyncFolderName = syncFolderName
 
-		// TODO: Create folder in backup account and share with main
-		logger.Info("Microsoft OneDrive folder setup not yet implemented")
+		// Create folder in backup account
+		if !safeMode {
+			client, err := microsoft.NewClient(&user, oauthConfig)
+			if err != nil {
+				return fmt.Errorf("failed to create microsoft client: %w", err)
+			}
+
+			logger.Info("Creating sync folder '%s'...", syncFolderName)
+			if _, err := client.CreateFolder("root", syncFolderName); err != nil {
+				return fmt.Errorf("failed to create sync folder: %w", err)
+			}
+			logger.Info("Sync folder created successfully")
+		} else {
+			logger.DryRun("Would create sync folder '%s' in Microsoft account", syncFolderName)
+		}
 	}
 
 	// Add user to config
