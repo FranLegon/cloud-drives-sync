@@ -3,8 +3,10 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
@@ -34,19 +36,30 @@ func GetDBPath() string {
 func Open(masterPassword string) (*DB, error) {
 	dbPath := GetDBPath()
 
-	// For SQLCipher, we use the password with PRAGMA key
-	// Note: go-sqlite3 can be built with SQLCipher support using build tags
-	connStr := fmt.Sprintf("file:%s?_auth&_auth_user=%s&_auth_pass=%s", dbPath, DBUser, masterPassword)
+	// Escape password for URL
+	escapedPwd := url.QueryEscape(masterPassword)
+
+	// For SQLCipher, we use the password with PRAGMA key or _key query param
+	// We also include _auth_user per requirements, although it's for User Auth extension
+	connStr := fmt.Sprintf("file:%s?_auth_user=%s&_key=%s", dbPath, DBUser, escapedPwd)
 
 	conn, err := sql.Open("sqlite3", connStr)
 	if err != nil {
 		return nil, err
 	}
 
-	// Set SQLCipher key using PRAGMA
-	if _, err := conn.Exec(fmt.Sprintf("PRAGMA key = '%s';", masterPassword)); err != nil {
+	// Set SQLCipher key using PRAGMA as a fallback/ensure
+	// Escape single quotes in password
+	safePwd := strings.ReplaceAll(masterPassword, "'", "''")
+	if _, err := conn.Exec(fmt.Sprintf("PRAGMA key = '%s';", safePwd)); err != nil {
 		conn.Close()
-		return nil, err
+		return nil, fmt.Errorf("failed to set encryption key: %w", err)
+	}
+
+	// Verify access (will fail if key is wrong or encryption not supported but DB is encrypted)
+	if _, err := conn.Exec("SELECT count(*) FROM sqlite_master;"); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("failed to access database: %w", err)
 	}
 
 	// Test connection
