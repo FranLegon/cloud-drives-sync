@@ -44,6 +44,11 @@ func runInit(cmd *cobra.Command, args []string) error {
 		return firstTimeInit()
 	}
 
+	// If getJsonFlag is set, just load and print config
+	if getJsonFlag {
+		return printConfigAsJson()
+	}
+
 	// Existing installation - add main account
 	logger.Info("Adding a main account to existing configuration")
 	return addMainAccount()
@@ -305,5 +310,36 @@ func addMainAccount() error {
 		}
 	}
 
+	return nil
+}
+
+func printConfigAsJson() error {
+	var password string
+	var err error
+
+	if passwordFlag != "" {
+		password = passwordFlag
+	} else {
+		// Prompt for password
+		prompt := promptui.Prompt{
+			Label: "Master Password",
+			Mask:  '*',
+		}
+		password, err = prompt.Run()
+		if err != nil {
+			return fmt.Errorf("failed to read password: %w", err)
+		}
+	}
+
+	cfg, err := config.LoadConfig(password)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	jsonData, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal configuration: %w", err)
+	}
+	fmt.Println(string(jsonData))
 	return nil
 }
