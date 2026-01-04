@@ -98,12 +98,7 @@ func runRemoveDuplicates(cmd *cobra.Command, args []string) error {
 				// Delete the selected file
 				file := files[idx]
 				if !safeMode {
-					client, err := runner.GetOrCreateClient(&model.User{
-						Provider:     provider,
-						Email:        file.UserEmail,
-						Phone:        file.UserPhone,
-						RefreshToken: "", // Will use from config
-					})
+					client, err := getClientForFile(runner, file)
 					if err != nil {
 						logger.ErrorTagged([]string{string(provider)}, "Failed to get client: %v", err)
 						break
@@ -179,12 +174,7 @@ func runRemoveDuplicatesUnsafe(cmd *cobra.Command, args []string) error {
 				oldestFile := files[0]
 				for _, file := range files[1:] {
 					if !safeMode {
-						client, err := runner.GetOrCreateClient(&model.User{
-							Provider:     provider,
-							Email:        file.UserEmail,
-							Phone:        file.UserPhone,
-							RefreshToken: "", // Will use from config
-						})
+						client, err := getClientForFile(runner, file)
 						if err != nil {
 							logger.ErrorTagged([]string{string(provider)}, "Failed to get client: %v", err)
 							continue
