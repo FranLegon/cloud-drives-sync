@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
@@ -56,8 +57,13 @@ func NewClient(user *model.User, config *oauth2.Config) (*Client, error) {
 
 // PreFlightCheck verifies the sync folder structure
 func (c *Client) PreFlightCheck() error {
-	query := fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder' and trashed=false and 'me' in owners", syncFolderName)
-	
+	var query string
+	if c.user.IsMain {
+		query = fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder' and trashed=false and 'me' in owners", syncFolderName)
+	} else {
+		query = fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder' and trashed=false and sharedWithMe=true", syncFolderName)
+	}
+
 	fileList, err := c.service.Files.List().Q(query).Fields("files(id, name, parents)").Do()
 	if err != nil {
 		return fmt.Errorf("failed to search for sync folder: %w", err)
@@ -122,7 +128,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 	}
 
 	query := fmt.Sprintf("'%s' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed=false", folderID)
-	
+
 	var allFiles []*model.File
 	pageToken := ""
 
@@ -142,16 +148,16 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 		for _, f := range fileList.Files {
 			file := &model.File{
-				ID:              f.Id,
-				Name:            f.Name,
-				Size:            f.Size,
-				Hash:            f.Md5Checksum,
-				HashAlgorithm:   "MD5",
-				Provider:        model.ProviderGoogle,
-				UserEmail:       c.user.Email,
-				CreatedTime:     parseTime(f.CreatedTime),
-				ModifiedTime:    parseTime(f.ModifiedTime),
-				ParentFolderID:  folderID,
+				ID:             f.Id,
+				Name:           f.Name,
+				Size:           f.Size,
+				Hash:           f.Md5Checksum,
+				HashAlgorithm:  "MD5",
+				Provider:       model.ProviderGoogle,
+				UserEmail:      c.user.Email,
+				CreatedTime:    parseTime(f.CreatedTime),
+				ModifiedTime:   parseTime(f.ModifiedTime),
+				ParentFolderID: folderID,
 			}
 
 			if len(f.Owners) > 0 {
@@ -177,7 +183,7 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 	}
 
 	query := fmt.Sprintf("'%s' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false", parentID)
-	
+
 	var allFolders []*model.Folder
 	pageToken := ""
 
@@ -245,15 +251,15 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	}
 
 	result := &model.File{
-		ID:            createdFile.Id,
-		Name:          createdFile.Name,
-		Size:          createdFile.Size,
-		Hash:          createdFile.Md5Checksum,
-		HashAlgorithm: "MD5",
-		Provider:      model.ProviderGoogle,
-		UserEmail:     c.user.Email,
-		CreatedTime:   parseTime(createdFile.CreatedTime),
-		ModifiedTime:  parseTime(createdFile.ModifiedTime),
+		ID:             createdFile.Id,
+		Name:           createdFile.Name,
+		Size:           createdFile.Size,
+		Hash:           createdFile.Md5Checksum,
+		HashAlgorithm:  "MD5",
+		Provider:       model.ProviderGoogle,
+		UserEmail:      c.user.Email,
+		CreatedTime:    parseTime(createdFile.CreatedTime),
+		ModifiedTime:   parseTime(createdFile.ModifiedTime),
 		ParentFolderID: folderID,
 	}
 
@@ -280,7 +286,7 @@ func (c *Client) MoveFile(fileID, targetFolderID string) error {
 		AddParents(targetFolderID).
 		RemoveParents(file.Parents[0]).
 		Do()
-	
+
 	return err
 }
 
@@ -403,13 +409,109 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 		EmailAddress: newOwnerEmail,
 	}
 
-	_, err := c.service.Permissions.Create(fileID, permission).TransferOwnership(true).SendNotificationEmail(false).Do()
-	if err != nil {
-		return fmt.Errorf("failed to transfer ownership: %w", err)
+	// Try direct transfer first
+	_, err := c.service.Permissions.Create(fileID, permission).TransferOwnership(true).SendNotificationEmail(true).Do()
+	if err == nil {
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Transferred ownership of file %s to %s", fileID, newOwnerEmail)
+		return nil
 	}
 
-	logger.InfoTagged([]string{"Google", c.user.Email}, "Transferred ownership of file %s to %s", fileID, newOwnerEmail)
+	// Check if consent is required
+	if isConsentRequiredError(err) {
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Direct transfer failed, attempting pending owner flow...")
+
+		// 1. Find existing permission
+		var permID string
+		perms, err := c.service.Permissions.List(fileID).Fields("permissions(id, emailAddress, role)").Do()
+		if err != nil {
+			return fmt.Errorf("failed to list permissions: %w", err)
+		}
+
+		for _, p := range perms.Permissions {
+			if p.EmailAddress == newOwnerEmail {
+				permID = p.Id
+				break
+			}
+		}
+
+		// 2. If not found, create as writer
+		if permID == "" {
+			newPerm := &drive.Permission{
+				Type:         "user",
+				Role:         "writer",
+				EmailAddress: newOwnerEmail,
+			}
+			createdPerm, err := c.service.Permissions.Create(fileID, newPerm).Fields("id").SendNotificationEmail(true).Do()
+			if err != nil {
+				return fmt.Errorf("failed to create writer permission: %w", err)
+			}
+			permID = createdPerm.Id
+		}
+
+		// 3. Update to pending owner
+		updatePerm := &drive.Permission{
+			Role:         "writer",
+			PendingOwner: true,
+		}
+
+		_, err = c.service.Permissions.Update(fileID, permID, updatePerm).Do()
+		if err != nil {
+			return fmt.Errorf("failed to set pending owner: %w", err)
+		}
+
+		return api.ErrOwnershipTransferPending
+	}
+
+	return fmt.Errorf("failed to transfer ownership: %w", err)
+}
+
+// AcceptOwnership accepts a pending ownership transfer
+func (c *Client) AcceptOwnership(fileID string) error {
+	// List permissions to find the pending owner permission for me
+	perms, err := c.service.Permissions.List(fileID).Fields("permissions(id, role, emailAddress, pendingOwner)").Do()
+	if err != nil {
+		return fmt.Errorf("failed to list permissions: %w", err)
+	}
+
+	var permID string
+	for _, p := range perms.Permissions {
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Checking permission: ID=%s, Role=%s, Email=%s, PendingOwner=%v", p.Id, p.Role, p.EmailAddress, p.PendingOwner)
+		
+		// Check if this permission is for me and is pending owner
+		if p.PendingOwner {
+			// If email is present, verify it matches
+			if p.EmailAddress != "" && p.EmailAddress != c.user.Email {
+				continue
+			}
+			permID = p.Id
+			break
+		}
+	}
+
+	if permID == "" {
+		return errors.New("no pending ownership permission found")
+	}
+
+	// Update permission to owner
+	_, err = c.service.Permissions.Update(fileID, permID, &drive.Permission{Role: "owner"}).TransferOwnership(true).Do()
+	if err != nil {
+		return fmt.Errorf("failed to accept ownership: %w", err)
+	}
+
+	logger.InfoTagged([]string{"Google", c.user.Email}, "Accepted ownership of file %s", fileID)
 	return nil
+}
+
+func isConsentRequiredError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Check for specific error string or code
+	// "Consent is required to transfer ownership of a file to another user"
+	// "consentRequiredForOwnershipTransfer"
+	errStr := err.Error()
+	return strings.Contains(errStr, "consentRequiredForOwnershipTransfer") || 
+	       strings.Contains(errStr, "Consent is required")
 }
 
 // GetUserEmail returns the user's email

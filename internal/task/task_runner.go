@@ -2,15 +2,16 @@ package task
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
+	"github.com/FranLegon/cloud-drives-sync/internal/auth"
 	"github.com/FranLegon/cloud-drives-sync/internal/database"
 	"github.com/FranLegon/cloud-drives-sync/internal/google"
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/FranLegon/cloud-drives-sync/internal/microsoft"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
 	"github.com/FranLegon/cloud-drives-sync/internal/telegram"
-	"golang.org/x/oauth2"
 )
 
 // Runner handles task orchestration
@@ -34,7 +35,7 @@ func NewRunner(config *model.Config, db *database.DB, safeMode bool) *Runner {
 // GetOrCreateClient gets or creates a client for a user
 func (r *Runner) GetOrCreateClient(user *model.User) (api.CloudClient, error) {
 	key := string(user.Provider) + ":" + user.Email + user.Phone
-	
+
 	if client, exists := r.clients[key]; exists {
 		return client, nil
 	}
@@ -44,16 +45,10 @@ func (r *Runner) GetOrCreateClient(user *model.User) (api.CloudClient, error) {
 
 	switch user.Provider {
 	case model.ProviderGoogle:
-		config := &oauth2.Config{
-			ClientID:     r.config.GoogleClient.ID,
-			ClientSecret: r.config.GoogleClient.Secret,
-		}
+		config := auth.GetGoogleOAuthConfig(r.config.GoogleClient.ID, r.config.GoogleClient.Secret)
 		client, err = google.NewClient(user, config)
 	case model.ProviderMicrosoft:
-		config := &oauth2.Config{
-			ClientID:     r.config.MicrosoftClient.ID,
-			ClientSecret: r.config.MicrosoftClient.Secret,
-		}
+		config := auth.GetMicrosoftOAuthConfig(r.config.MicrosoftClient.ID, r.config.MicrosoftClient.Secret)
 		client, err = microsoft.NewClient(user, config)
 	case model.ProviderTelegram:
 		client, err = telegram.NewClient(user, r.config.TelegramClient.APIID, r.config.TelegramClient.APIHash)
@@ -292,4 +287,329 @@ func getBackupAccounts(config *model.Config, provider model.Provider) []model.Us
 		}
 	}
 	return accounts
+}
+
+// BalanceStorage checks quotas and moves files to balance storage
+func (r *Runner) BalanceStorage() error {
+	logger.Info("Balancing storage across accounts...")
+
+	// Group users by provider
+	usersByProvider := make(map[model.Provider][]model.User)
+	for _, user := range r.config.Users {
+		usersByProvider[user.Provider] = append(usersByProvider[user.Provider], user)
+	}
+
+	for provider, users := range usersByProvider {
+		if provider != model.ProviderGoogle {
+			logger.Info("Skipping %s (not supported for balancing)", provider)
+			continue
+		}
+
+		logger.Info("Checking quotas for %s...", provider)
+
+		type AccountStatus struct {
+			User     model.User
+			Client   api.CloudClient
+			Quota    *api.QuotaInfo
+			UsagePct float64
+		}
+
+		var sources []*AccountStatus
+		var targets []*AccountStatus
+
+		for _, user := range users {
+			client, err := r.GetOrCreateClient(&user)
+			if err != nil {
+				logger.Error("Failed to create client for %s: %v", user.Email, err)
+				continue
+			}
+
+			quota, err := client.GetQuota()
+			if err != nil {
+				logger.Error("Failed to get quota for %s: %v", user.Email, err)
+				continue
+			}
+
+			usagePct := float64(quota.Used) / float64(quota.Total) * 100
+			status := &AccountStatus{
+				User:     user,
+				Client:   client,
+				Quota:    quota,
+				UsagePct: usagePct,
+			}
+
+			logger.InfoTagged([]string{string(provider), user.Email}, "Usage: %.2f%% (%d/%d bytes)", usagePct, quota.Used, quota.Total)
+
+			if usagePct > 95.0 {
+				sources = append(sources, status)
+			} else if usagePct < 90.0 {
+				targets = append(targets, status)
+			}
+		}
+
+		if len(sources) == 0 {
+			logger.Info("No accounts over quota for %s", provider)
+			continue
+		}
+
+		if len(targets) == 0 {
+			logger.Warning("No accounts with free space available for %s", provider)
+			continue
+		}
+
+		// Sort targets by most free space (descending)
+		sort.Slice(targets, func(i, j int) bool {
+			freeI := targets[i].Quota.Total - targets[i].Quota.Used
+			freeJ := targets[j].Quota.Total - targets[j].Quota.Used
+			return freeI > freeJ
+		})
+
+		// Process sources
+		for _, source := range sources {
+			logger.InfoTagged([]string{string(provider), source.User.Email}, "Account is over quota, looking for files to move...")
+
+			syncFolderID, err := source.Client.GetSyncFolderID()
+			if err != nil {
+				logger.Error("Failed to get sync folder: %v", err)
+				continue
+			}
+
+			files, err := source.Client.ListFiles(syncFolderID)
+			if err != nil {
+				logger.Error("Failed to list files: %v", err)
+				continue
+			}
+
+			// Filter files owned by user and sort by size (descending)
+			var candidates []*model.File
+			for _, f := range files {
+				// Check ownership (Google Drive specific check)
+				if f.OwnerEmail == source.User.Email {
+					candidates = append(candidates, f)
+				}
+			}
+
+			sort.Slice(candidates, func(i, j int) bool {
+				return candidates[i].Size > candidates[j].Size
+			})
+
+			for _, file := range candidates {
+				// Stop if source is safe
+				if source.UsagePct < 90.0 {
+					logger.InfoTagged([]string{string(provider), source.User.Email}, "Account is now under safe threshold")
+					break
+				}
+
+				// Find a target with enough space
+				var target *AccountStatus
+				for _, t := range targets {
+					freeSpace := t.Quota.Total - t.Quota.Used
+					if freeSpace > file.Size {
+						target = t
+						break
+					}
+				}
+
+				if target == nil {
+					logger.Warning("No target account has enough space for file %s (%d bytes)", file.Name, file.Size)
+					continue
+				}
+
+				// Move file (Transfer Ownership)
+				if !r.safeMode {
+					logger.InfoTagged([]string{string(provider), source.User.Email}, "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+					err := source.Client.TransferOwnership(file.ID, target.User.Email)
+					if err != nil {
+						if err == api.ErrOwnershipTransferPending {
+							logger.InfoTagged([]string{string(provider), source.User.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
+							if err := target.Client.AcceptOwnership(file.ID); err != nil {
+								logger.Error("Failed to accept ownership: %v", err)
+								continue
+							}
+						} else {
+							logger.Error("Failed to transfer ownership: %v", err)
+							continue
+						}
+					}
+				} else {
+					logger.DryRunTagged([]string{string(provider), source.User.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+				}
+
+				// Update local quotas
+				source.Quota.Used -= file.Size
+				source.UsagePct = float64(source.Quota.Used) / float64(source.Quota.Total) * 100
+
+				target.Quota.Used += file.Size
+				target.UsagePct = float64(target.Quota.Used) / float64(target.Quota.Total) * 100
+			}
+		}
+	}
+	return nil
+}
+
+// FreeMain transfers all files from main account to backup accounts
+func (r *Runner) FreeMain() error {
+	logger.Info("Freeing up main account storage...")
+
+	// Group users by provider
+	usersByProvider := make(map[model.Provider][]model.User)
+	for _, user := range r.config.Users {
+		usersByProvider[user.Provider] = append(usersByProvider[user.Provider], user)
+	}
+
+	for provider, users := range usersByProvider {
+		if provider != model.ProviderGoogle {
+			logger.Info("Skipping %s (not supported for free-main)", provider)
+			continue
+		}
+
+		// Find main account
+		var mainUser *model.User
+		var backupUsers []model.User
+
+		for i := range users {
+			if users[i].IsMain {
+				mainUser = &users[i]
+			} else {
+				backupUsers = append(backupUsers, users[i])
+			}
+		}
+
+		if mainUser == nil {
+			logger.Warning("No main account found for %s", provider)
+			continue
+		}
+
+		if len(backupUsers) == 0 {
+			logger.Warning("No backup accounts found for %s", provider)
+			continue
+		}
+
+		logger.Info("Processing %s (Main: %s)", provider, mainUser.Email)
+
+		// Initialize main client
+		mainClient, err := r.GetOrCreateClient(mainUser)
+		if err != nil {
+			logger.Error("Failed to create client for main account: %v", err)
+			continue
+		}
+
+		// Get backup accounts status
+		type BackupStatus struct {
+			User   model.User
+			Client api.CloudClient
+			Quota  *api.QuotaInfo
+			Free   int64
+		}
+
+		var targets []*BackupStatus
+
+		for _, user := range backupUsers {
+			client, err := r.GetOrCreateClient(&user)
+			if err != nil {
+				logger.Error("Failed to create client for %s: %v", user.Email, err)
+				continue
+			}
+
+			quota, err := client.GetQuota()
+			if err != nil {
+				logger.Error("Failed to get quota for %s: %v", user.Email, err)
+				continue
+			}
+
+			free := quota.Total - quota.Used
+			// Only consider accounts with some free space
+			if free > 0 {
+				targets = append(targets, &BackupStatus{
+					User:   user,
+					Client: client,
+					Quota:  quota,
+					Free:   free,
+				})
+			}
+		}
+
+		if len(targets) == 0 {
+			logger.Warning("No backup accounts with free space available for %s", provider)
+			continue
+		}
+
+		// List files in main account
+		syncFolderID, err := mainClient.GetSyncFolderID()
+		if err != nil {
+			logger.Error("Failed to get sync folder: %v", err)
+			continue
+		}
+
+		files, err := mainClient.ListFiles(syncFolderID)
+		if err != nil {
+			logger.Error("Failed to list files: %v", err)
+			continue
+		}
+
+		// Filter files owned by main user
+		var candidates []*model.File
+		for _, f := range files {
+			if f.OwnerEmail == mainUser.Email {
+				candidates = append(candidates, f)
+			}
+		}
+
+		if len(candidates) == 0 {
+			logger.Info("No files found in main account to move")
+			continue
+		}
+
+		// Sort files by size (descending) to move big chunks first
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].Size > candidates[j].Size
+		})
+
+		// Move files
+		for _, file := range candidates {
+			// Sort targets by free space (descending) - re-sort each time as space changes
+			sort.Slice(targets, func(i, j int) bool {
+				return targets[i].Free > targets[j].Free
+			})
+
+			// Find best target
+			var target *BackupStatus
+			for _, t := range targets {
+				if t.Free > file.Size {
+					target = t
+					break
+				}
+			}
+
+			if target == nil {
+				logger.Warning("No backup account has enough space for file %s (%d bytes)", file.Name, file.Size)
+				continue
+			}
+
+			// Move file
+			if !r.safeMode {
+				logger.InfoTagged([]string{string(provider), mainUser.Email}, "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+				err := mainClient.TransferOwnership(file.ID, target.User.Email)
+				if err != nil {
+					if err == api.ErrOwnershipTransferPending {
+						logger.InfoTagged([]string{string(provider), mainUser.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
+						if err := target.Client.AcceptOwnership(file.ID); err != nil {
+							logger.Error("Failed to accept ownership: %v", err)
+							continue
+						}
+					} else {
+						logger.Error("Failed to transfer ownership: %v", err)
+						continue
+					}
+				}
+			} else {
+				logger.DryRunTagged([]string{string(provider), mainUser.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+			}
+
+			// Update local state
+			target.Free -= file.Size
+			target.Quota.Used += file.Size
+		}
+	}
+	return nil
 }

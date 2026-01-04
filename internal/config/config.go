@@ -16,7 +16,7 @@ const (
 )
 
 var (
-	ErrConfigNotFound = errors.New("configuration file not found")
+	ErrConfigNotFound  = errors.New("configuration file not found")
 	ErrInvalidPassword = errors.New("invalid master password")
 )
 
@@ -84,7 +84,7 @@ func SaveConfig(cfg *model.Config, masterPassword string) error {
 	// Load or generate salt
 	var salt []byte
 	var err error
-	
+
 	if _, err := os.Stat(saltPath); os.IsNotExist(err) {
 		salt, err = crypto.GenerateAndSaveSalt(saltPath)
 		if err != nil {
@@ -166,9 +166,20 @@ func GetAllAccounts(cfg *model.Config, provider model.Provider) []model.User {
 	return accounts
 }
 
-// AddUser adds a user to the configuration
+// AddUser adds a user to the configuration, replacing any existing entries for the same user
 func AddUser(cfg *model.Config, user model.User) {
-	cfg.Users = append(cfg.Users, user)
+	// Remove existing entries for this user to prevent duplicates
+	var newUsers []model.User
+	for _, u := range cfg.Users {
+		if u.Provider == user.Provider {
+			if (user.Email != "" && u.Email == user.Email) ||
+				(user.Phone != "" && u.Phone == user.Phone) {
+				continue
+			}
+		}
+		newUsers = append(newUsers, u)
+	}
+	cfg.Users = append(newUsers, user)
 }
 
 // UpdateUser updates a user in the configuration

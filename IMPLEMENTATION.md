@@ -146,11 +146,11 @@ cloud-drives-sync/
 6. `remove-duplicates-unsafe` - Auto-remove duplicates (keeps oldest)
 7. `share-with-main` - Verify/repair permissions
 8. `check-tokens` - Validate all authentication tokens
+9. `balance-storage` - Balance storage across accounts
+10. `free-main` - Clear main account storage
 
 ### Advanced Commands (Placeholders)
-9. `sync-providers` - Cross-provider synchronization
-10. `balance-storage` - Balance storage across accounts
-11. `free-main` - Clear main account storage
+11. `sync-providers` - Cross-provider synchronization
 
 ### Utility Commands
 12. `help` - Display help information
@@ -230,8 +230,6 @@ Based on `requirements/requirements_v9.txt`:
 - Microsoft OneDrive implementation (architecture complete)
 - Telegram implementation (architecture complete)
 - Cross-provider synchronization (placeholder)
-- Storage balancing (placeholder)
-- Main account clearing (placeholder)
 
 ### Architectural Foundation ✅
 All components follow the specifications:
@@ -258,8 +256,6 @@ To complete the implementation for full production use:
 
 3. **Implement Advanced Features**
    - Cross-provider file comparison and sync
-   - Storage balancing with quota thresholds
-   - Main account clearing with space verification
 
 4. **Add Comprehensive Tests**
    - Integration tests for OAuth flow

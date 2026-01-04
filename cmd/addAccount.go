@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/auth"
 	"github.com/FranLegon/cloud-drives-sync/internal/config"
@@ -73,13 +74,13 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 
 	// Generate state and auth URL
 	state := auth.GenerateStateToken()
-	authURL := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline)
+	authURL := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 
 	logger.Info("Please visit the following URL to authorize:")
 	fmt.Println(authURL)
 
 	// Wait for callback
-	code, err := server.WaitForCode(state, 120)
+	code, err := server.WaitForCode(state, 120*time.Second)
 	if err != nil {
 		return fmt.Errorf("authorization failed: %w", err)
 	}
@@ -102,6 +103,11 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 	}
 
 	logger.Info("Authorized as: %s", email)
+	if token.RefreshToken != "" {
+		logger.Info("Refresh token received successfully")
+	} else {
+		logger.Warning("No refresh token received - this may cause issues later")
+	}
 
 	// Create user record
 	user := model.User{

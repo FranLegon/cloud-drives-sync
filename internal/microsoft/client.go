@@ -349,6 +349,11 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 	return errors.New("not implemented - OneDrive doesn't support ownership transfer")
 }
 
+// AcceptOwnership accepts ownership
+func (c *Client) AcceptOwnership(fileID string) error {
+	return errors.New("not implemented - OneDrive doesn't support ownership acceptance")
+}
+
 // GetUserEmail returns the user's email
 func (c *Client) GetUserEmail() string {
 	return c.user.Email

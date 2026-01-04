@@ -27,9 +27,9 @@ func runBalanceStorage(cmd *cobra.Command, args []string) error {
 	// Check quotas
 	logger.Info("Checking storage quotas...")
 
-	// TODO: Implement storage balancing logic
-	logger.Info("Storage balancing not yet fully implemented")
-	logger.Info("This would check quotas (95%% threshold) and move large files to accounts with more space")
+	if err := runner.BalanceStorage(); err != nil {
+		return err
+	}
 
 	return nil
 }

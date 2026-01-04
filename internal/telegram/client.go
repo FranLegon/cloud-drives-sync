@@ -143,6 +143,11 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 	return errors.New("not supported - Telegram doesn't have ownership concept")
 }
 
+// AcceptOwnership is not supported
+func (c *Client) AcceptOwnership(fileID string) error {
+	return errors.New("not supported - Telegram doesn't have ownership concept")
+}
+
 // GetUserEmail returns empty (Telegram uses phone)
 func (c *Client) GetUserEmail() string {
 	return ""

@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/auth"
 	"github.com/FranLegon/cloud-drives-sync/internal/config"
@@ -197,13 +198,13 @@ func addMainAccount() error {
 
 	// Generate state and auth URL
 	state := auth.GenerateStateToken()
-	authURL := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline)
+	authURL := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 
 	logger.Info("Please visit the following URL to authorize:")
 	fmt.Println(authURL)
 
 	// Wait for callback
-	code, err := server.WaitForCode(state, 120)
+	code, err := server.WaitForCode(state, 120*time.Second)
 	if err != nil {
 		return fmt.Errorf("authorization failed: %w", err)
 	}

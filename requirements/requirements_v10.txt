@@ -1,0 +1,212 @@
+#### **1. Project Overview & Persona**
+
+You are an expert Go developer specializing in building robust, command-line tools that interact with cloud storage APIs.
+
+Your task is to generate the code for a Go binary named `cloud-drives-sync`. This tool will manage and synchronize files across a user's multiple Google Drive, Microsoft OneDrive for Business, and Telegram accounts. The tool is architected around the concept of a single **main account** (Google provider), which acts as the primary sync target, and one or more **backup accounts** (from any provider), used for storage expansion and data redundancy.
+
+The primary goals are to free main account, de-duplicate files, ensure data is mirrored across providers and balance storage usage between backup accounts.
+
+#### **2. Core Operational Constraint: The "Sync Folder"**
+
+The application must only interact with files and folders contained within specific root folders:
+
+**Google Drive:**
+- A single folder named `synched-cloud-drives` resides in the main account.
+- The main account owns all folders within this structure.
+- Backup accounts own the files but do not own folders.
+
+**Microsoft OneDrive for Business:**
+- Multiple folders named `synched-cloud-drives` (distinguished by account like `synched-cloud-drives-msbackuper1` for msbackuper1@outlook.com, `synched-cloud-drives-msbackuper2` for msbackuper2@outlook.com, etc.) exist, one per backup account.
+- Each backup account owns its own `synched-cloud-drives-accountname` folder and all files within it.
+- Folder owner is always the file owner in OneDrive.
+
+**Telegram:**
+- Heavily relies on metadata.db to track files stored in Telegram, as Telegram does not have a folder structure.
+- Files bigger than Telegram's limits get uploaded as multiple parts, each tracked in the database.
+
+*   **Isolation:** The tool must never read, list, modify, or delete any file or folder outside of the designated `synched-cloud-drives` directories.
+*   **Pre-flight Check:** Before executing any command that interacts with the cloud, the tool must perform a "pre-flight check":
+    *   **Google Drive:** Verifies that exactly one folder named `synched-cloud-drives` is owned by the main account. It will search all active folders and explicitly ignore any folders that are marked as trashed/in the recycle bin. If the folder is found but is not in the root directory, it will be moved there. If more than one active folder with this name are found, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
+    *   **Microsoft OneDrive:** Verifies that each backup account has exactly one `synched-cloud-drives-accountname` folder. If more than one active folder with this name are found in a backup account, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
+    *   **Telegram:** Verifies that the Telegram account is accessible and ready for file operations.
+
+#### **3. Architecture & Design Principles**
+
+*   **Modularity:** Structure the code into logical packages (e.g., `cmd`, `google`, `microsoft`, `telegram`, `database`, `crypto`). All database and cloud provider interactions shall be implemented behind interfaces to allow for future extensions (such as implementing new providers).
+*   **Concurrency:** Use concurrency where it provides a performance benefit without risk, such as making independent, read-only API calls to multiple accounts simultaneously. All database write operations must be performed sequentially from a single thread or goroutine to prevent race conditions and ensure data integrity.
+*   **Configuration Management:** All configuration data (API credentials, user tokens) will be stored in a single encrypted file: `config.json.enc`, located in the same directory as the binary.
+*   **Security:**
+    *   The `config.json.enc` file will be encrypted using AES-256 GCM.
+    *   The encryption key will be derived from a user-provided master password using the Argon2id key derivation function. The binary will require this master password on every execution to decrypt the configuration.
+    *   A unique, cryptographically secure salt will be generated on the first run and stored in a file named `config.salt`. If this file already exists, it will be used for all subsequent key derivations.
+*   **API Interaction:**
+    *   For each provider, prefer using the official Golang SDK/package when available. Use REST API directly as a fallback when SDK errors or it's functionality is insufficient or unavailable.
+    *   Use streaming for all file uploads and downloads to minimize memory consumption.
+    *   Implement exponential backoff and retry mechanisms for all API calls to handle transient network errors and rate limiting gracefully.
+*   **Database:**
+    *   Use an encrypted SQLite database located at `metadata.db`. The database file itself will be encrypted using a library like SQLCipher.
+    *   **Direct Access:** The decryption password for the database will be the user's raw master password. This allows the user to access and query the database outside of the CLI using a compatible database tool. The database login user will be `owner`.
+*   **Logging and Exit Codes:**
+    *   Log all major actions, successes, and detailed errors to the console. Logs should be prefixed with tags when appropriate (e.g., `[Google]`, `[Microsoft]`, `[Telegram]`, `[main.user@gmail.com]`).
+    *   The application will exit with a status code of `0` on success and a non-zero status code on any error, making it suitable for scripting.
+
+#### **4. Configuration Schema**
+
+*`config.json` (before encryption):*
+```json
+{
+  "google_client": {
+    "id": "YOUR_GCP_CLIENT_ID",
+    "secret": "YOUR_GCP_CLIENT_SECRET"
+  },
+  "microsoft_client": {
+    "id": "YOUR_AZURE_CLIENT_ID",
+    "secret": "YOUR_AZURE_CLIENT_SECRET"
+  },
+  "telegram_client": {
+    "api_id": "YOUR_TELEGRAM_API_ID",
+    "api_hash": "YOUR_TELEGRAM_API_HASH",
+    "phone": "YOUR_PHONE_NUMBER"
+  },
+  "users": [
+    {
+      "provider": "Google",
+      "email": "main.user@gmail.com",
+      "is_main": true,
+      "refresh_token": "..."
+    },
+    {
+      "provider": "Google",
+      "email": "backup1@gmail.com",
+      "is_main": false,
+      "refresh_token": "..."
+    },
+    {
+      "provider": "Microsoft",
+      "email": "main.user@company.com",
+      "is_main": false,
+      "refresh_token": "..."
+    },
+    {
+      "provider": "Microsoft",
+      "email": "work.backup@company.com",
+      "is_main": false,
+      "sync_folder_name": "synched-cloud-drives-1",
+      "refresh_token": "..."
+    },
+    {
+      "provider": "Telegram",
+      "phone": "+1234567890",
+      "is_main": false,
+      "session_data": "..."
+    }
+  ]
+}
+```
+
+**Note:** The coding agent will design the appropriate database schema to support the functionality described in this document.
+
+---
+
+#### **5A. Detailed Functionality (Command-Line commands)**
+
+*   **`init`**
+    *   Handles first-time setup: prompts for a master password, generates `config.salt` (if absent), creates the encrypted `config.json.enc` after prompting for client credentials,  creates the encrypted `metadata.db` and adds **main account** (initiating an OAuth 2.0 flow by starting a local web server.)
+    *   **OAuth Scopes:** 
+        *   Google: Requests `https://www.googleapis.com/auth/drive` and `https://www.googleapis.com/auth/userinfo.email`.
+        *   Microsoft: Requests `files.readwrite.all`, `user.read`, and `offline_access` for OneDrive for Business.
+        *   Telegram: Uses Telegram API authentication with phone number and verification code.
+    *   **Microsoft Account Types:** The Azure App Registration must be configured to support "Accounts in any organizational directory (Any Azure AD directory - Multitenant)" for OneDrive for Business.
+    *   After adding a Google main account, it creates the `synched-cloud-drives` folder in that account's root if it doesn't exist.
+
+*   **`add-account`**
+    *   Adds a **backup account** to a provider.
+    *   Exits with an error if no main account exists.
+    *   Initiates OAuth 2.0 flow by starting a local web server.
+    *   **Google Drive:** Upon successful authorization, the main account shares its `synched-cloud-drives` folder with the new backup account, granting "editor" permissions.
+    *   **Microsoft OneDrive:** Upon successful authorization, prompts for a unique sync folder name (e.g., `synched-cloud-drives-msexample`) and creates this folder in the backup account's root.
+    *   **Telegram:** Allows adding Telegram account for backup storage purposes.
+
+*   **`get-metadata`**
+    *   After passing the pre-flight checks, it recursively scans the designated sync folders for every account.
+    *   **Google Drive:** Scans the `synched-cloud-drives` folder and all shared content within it.
+    *   **Microsoft OneDrive:** Scans all `synched-cloud-drives-accountname` folders.
+    *   **Telegram:** Lists all files stored in the Telegram account.
+    *   For each file, it first attempts to get the provider-native hash from the API.
+    *   **Hashing Fallback:** If a provider-native hash is not available (e.g., for Google Docs, Sheets, or other proprietary types), the tool **must** download a standard export of the file (e.g., PDF for Docs, XLSX for Sheets) and calculate its SHA-256 hash locally. The hash field and algorithm field must always be populated in SQLite. This fallback action will be logged to the console.
+    *   Updates the file and folder records in the local encrypted database.
+
+*   **`check-for-duplicates`**
+    *   First, runs the `get-metadata` logic to ensure the local DB is up-to-date.
+    *   Then, queries the DB to find records with identical file hashes *within the same provider*.
+    *   Prints a list of duplicate files grouped by hash.
+
+*   **`remove-duplicates`**
+    *   Performs the `check-for-duplicates` action. For each set of duplicates, it prompts the user to select which file(s) to delete.
+
+*   **`remove-duplicates-unsafe`**
+    *   Performs the `check-for-duplicates` action. For each set of duplicates, it automatically deletes all copies except the one with the oldest creation date.
+
+*   **`share-with-main`**
+    *   A utility command to repair permissions.
+    *   **Google Drive:** After passing the pre-flight check, it verifies that every backup account has "editor" access to the main account's `synched-cloud-drives` folder and re-applies the permission if it is missing.
+
+*   **`sync-providers`**
+    *   Ensures metadata is current by running the `get-metadata` logic.
+    *   **Goal:** Make file content within sync folders consistent across Google Drive, Microsoft OneDrive, and Telegram.
+    *   **Logic:** Compares file sets using normalized paths and file hashes. If a file is missing on one side, it's uploaded, replicating the directory structure. 
+    #WIP# Clarify how onedrive accounts might have duplicated folders accross accounts but not duplicated files#. If a file exists at the same path but with a different hash, it's treated as a conflict, and the incoming file is renamed with a `_conflict_YYYY-MM-DD_hh-mm-ss` suffix before upload.
+    *   **Telegram Handling:** Files can be pushed to Telegram as backups but consider its limitations (file size limits, access patterns).
+
+*   **`balance-storage`**
+    *   After passing the pre-flight check, it checks the storage quota for every configured account.
+    *   If any single backup account is over 95% full, it identifies the largest files in that account's sync folders.
+    *   It then moves these files, one by one, to a backup account of the **same provider** with the most available free space until the source account is below the 90% threshold.
+    *   **Google Drive:** Will first attempt a native API ownership transfer. If that fails, is unsupported or requires manually accepting the transfership, it will fall back to a download/re-upload/delete process, ensuring metadata is preserved. Never delete original until reupload is confirmed.
+    *   **Microsoft OneDrive:** download/re-upload/delete process.
+    *   **Telegram:** Storage balancing doesn't apply as there's no max quota.
+
+*   **`free-main`**
+    *   Transfers all files from main account's sync folder to its associated backup accounts (Google only).
+    *   For each file, it chooses the backup account with the most available free space. It will throw an error if the backup accounts lack sufficient combined space.
+    *   Uses the same ownership transfer/fallback logic as `balance-storage`.
+
+*   **`check-tokens`**
+    *   Iterates through all refresh tokens in the config. For each, it attempts a simple, read-only API call. It reports any tokens that have expired or been revoked, indicating which account needs re-authentication.
+    *   Includes Telegram session validation.
+
+*   **`help`**
+    *   Lists all available commands, their purpose, and example usage.
+
+#### **5B. Detailed Functionality (Command-Line flags)**
+
+*   **`--safe`, `-s`**
+    *   A modifier flag that can be used with any state-changing command (e.g., `remove-duplicates-unsafe --safe`).
+    *   When active, no write, delete, or permission-change operations are sent to the cloud providers.
+    *   Instead, the tool will print a detailed log of what actions *would* have been taken. Example: `[DRY RUN] DELETE GDrive file 'duplicate.txt' (FileID: xyz) from account 'backup@gmail.com'`.
+    *   Read-only operations and local DB modifications are still allowed.
+
+*   **`--help`, `-h`**
+    *   A modifier flag that can be used with any command (e.g., `cloud-drives-sync free-main --help`) to get more information on how it works.
+
+#### **6. Provider-Specific Notes**
+
+**Google Drive:**
+- Main account owns folders; backup accounts own files.
+- Single `synched-cloud-drives` folder shared among all accounts.
+
+**Microsoft OneDrive for Business:**
+- Each backup account owns its own `synched-cloud-drives-accountname` folder.
+- Folder owner is always the file owner.
+- All backup folders are shared with the main account.
+- Main account coordinates operations across all backup folders.
+
+**Telegram:**
+- Single account acting as a backup storage mechanism.
+- No main/backup distinction for Telegram.
+- Subject to Telegram API file size limits and rate limits.
+- Files stored via Telegram's "Saved Messages" or a dedicated channel.
+
+#### **7. Expected Response**
+
+This must be a fully-implemented, production-ready project. There must be absolutely no TODOs, stubs, or placeholders. The coding agent will implement the complete Go project based on this v9 specification.

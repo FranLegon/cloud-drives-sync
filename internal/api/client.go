@@ -1,9 +1,15 @@
 package api
 
 import (
+	"errors"
 	"io"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
+)
+
+var (
+	// ErrOwnershipTransferPending indicates that ownership transfer requires acceptance
+	ErrOwnershipTransferPending = errors.New("ownership transfer pending acceptance")
 )
 
 // QuotaInfo represents storage quota information
@@ -41,6 +47,7 @@ type CloudClient interface {
 
 	// Ownership transfer (Google Drive specific)
 	TransferOwnership(fileID, newOwnerEmail string) error
+	AcceptOwnership(fileID string) error
 
 	// User information
 	GetUserEmail() string
