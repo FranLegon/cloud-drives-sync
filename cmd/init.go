@@ -42,27 +42,35 @@ func runInit(cmd *cobra.Command, args []string) error {
 }
 
 func firstTimeInit() error {
-	// Prompt for master password
-	prompt := promptui.Prompt{
-		Label: "Create Master Password",
-		Mask:  '*',
-	}
-	password, err := prompt.Run()
-	if err != nil {
-		return fmt.Errorf("failed to read password: %w", err)
-	}
+	var password string
+	var err error
 
-	confirmPrompt := promptui.Prompt{
-		Label: "Confirm Master Password",
-		Mask:  '*',
-	}
-	confirmPassword, err := confirmPrompt.Run()
-	if err != nil {
-		return fmt.Errorf("failed to read password confirmation: %w", err)
-	}
+	if passwordFlag != "" {
+		password = passwordFlag
+		logger.Info("Using provided master password")
+	} else {
+		// Prompt for master password
+		prompt := promptui.Prompt{
+			Label: "Create Master Password",
+			Mask:  '*',
+		}
+		password, err = prompt.Run()
+		if err != nil {
+			return fmt.Errorf("failed to read password: %w", err)
+		}
 
-	if password != confirmPassword {
-		return fmt.Errorf("passwords do not match")
+		confirmPrompt := promptui.Prompt{
+			Label: "Confirm Master Password",
+			Mask:  '*',
+		}
+		confirmPassword, err := confirmPrompt.Run()
+		if err != nil {
+			return fmt.Errorf("failed to read password confirmation: %w", err)
+		}
+
+		if password != confirmPassword {
+			return fmt.Errorf("passwords do not match")
+		}
 	}
 
 	// Prompt for client credentials
@@ -136,14 +144,21 @@ func firstTimeInit() error {
 }
 
 func addMainAccount() error {
-	// Prompt for password
-	prompt := promptui.Prompt{
-		Label: "Master Password",
-		Mask:  '*',
-	}
-	password, err := prompt.Run()
-	if err != nil {
-		return fmt.Errorf("failed to read password: %w", err)
+	var password string
+	var err error
+
+	if passwordFlag != "" {
+		password = passwordFlag
+	} else {
+		// Prompt for password
+		prompt := promptui.Prompt{
+			Label: "Master Password",
+			Mask:  '*',
+		}
+		password, err = prompt.Run()
+		if err != nil {
+			return fmt.Errorf("failed to read password: %w", err)
+		}
 	}
 
 	// Load configuration

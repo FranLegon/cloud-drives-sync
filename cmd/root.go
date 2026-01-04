@@ -15,6 +15,7 @@ import (
 
 var (
 	safeMode       bool
+	passwordFlag   string
 	cfg            *model.Config
 	db             *database.DB
 	masterPassword string
@@ -33,19 +34,25 @@ and Telegram.`,
 			return nil
 		}
 
-		// Prompt for master password
-		prompt := promptui.Prompt{
-			Label: "Master Password",
-			Mask:  '*',
-		}
+		// Get master password
+		if passwordFlag != "" {
+			masterPassword = passwordFlag
+		} else {
+			// Prompt for master password
+			prompt := promptui.Prompt{
+				Label: "Master Password",
+				Mask:  '*',
+			}
 
-		password, err := prompt.Run()
-		if err != nil {
-			return fmt.Errorf("failed to read password: %w", err)
+			password, err := prompt.Run()
+			if err != nil {
+				return fmt.Errorf("failed to read password: %w", err)
+			}
+			masterPassword = password
 		}
-		masterPassword = password
 
 		// Load configuration
+		var err error
 		cfg, err = config.LoadConfig(masterPassword)
 		if err != nil {
 			if err == config.ErrConfigNotFound {
@@ -83,6 +90,7 @@ func Execute() {
 
 func init() {
 	rootCmd.PersistentFlags().BoolVarP(&safeMode, "safe", "s", false, "Dry run mode - no actual changes will be made")
+	rootCmd.PersistentFlags().StringVarP(&passwordFlag, "password", "p", "", "Master password (non-interactive)")
 }
 
 // getTaskRunner creates a task runner with current config and db
