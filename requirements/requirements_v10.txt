@@ -111,13 +111,14 @@ The application must only interact with files and folders contained within speci
 #### **5A. Detailed Functionality (Command-Line commands)**
 
 *   **`init`**
-    *   Handles first-time setup: prompts for a master password, generates `config.salt` (if absent), creates the encrypted `config.json.enc` after prompting for client credentials,  creates the encrypted `metadata.db` and adds **main account** (initiating an OAuth 2.0 flow by starting a local web server.)
+    *   Handles first-time setup: prompts for a master password, generates `config.salt` (if absent), creates the encrypted `config.json.enc` after prompting for client credentials, creates the encrypted `metadata.db` and adds **main account** (initiating an OAuth 2.0 flow by starting a local web server.)
     *   **OAuth Scopes:** 
         *   Google: Requests `https://www.googleapis.com/auth/drive` and `https://www.googleapis.com/auth/userinfo.email`.
         *   Microsoft: Requests `files.readwrite.all`, `user.read`, and `offline_access` for OneDrive for Business.
         *   Telegram: Uses Telegram API authentication with phone number and verification code.
     *   **Microsoft Account Types:** The Azure App Registration must be configured to support "Accounts in any organizational directory (Any Azure AD directory - Multitenant)" for OneDrive for Business.
     *   After adding a Google main account, it creates the `sync-cloud-drives` folder in that account's root if it doesn't exist.
+    *   Subsequent runs of `init` allows updating client credentials or main account.
 
 *   **`add-account`**
     *   Adds a **backup account** to a provider.
@@ -190,6 +191,12 @@ The application must only interact with files and folders contained within speci
 
 *   **`--password`, `-p`**
     *   A global flag that allows the user to provide the master password non-interactively for scripting purposes. If omitted, the tool will prompt for the password interactively.
+
+*   **`--json`, `-j`**
+    *   Flag specific to init command: allows to pass json as string containing all client credentials instead of prompting interactively.
+
+*   **`--getjson`, `-g`**
+    *   Flag specific to init command: after prompting for client credentials, outputs the equivalent json string to stdout for easier scripting.
 
 #### **6. Provider-Specific Notes**
 

@@ -16,18 +16,18 @@ const (
 
 // Client represents a Telegram client
 type Client struct {
-	user   *model.User
-	apiID  string
+	user    *model.User
+	apiID   string
 	apiHash string
-	userID int64
-	chatID int64
+	userID  int64
+	chatID  int64
 }
 
 // NewClient creates a new Telegram client
 func NewClient(user *model.User, apiID string, apiHash string) (*Client, error) {
 	// Note: Full TDLib integration requires native C++ libraries
 	// This is a simplified implementation that provides the interface structure
-	
+
 	if user.SessionData == "" {
 		logger.WarningTagged([]string{"Telegram", user.Phone}, "No session data - authentication required")
 		return nil, fmt.Errorf("telegram authentication required - please configure session")
@@ -38,8 +38,8 @@ func NewClient(user *model.User, apiID string, apiHash string) (*Client, error) 
 		apiID:   apiID,
 		apiHash: apiHash,
 		// In a full implementation, these would be initialized from TDLib
-		userID:  0,
-		chatID:  0,
+		userID: 0,
+		chatID: 0,
 	}
 
 	return c, nil
@@ -52,7 +52,7 @@ func (c *Client) PreFlightCheck() error {
 	if c.user.SessionData == "" {
 		return fmt.Errorf("no session data - authentication required")
 	}
-	
+
 	logger.InfoTagged([]string{"Telegram", c.user.Phone}, "Pre-flight check passed (simplified implementation)")
 	return nil
 }

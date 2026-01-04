@@ -88,14 +88,14 @@ func (c *Client) initializeDrive() error {
 // PreFlightCheck verifies the sync folder structure
 func (c *Client) PreFlightCheck() error {
 	ctx := context.Background()
-	
+
 	if !c.user.IsMain && c.user.SyncFolderName != "" {
 		// List root children to find the sync folder
 		result, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId("root").Children().Get(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("failed to list root: %w", err)
 		}
-		
+
 		found := false
 		for _, item := range result.GetValue() {
 			if item.GetName() != nil && *item.GetName() == c.user.SyncFolderName && item.GetFolder() != nil {
@@ -104,11 +104,11 @@ func (c *Client) PreFlightCheck() error {
 				break
 			}
 		}
-		
+
 		if !found {
 			return fmt.Errorf("sync folder '%s' not found", c.user.SyncFolderName)
 		}
-		
+
 		logger.InfoTagged([]string{"Microsoft", c.user.Email}, "Found sync folder '%s' (%s)", c.user.SyncFolderName, c.syncFolderID)
 		return nil
 	} else if c.user.IsMain {

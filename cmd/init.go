@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -16,6 +17,11 @@ import (
 	"golang.org/x/oauth2"
 )
 
+var (
+	jsonFlag    string
+	getJsonFlag bool
+)
+
 var initCmd = &cobra.Command{
 	Use:   "init",
 	Short: "Initialize the application or add a main account",
@@ -26,6 +32,8 @@ to add main accounts for Google Drive and Microsoft OneDrive.`,
 }
 
 func init() {
+	initCmd.Flags().StringVarP(&jsonFlag, "json", "j", "", "JSON string containing client credentials")
+	initCmd.Flags().BoolVarP(&getJsonFlag, "getjson", "g", false, "Output configuration as JSON string")
 	rootCmd.AddCommand(initCmd)
 }
 
@@ -74,45 +82,68 @@ func firstTimeInit() error {
 	}
 
 	// Prompt for client credentials
-	logger.Info("Enter API client credentials (leave blank to skip provider)")
+	var cfg *model.Config
 
-	googleIDPrompt := promptui.Prompt{Label: "Google Client ID"}
-	googleID, _ := googleIDPrompt.Run()
+	if jsonFlag != "" {
+		logger.Info("Using provided JSON configuration")
+		cfg = &model.Config{}
+		if err := json.Unmarshal([]byte(jsonFlag), cfg); err != nil {
+			return fmt.Errorf("failed to parse JSON configuration: %w", err)
+		}
+		// Ensure users slice is initialized
+		if cfg.Users == nil {
+			cfg.Users = []model.User{}
+		}
+	} else {
+		logger.Info("Enter API client credentials (leave blank to skip provider)")
 
-	googleSecretPrompt := promptui.Prompt{Label: "Google Client Secret", Mask: '*'}
-	googleSecret, _ := googleSecretPrompt.Run()
+		googleIDPrompt := promptui.Prompt{Label: "Google Client ID"}
+		googleID, _ := googleIDPrompt.Run()
 
-	msIDPrompt := promptui.Prompt{Label: "Microsoft Client ID"}
-	msID, _ := msIDPrompt.Run()
+		googleSecretPrompt := promptui.Prompt{Label: "Google Client Secret", Mask: '*'}
+		googleSecret, _ := googleSecretPrompt.Run()
 
-	msSecretPrompt := promptui.Prompt{Label: "Microsoft Client Secret", Mask: '*'}
-	msSecret, _ := msSecretPrompt.Run()
+		msIDPrompt := promptui.Prompt{Label: "Microsoft Client ID"}
+		msID, _ := msIDPrompt.Run()
 
-	telegramIDPrompt := promptui.Prompt{Label: "Telegram API ID"}
-	telegramID, _ := telegramIDPrompt.Run()
+		msSecretPrompt := promptui.Prompt{Label: "Microsoft Client Secret", Mask: '*'}
+		msSecret, _ := msSecretPrompt.Run()
 
-	telegramHashPrompt := promptui.Prompt{Label: "Telegram API Hash", Mask: '*'}
-	telegramHash, _ := telegramHashPrompt.Run()
+		telegramIDPrompt := promptui.Prompt{Label: "Telegram API ID"}
+		telegramID, _ := telegramIDPrompt.Run()
 
-	telegramPhonePrompt := promptui.Prompt{Label: "Telegram Phone"}
-	telegramPhone, _ := telegramPhonePrompt.Run()
+		telegramHashPrompt := promptui.Prompt{Label: "Telegram API Hash", Mask: '*'}
+		telegramHash, _ := telegramHashPrompt.Run()
 
-	// Create configuration
-	cfg := &model.Config{
-		GoogleClient: model.GoogleClient{
-			ID:     googleID,
-			Secret: googleSecret,
-		},
-		MicrosoftClient: model.MicrosoftClient{
-			ID:     msID,
-			Secret: msSecret,
-		},
-		TelegramClient: model.TelegramClient{
-			APIID:   telegramID,
-			APIHash: telegramHash,
-			Phone:   telegramPhone,
-		},
-		Users: []model.User{},
+		telegramPhonePrompt := promptui.Prompt{Label: "Telegram Phone"}
+		telegramPhone, _ := telegramPhonePrompt.Run()
+
+		// Create configuration
+		cfg = &model.Config{
+			GoogleClient: model.GoogleClient{
+				ID:     googleID,
+				Secret: googleSecret,
+			},
+			MicrosoftClient: model.MicrosoftClient{
+				ID:     msID,
+				Secret: msSecret,
+			},
+			TelegramClient: model.TelegramClient{
+				APIID:   telegramID,
+				APIHash: telegramHash,
+				Phone:   telegramPhone,
+			},
+			Users: []model.User{},
+		}
+	}
+
+	// Output JSON if requested
+	if getJsonFlag {
+		jsonData, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal configuration: %w", err)
+		}
+		fmt.Println(string(jsonData))
 	}
 
 	// Save configuration

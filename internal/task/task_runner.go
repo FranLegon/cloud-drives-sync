@@ -661,7 +661,7 @@ func (r *Runner) SyncProviders() error {
 	for path, fileMap := range filesByPath {
 		// Determine master file (prioritize Google, then Microsoft, then Telegram)
 		var masterFile *model.File
-		
+
 		if f, ok := fileMap[model.ProviderGoogle]; ok {
 			masterFile = f
 		} else if f, ok := fileMap[model.ProviderMicrosoft]; ok {
@@ -678,7 +678,7 @@ func (r *Runner) SyncProviders() error {
 			if _, exists := fileMap[provider]; !exists {
 				// File missing in this provider
 				logger.Info("File %s missing in %s", path, provider)
-				
+
 				if !r.safeMode {
 					// Logic to copy file would go here:
 					// 1. Get source client

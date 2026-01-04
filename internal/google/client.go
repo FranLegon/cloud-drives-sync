@@ -476,7 +476,7 @@ func (c *Client) AcceptOwnership(fileID string) error {
 	var permID string
 	for _, p := range perms.Permissions {
 		logger.InfoTagged([]string{"Google", c.user.Email}, "Checking permission: ID=%s, Role=%s, Email=%s, PendingOwner=%v", p.Id, p.Role, p.EmailAddress, p.PendingOwner)
-		
+
 		// Check if this permission is for me and is pending owner
 		if p.PendingOwner {
 			// If email is present, verify it matches
@@ -510,8 +510,8 @@ func isConsentRequiredError(err error) bool {
 	// "Consent is required to transfer ownership of a file to another user"
 	// "consentRequiredForOwnershipTransfer"
 	errStr := err.Error()
-	return strings.Contains(errStr, "consentRequiredForOwnershipTransfer") || 
-	       strings.Contains(errStr, "Consent is required")
+	return strings.Contains(errStr, "consentRequiredForOwnershipTransfer") ||
+		strings.Contains(errStr, "Consent is required")
 }
 
 // GetUserEmail returns the user's email
