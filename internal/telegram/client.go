@@ -335,7 +335,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			}
 
 			fullPath := meta.FolderPath + "/" + meta.FileName
-			
+
 			// Get file size from media
 			var partSize int64
 			if media, ok := msg.Media.(*tg.MessageMediaDocument); ok {
@@ -393,7 +393,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				file := fileMap[fullPath]
 				file.Fragments = append(file.Fragments, fragment)
 				file.Size += partSize // Accumulate size
-				
+
 				// If this is part 1, set the main ID
 				if meta.Part == 1 {
 					file.ID = strconv.Itoa(msg.ID)
@@ -423,7 +423,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			}
 			// Set CalculatedID with total size
 			file.CalculatedID = fmt.Sprintf("%s-%d", file.Name, file.Size)
-			
+
 			// Set FileID for all fragments
 			for _, frag := range file.Fragments {
 				frag.FileID = file.ID
@@ -448,7 +448,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		file := &model.File{
 			ID:               fragment.ID,
 			Name:             name,
@@ -470,7 +470,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 
 	// Split upload
 	totalParts := int(math.Ceil(float64(size) / float64(maxPartSize)))
-	
+
 	logicalFile := &model.File{
 		Name:       name,
 		Path:       folderID + "/" + name,
@@ -493,16 +493,16 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		if err != nil {
 			return nil, fmt.Errorf("failed to upload part %d: %w", i, err)
 		}
-		
+
 		logicalFile.Fragments = append(logicalFile.Fragments, fragment)
-		
+
 		if i == 1 {
 			logicalFile.ID = fragment.ID
 			logicalFile.TelegramUniqueID = fragment.TelegramUniqueID
 		}
 		fragment.FileID = logicalFile.ID
 	}
-	
+
 	logicalFile.CalculatedID = fmt.Sprintf("%s-%d", name, size)
 
 	return logicalFile, nil
@@ -541,17 +541,17 @@ func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size 
 	if err != nil {
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
-	
+
 	// Get message ID from updates
 	var msgID int
 	// This is tricky with gotd/message sender, it returns Updates.
 	// We need to parse updates to find the message ID.
 	// For now, we might need to list history or assume it's the last one?
 	// Or use the Updates object.
-	
-	// Simplified: assume we can get it. 
+
+	// Simplified: assume we can get it.
 	// Actually, sender.File returns (tg.UpdatesClass, error).
-	
+
 	switch u := updates.(type) {
 	case *tg.Updates:
 		for _, m := range u.Updates {
@@ -572,7 +572,7 @@ func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size 
 			}
 		}
 	}
-	
+
 	// If we couldn't find msgID, we might have a problem.
 	// But for now let's proceed.
 

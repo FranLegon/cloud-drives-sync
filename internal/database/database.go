@@ -178,6 +178,95 @@ func (db *DB) InsertFolder(folder *model.Folder) error {
 	return err
 }
 
+// BatchInsertFiles inserts multiple files and their fragments in a single transaction
+func (db *DB) BatchInsertFiles(files []*model.File) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	fileStmt, err := tx.Prepare(`
+	INSERT OR REPLACE INTO files (
+		id, name, path, size, 
+		googledrive_hash, googledrive_id, onedrive_hash, onedrive_id, telegram_unique_id,
+		calculated_sha256_hash, calculated_id,
+		provider, user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
+		split, total_parts
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer fileStmt.Close()
+
+	fragmentStmt, err := tx.Prepare(`
+	INSERT OR REPLACE INTO files_fragments (
+		id, file_id, name, size, part, telegram_unique_id
+	) VALUES (?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer fragmentStmt.Close()
+
+	for _, file := range files {
+		_, err := fileStmt.Exec(
+			file.ID, file.Name, file.Path, file.Size,
+			file.GoogleDriveHash, file.GoogleDriveID, file.OneDriveHash, file.OneDriveID, file.TelegramUniqueID,
+			file.CalculatedSHA256Hash, file.CalculatedID,
+			string(file.Provider), file.UserEmail, file.UserPhone,
+			file.CreatedTime, file.ModifiedTime, file.OwnerEmail, file.ParentFolderID,
+			file.Split, file.TotalParts,
+		)
+		if err != nil {
+			return err
+		}
+
+		for _, fragment := range file.Fragments {
+			_, err := fragmentStmt.Exec(
+				fragment.ID, fragment.FileID, fragment.Name, fragment.Size, fragment.Part, fragment.TelegramUniqueID,
+			)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
+// BatchInsertFolders inserts multiple folders in a single transaction
+func (db *DB) BatchInsertFolders(folders []*model.Folder) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+	INSERT OR REPLACE INTO folders (
+		id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, folder := range folders {
+		_, err := stmt.Exec(
+			folder.ID, folder.Name, folder.Path, string(folder.Provider),
+			folder.UserEmail, folder.UserPhone, folder.ParentFolderID, folder.OwnerEmail,
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 // GetFilesByCalculatedID returns all files with a specific calculated ID
 func (db *DB) GetFilesByCalculatedID(calculatedID string, provider model.Provider) ([]*model.File, error) {
 	query := `

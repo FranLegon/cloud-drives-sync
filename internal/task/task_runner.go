@@ -3,6 +3,8 @@ package task
 import (
 	"fmt"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
 	"github.com/FranLegon/cloud-drives-sync/internal/auth"
@@ -88,37 +90,122 @@ func (r *Runner) RunPreFlightChecks() error {
 func (r *Runner) GetMetadata() error {
 	logger.Info("Gathering metadata from all providers...")
 
+	fileChan := make(chan *model.File, 1000)
+	folderChan := make(chan *model.Folder, 1000)
+
+	// Start DB writer
+	var dbWg sync.WaitGroup
+	dbWg.Add(1)
+	go func() {
+		defer dbWg.Done()
+		r.dbWriter(fileChan, folderChan)
+	}()
+
+	var wg sync.WaitGroup
+
 	for i := range r.config.Users {
-		user := &r.config.Users[i]
-		client, err := r.GetOrCreateClient(user)
-		if err != nil {
-			logger.ErrorTagged([]string{string(user.Provider)}, "Failed to create client: %v", err)
-			continue
-		}
+		wg.Add(1)
+		go func(user *model.User) {
+			defer wg.Done()
 
-		// Get sync folder ID
-		syncFolderID, err := client.GetSyncFolderID()
-		if err != nil {
-			logger.ErrorTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to get sync folder: %v", err)
-			continue
-		}
+			client, err := r.GetOrCreateClient(user)
+			if err != nil {
+				logger.ErrorTagged([]string{string(user.Provider)}, "Failed to create client: %v", err)
+				return
+			}
 
-		if syncFolderID == "" {
-			logger.InfoTagged([]string{string(user.Provider), user.Email + user.Phone}, "No sync folder, skipping")
-			continue
-		}
+			// Get sync folder ID
+			syncFolderID, err := client.GetSyncFolderID()
+			if err != nil {
+				logger.ErrorTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to get sync folder: %v", err)
+				return
+			}
 
-		// Scan files
-		if err := r.scanFolder(client, user, syncFolderID, ""); err != nil {
-			logger.ErrorTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to scan folder: %v", err)
-		}
+			if syncFolderID == "" {
+				logger.InfoTagged([]string{string(user.Provider), user.Email + user.Phone}, "No sync folder, skipping")
+				return
+			}
+
+			// Scan files
+			if err := r.scanFolder(client, user, syncFolderID, "", fileChan, folderChan); err != nil {
+				logger.ErrorTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to scan folder: %v", err)
+			}
+		}(&r.config.Users[i])
 	}
+
+	wg.Wait()
+	close(fileChan)
+	close(folderChan)
+	dbWg.Wait()
 
 	logger.Info("Metadata gathering complete")
 	return nil
 }
 
-func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, pathPrefix string) error {
+func (r *Runner) dbWriter(fileChan <-chan *model.File, folderChan <-chan *model.Folder) {
+	const batchSize = 500
+	const flushInterval = 2 * time.Second
+
+	var fileBuffer []*model.File
+	var folderBuffer []*model.Folder
+
+	ticker := time.NewTicker(flushInterval)
+	defer ticker.Stop()
+
+	flushFiles := func() {
+		if len(fileBuffer) > 0 {
+			if err := r.db.BatchInsertFiles(fileBuffer); err != nil {
+				logger.Error("Failed to batch insert files: %v", err)
+			}
+			fileBuffer = nil
+		}
+	}
+
+	flushFolders := func() {
+		if len(folderBuffer) > 0 {
+			if err := r.db.BatchInsertFolders(folderBuffer); err != nil {
+				logger.Error("Failed to batch insert folders: %v", err)
+			}
+			folderBuffer = nil
+		}
+	}
+
+	for {
+		select {
+		case file, ok := <-fileChan:
+			if !ok {
+				fileChan = nil
+			} else {
+				fileBuffer = append(fileBuffer, file)
+				if len(fileBuffer) >= batchSize {
+					flushFiles()
+				}
+			}
+		case folder, ok := <-folderChan:
+			if !ok {
+				folderChan = nil
+			} else {
+				folderBuffer = append(folderBuffer, folder)
+				if len(folderBuffer) >= batchSize {
+					flushFolders()
+				}
+			}
+		case <-ticker.C:
+			flushFiles()
+			flushFolders()
+		}
+
+		if fileChan == nil && folderChan == nil {
+			break
+		}
+	}
+
+	// Final flush
+	flushFiles()
+	flushFolders()
+}
+
+func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, pathPrefix string, fileChan chan<- *model.File, folderChan chan<- *model.Folder) error {
 	// List and store files
 	files, err := client.ListFiles(folderID)
 	if err != nil {
@@ -127,16 +214,7 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 
 	for _, file := range files {
 		file.Path = pathPrefix + "/" + file.Name
-		if err := r.db.InsertFile(file); err != nil {
-			logger.WarningTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to insert file %s: %v", file.Name, err)
-		}
-		
-		// Insert fragments if any
-		for _, fragment := range file.Fragments {
-			if err := r.db.InsertFileFragment(fragment); err != nil {
-				logger.WarningTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to insert fragment for file %s: %v", file.Name, err)
-			}
-		}
+		fileChan <- file
 	}
 
 	logger.InfoTagged([]string{string(user.Provider), user.Email + user.Phone}, "Found %d files in folder %s", len(files), folderID)
@@ -149,13 +227,11 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 
 	for _, folder := range folders {
 		folder.Path = pathPrefix + "/" + folder.Name
-		if err := r.db.InsertFolder(folder); err != nil {
-			logger.WarningTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to insert folder %s: %v", folder.Name, err)
-		}
+		folderChan <- folder
 
 		// Recurse
-		if err := r.scanFolder(client, user, folder.ID, folder.Path); err != nil {
-			logger.WarningTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to scan subfolder %s: %v", folder.Name, err)
+		if err := r.scanFolder(client, user, folder.ID, folder.Path, fileChan, folderChan); err != nil {
+			return err
 		}
 	}
 
