@@ -374,9 +374,9 @@ func (r *Runner) BalanceStorage() error {
 				continue
 			}
 
-			files, err := source.Client.ListFiles(syncFolderID)
+			files, err := r.getAllFilesRecursive(source.Client, syncFolderID)
 			if err != nil {
-				logger.Error("Failed to list files: %v", err)
+				logger.Error("Failed to list files recursively: %v", err)
 				continue
 			}
 
@@ -541,9 +541,9 @@ func (r *Runner) FreeMain() error {
 			continue
 		}
 
-		files, err := mainClient.ListFiles(syncFolderID)
+		files, err := r.getAllFilesRecursive(mainClient, syncFolderID)
 		if err != nil {
-			logger.Error("Failed to list files: %v", err)
+			logger.Error("Failed to list files recursively: %v", err)
 			continue
 		}
 
@@ -612,4 +612,33 @@ func (r *Runner) FreeMain() error {
 		}
 	}
 	return nil
+}
+
+// getAllFilesRecursive recursively lists all files in a folder and its subfolders
+func (r *Runner) getAllFilesRecursive(client api.CloudClient, folderID string) ([]*model.File, error) {
+	var allFiles []*model.File
+
+	// List files in current folder
+	files, err := client.ListFiles(folderID)
+	if err != nil {
+		return nil, err
+	}
+	allFiles = append(allFiles, files...)
+
+	// List subfolders
+	folders, err := client.ListFolders(folderID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Recursively list files in subfolders
+	for _, folder := range folders {
+		subFiles, err := r.getAllFilesRecursive(client, folder.ID)
+		if err != nil {
+			return nil, err
+		}
+		allFiles = append(allFiles, subFiles...)
+	}
+
+	return allFiles, nil
 }
