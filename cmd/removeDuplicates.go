@@ -65,26 +65,30 @@ func runRemoveDuplicates(cmd *cobra.Command, args []string) error {
 				continue
 			}
 
-			// Display files
-			fmt.Printf("\n[%s] Duplicate files (CalculatedID: %s):\n", provider, id)
-			var fileNames []string
-			for i, file := range files {
-				label := fmt.Sprintf("%d. %s (ID: %s, Size: %d, Created: %s)",
-					i+1, file.Path, file.ID, file.Size, file.CreatedTime.Format("2006-01-02"))
-				fmt.Println("  " + label)
-				fileNames = append(fileNames, label)
-			}
-
-			// Add "Skip" option
-			fileNames = append(fileNames, "Skip this group")
-
-			// Prompt for deletion
-			selectPrompt := promptui.Select{
-				Label: "Select file(s) to DELETE",
-				Items: fileNames,
-			}
-
 			for {
+				if len(files) <= 1 {
+					break
+				}
+
+				// Display files
+				fmt.Printf("\n[%s] Duplicate files (CalculatedID: %s):\n", provider, id)
+				var fileNames []string
+				for i, file := range files {
+					label := fmt.Sprintf("%d. %s (ID: %s, Size: %d, Created: %s)",
+						i+1, file.Path, file.ID, file.Size, file.CreatedTime.Format("2006-01-02"))
+					fmt.Println("  " + label)
+					fileNames = append(fileNames, label)
+				}
+
+				// Add "Skip" option
+				fileNames = append(fileNames, "Skip this group")
+
+				// Prompt for deletion
+				selectPrompt := promptui.Select{
+					Label: "Select file(s) to DELETE",
+					Items: fileNames,
+				}
+
 				idx, _, err := selectPrompt.Run()
 				if err != nil {
 					break
@@ -97,6 +101,7 @@ func runRemoveDuplicates(cmd *cobra.Command, args []string) error {
 
 				// Delete the selected file
 				file := files[idx]
+				deleted := false
 				if !safeMode {
 					client, err := getClientForFile(runner, file)
 					if err != nil {
@@ -109,20 +114,16 @@ func runRemoveDuplicates(cmd *cobra.Command, args []string) error {
 					} else {
 						logger.InfoTagged([]string{string(provider)}, "Deleted file: %s", file.Path)
 						db.DeleteFile(file.ID)
+						deleted = true
 					}
 				} else {
 					logger.DryRunTagged([]string{string(provider)}, "Would delete file: %s (ID: %s)", file.Path, file.ID)
+					deleted = true
 				}
 
-				// Ask if more deletions
-				continuePrompt := promptui.Prompt{
-					Label:     "Delete another file from this group? (y/n)",
-					Default:   "n",
-					IsConfirm: true,
-				}
-				_, err = continuePrompt.Run()
-				if err != nil {
-					break
+				if deleted {
+					// Remove from files slice
+					files = append(files[:idx], files[idx+1:]...)
 				}
 			}
 		}
