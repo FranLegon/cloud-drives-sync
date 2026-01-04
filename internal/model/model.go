@@ -64,6 +64,9 @@ type File struct {
 	ModifiedTime    time.Time
 	OwnerEmail      string
 	ParentFolderID  string
+	Split           bool
+	Part            int
+	TotalParts      int
 }
 
 // Folder represents a folder in cloud storage

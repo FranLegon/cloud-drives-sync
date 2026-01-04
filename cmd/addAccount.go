@@ -11,6 +11,7 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/FranLegon/cloud-drives-sync/internal/microsoft"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
+	"github.com/FranLegon/cloud-drives-sync/internal/telegram"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
@@ -47,6 +48,10 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no main account found - please add a Google main account using 'init' first")
 	}
 
+	if provider == "Telegram" {
+		return addTelegramAccount(cfg, masterPassword)
+	}
+
 	// Perform OAuth flow
 	ctx := context.Background()
 	var oauthConfig *oauth2.Config
@@ -57,9 +62,6 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 		oauthConfig = auth.GetGoogleOAuthConfig(cfg.GoogleClient.ID, cfg.GoogleClient.Secret)
 	case "Microsoft":
 		oauthConfig = auth.GetMicrosoftOAuthConfig(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret)
-	case "Telegram":
-		// TODO: Implement Telegram authentication
-		return fmt.Errorf("Telegram account addition not yet implemented")
 	default:
 		return fmt.Errorf("unsupported provider: %s", provider)
 	}
@@ -179,5 +181,54 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 	}
 
 	logger.Info("Backup account added successfully")
+	return nil
+}
+
+func addTelegramAccount(cfg *model.Config, password string) error {
+	// Check if Telegram credentials are configured
+	if cfg.TelegramClient.APIID == "" || cfg.TelegramClient.APIHash == "" || cfg.TelegramClient.Phone == "" {
+		return fmt.Errorf("telegram credentials not configured - please run 'init' to configure them")
+	}
+
+	// Create user record
+	user := model.User{
+		Provider: model.ProviderTelegram,
+		Phone:    cfg.TelegramClient.Phone,
+		IsMain:   false,
+	}
+
+	// Initialize client
+	client, err := telegram.NewClient(&user, cfg.TelegramClient.APIID, cfg.TelegramClient.APIHash)
+	if err != nil {
+		return fmt.Errorf("failed to create telegram client: %w", err)
+	}
+	defer client.Close()
+
+	// Authenticate
+	logger.Info("Starting Telegram authentication for %s...", user.Phone)
+	if err := client.Authenticate(user.Phone); err != nil {
+		return fmt.Errorf("authentication failed: %w", err)
+	}
+
+	logger.Info("Authentication successful!")
+
+	// Perform pre-flight check to ensure channel exists
+	if !safeMode {
+		if err := client.PreFlightCheck(); err != nil {
+			return fmt.Errorf("pre-flight check failed: %w", err)
+		}
+	} else {
+		logger.DryRun("Would perform pre-flight check and create sync channel if needed")
+	}
+
+	// Add user to config
+	config.AddUser(cfg, user)
+
+	// Save updated configuration
+	if err := config.SaveConfig(cfg, password); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+
+	logger.Info("Telegram backup account added successfully")
 	return nil
 }

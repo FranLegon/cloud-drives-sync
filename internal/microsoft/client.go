@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	syncFolderPrefix = "synched-cloud-drives"
+	syncFolderPrefix = "sync-cloud-drives"
 )
 
 // Client represents a Microsoft OneDrive client

@@ -83,7 +83,10 @@ func (db *DB) Initialize() error {
 		created_time DATETIME NOT NULL,
 		modified_time DATETIME NOT NULL,
 		owner_email TEXT,
-		parent_folder_id TEXT
+		parent_folder_id TEXT,
+		split BOOLEAN DEFAULT 0,
+		part INTEGER DEFAULT 0,
+		total_parts INTEGER DEFAULT 0
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash);
@@ -114,14 +117,16 @@ func (db *DB) InsertFile(file *model.File) error {
 	query := `
 	INSERT OR REPLACE INTO files (
 		id, name, path, size, hash, hash_algorithm, provider, 
-		user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
+		split, part, total_parts
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	_, err := db.conn.Exec(query,
 		file.ID, file.Name, file.Path, file.Size, file.Hash, file.HashAlgorithm,
 		string(file.Provider), file.UserEmail, file.UserPhone,
 		file.CreatedTime, file.ModifiedTime, file.OwnerEmail, file.ParentFolderID,
+		file.Split, file.Part, file.TotalParts,
 	)
 	return err
 }
@@ -145,7 +150,8 @@ func (db *DB) InsertFolder(folder *model.Folder) error {
 func (db *DB) GetFilesByHash(hash string, provider model.Provider) ([]*model.File, error) {
 	query := `
 	SELECT id, name, path, size, hash, hash_algorithm, provider,
-		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id
+		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
+		   split, part, total_parts
 	FROM files
 	WHERE hash = ? AND provider = ?
 	ORDER BY created_time ASC
@@ -165,6 +171,7 @@ func (db *DB) GetFilesByHash(hash string, provider model.Provider) ([]*model.Fil
 			&file.ID, &file.Name, &file.Path, &file.Size, &file.Hash, &file.HashAlgorithm,
 			&providerStr, &file.UserEmail, &file.UserPhone, &file.CreatedTime,
 			&file.ModifiedTime, &file.OwnerEmail, &file.ParentFolderID,
+			&file.Split, &file.Part, &file.TotalParts,
 		)
 		if err != nil {
 			return nil, err
@@ -180,7 +187,8 @@ func (db *DB) GetFilesByHash(hash string, provider model.Provider) ([]*model.Fil
 func (db *DB) GetAllFiles(provider model.Provider) ([]*model.File, error) {
 	query := `
 	SELECT id, name, path, size, hash, hash_algorithm, provider,
-		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id
+		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
+		   split, part, total_parts
 	FROM files
 	WHERE provider = ?
 	ORDER BY path ASC
@@ -200,6 +208,7 @@ func (db *DB) GetAllFiles(provider model.Provider) ([]*model.File, error) {
 			&file.ID, &file.Name, &file.Path, &file.Size, &file.Hash, &file.HashAlgorithm,
 			&providerStr, &file.UserEmail, &file.UserPhone, &file.CreatedTime,
 			&file.ModifiedTime, &file.OwnerEmail, &file.ParentFolderID,
+			&file.Split, &file.Part, &file.TotalParts,
 		)
 		if err != nil {
 			return nil, err
@@ -215,7 +224,8 @@ func (db *DB) GetAllFiles(provider model.Provider) ([]*model.File, error) {
 func (db *DB) GetFilesByUserEmail(provider model.Provider, email string) ([]*model.File, error) {
 	query := `
 	SELECT id, name, path, size, hash, hash_algorithm, provider,
-		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id
+		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
+		   split, part, total_parts
 	FROM files
 	WHERE provider = ? AND user_email = ?
 	ORDER BY size DESC
@@ -235,6 +245,7 @@ func (db *DB) GetFilesByUserEmail(provider model.Provider, email string) ([]*mod
 			&file.ID, &file.Name, &file.Path, &file.Size, &file.Hash, &file.HashAlgorithm,
 			&providerStr, &file.UserEmail, &file.UserPhone, &file.CreatedTime,
 			&file.ModifiedTime, &file.OwnerEmail, &file.ParentFolderID,
+			&file.Split, &file.Part, &file.TotalParts,
 		)
 		if err != nil {
 			return nil, err
@@ -366,7 +377,8 @@ func (db *DB) GetFileByID(id string) (*model.File, error) {
 func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 	query := `
 	SELECT id, name, path, size, hash, hash_algorithm, provider,
-		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id
+		   user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
+		   split, part, total_parts
 	FROM files
 	ORDER BY provider, path ASC
 	`
@@ -385,6 +397,7 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 			&file.ID, &file.Name, &file.Path, &file.Size, &file.Hash, &file.HashAlgorithm,
 			&providerStr, &file.UserEmail, &file.UserPhone, &file.CreatedTime,
 			&file.ModifiedTime, &file.OwnerEmail, &file.ParentFolderID,
+			&file.Split, &file.Part, &file.TotalParts,
 		)
 		if err != nil {
 			return nil, err

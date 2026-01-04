@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	syncFolderName = "synched-cloud-drives"
+	syncFolderName = "sync-cloud-drives"
 	maxRetries     = 3
 	retryDelay     = 2 * time.Second
 )

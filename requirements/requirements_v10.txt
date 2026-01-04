@@ -21,7 +21,7 @@ The application must only interact with files and folders contained within speci
 - Folder owner is always the file owner in OneDrive.
 
 **Telegram:**
-- Heavily relies on metadata.db to track files stored in Telegram, as Telegram does not have a folder structure.
+- Heavily relies on metadata.db and message caption to track files stored in Telegram, as Telegram does not have a folder structure.
 - Files bigger than Telegram's limits get uploaded as multiple parts, each tracked in the database.
 
 *   **Isolation:** The tool must never read, list, modify, or delete any file or folder outside of the designated `sync-cloud-drives` directories.
@@ -212,6 +212,7 @@ The application must only interact with files and folders contained within speci
 **Telegram:**
 - Subject to Telegram API file size limits and rate limits.
 - Files stored in dedicated channel called `sync-cloud-drives`.
+- Each file is uploaded as a message with the file as an attachment and a caption containing metadata as json (e.g. 1, `{"file_name":"bigfile.db","folder_path":"sync-cloud-drives/examplefolder", "hash":"ihrstfh45fbkeb", "split": true, "part": 1, "total_parts": 3}`, e.g. 2, `{"file_name":"smallfile.jpg", "folder_path":"sync-cloud-drives/examplefolder/innerfolder", "hash":"ig9387f34fbkeb", "split": false}`).
 - If more than one active channel with this name are found, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
 - Files larger than Telegram's limits (2 GB) are split into multiple parts, each tracked in the local metadata database.
 - System messages such as "channel created", "user joined", etc., must be ignored.
