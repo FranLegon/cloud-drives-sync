@@ -197,7 +197,13 @@ func interactiveUpdate() error {
 
 	prompt := promptui.Select{
 		Label: "Configuration already exists. What would you like to do?",
-		Items: []string{"Update Client Credentials", "Update Main Account", "Cancel"},
+		Items: []string{
+			"Update Google Client Credentials",
+			"Update Microsoft Client Credentials",
+			"Update Telegram Client Credentials",
+			"Update Main Account",
+			"Cancel",
+		},
 	}
 
 	_, result, err := prompt.Run()
@@ -206,8 +212,12 @@ func interactiveUpdate() error {
 	}
 
 	switch result {
-	case "Update Client Credentials":
-		return updateClientCredentialsInteractive(cfg, password)
+	case "Update Google Client Credentials":
+		return updateGoogleCredentials(cfg, password)
+	case "Update Microsoft Client Credentials":
+		return updateMicrosoftCredentials(cfg, password)
+	case "Update Telegram Client Credentials":
+		return updateTelegramCredentials(cfg, password)
 	case "Update Main Account":
 		return updateMainAccount(cfg, password)
 	case "Cancel":
@@ -217,10 +227,9 @@ func interactiveUpdate() error {
 	return nil
 }
 
-func updateClientCredentialsInteractive(cfg *model.Config, password string) error {
-	logger.Info("Enter new API client credentials (leave blank to keep existing)")
+func updateGoogleCredentials(cfg *model.Config, password string) error {
+	logger.Info("Enter new Google API client credentials (leave blank to keep existing)")
 
-	// Google
 	googleIDPrompt := promptui.Prompt{Label: fmt.Sprintf("Google Client ID [%s]", maskString(cfg.GoogleClient.ID)), AllowEdit: true}
 	googleID, _ := googleIDPrompt.Run()
 	if googleID != "" {
@@ -233,7 +242,16 @@ func updateClientCredentialsInteractive(cfg *model.Config, password string) erro
 		cfg.GoogleClient.Secret = googleSecret
 	}
 
-	// Microsoft
+	if err := config.SaveConfig(cfg, password); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+	logger.Info("Google client credentials updated successfully")
+	return nil
+}
+
+func updateMicrosoftCredentials(cfg *model.Config, password string) error {
+	logger.Info("Enter new Microsoft API client credentials (leave blank to keep existing)")
+
 	msIDPrompt := promptui.Prompt{Label: fmt.Sprintf("Microsoft Client ID [%s]", maskString(cfg.MicrosoftClient.ID)), AllowEdit: true}
 	msID, _ := msIDPrompt.Run()
 	if msID != "" {
@@ -246,7 +264,16 @@ func updateClientCredentialsInteractive(cfg *model.Config, password string) erro
 		cfg.MicrosoftClient.Secret = msSecret
 	}
 
-	// Telegram
+	if err := config.SaveConfig(cfg, password); err != nil {
+		return fmt.Errorf("failed to save configuration: %w", err)
+	}
+	logger.Info("Microsoft client credentials updated successfully")
+	return nil
+}
+
+func updateTelegramCredentials(cfg *model.Config, password string) error {
+	logger.Info("Enter new Telegram API client credentials (leave blank to keep existing)")
+
 	telegramIDPrompt := promptui.Prompt{Label: fmt.Sprintf("Telegram API ID [%s]", maskString(cfg.TelegramClient.APIID)), AllowEdit: true}
 	telegramID, _ := telegramIDPrompt.Run()
 	if telegramID != "" {
@@ -268,7 +295,7 @@ func updateClientCredentialsInteractive(cfg *model.Config, password string) erro
 	if err := config.SaveConfig(cfg, password); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
-	logger.Info("Client credentials updated successfully")
+	logger.Info("Telegram client credentials updated successfully")
 	return nil
 }
 
