@@ -474,18 +474,17 @@ func DBExists() bool {
 func CreateDB(masterPassword string) error {
 	dbPath := GetDBPath()
 
-	// Create database file
-	connStr := fmt.Sprintf("file:%s?_auth&_auth_user=%s&_auth_pass=%s", dbPath, DBUser, masterPassword)
+	// Escape password for URL
+	escapedPwd := url.QueryEscape(masterPassword)
+
+	// For SQLCipher (via mutecomm/go-sqlcipher), we use _pragma_key
+	connStr := fmt.Sprintf("file:%s?_pragma_key=%s&_pragma_cipher_page_size=4096", dbPath, escapedPwd)
+
 	conn, err := sql.Open("sqlite3", connStr)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-
-	// Set SQLCipher key
-	if _, err := conn.Exec(fmt.Sprintf("PRAGMA key = '%s';", masterPassword)); err != nil {
-		return err
-	}
 
 	// Create a test table to initialize the database
 	if _, err := conn.Exec("CREATE TABLE IF NOT EXISTS _init (id INTEGER PRIMARY KEY)"); err != nil {
