@@ -117,6 +117,8 @@ func GetGoogleOAuthConfig(clientID, clientSecret string) *oauth2.Config {
 		RedirectURL:  fmt.Sprintf("http://localhost:%d%s", callbackPort, callbackPath),
 		Scopes: []string{
 			"https://www.googleapis.com/auth/drive",
+			"https://www.googleapis.com/auth/drive.file",
+			"https://www.googleapis.com/auth/drive.metadata",
 			"https://www.googleapis.com/auth/userinfo.email",
 		},
 		Endpoint: google.Endpoint,

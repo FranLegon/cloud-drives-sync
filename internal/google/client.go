@@ -15,6 +15,7 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/drive/v3"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
 )
 
@@ -274,7 +275,19 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 
 // DeleteFile deletes a file
 func (c *Client) DeleteFile(fileID string) error {
-	return c.service.Files.Delete(fileID).Do()
+	err := c.service.Files.Delete(fileID).Do()
+	if err != nil {
+		// Check if it's a permission error (403)
+		var gErr *googleapi.Error
+		if errors.As(err, &gErr) && gErr.Code == 403 {
+			// Try to trash the file instead
+			logger.InfoTagged([]string{"Google"}, "Insufficient permissions to delete file %s, attempting to trash it instead", fileID)
+			_, updateErr := c.service.Files.Update(fileID, &drive.File{Trashed: true}).Do()
+			return updateErr
+		}
+		return err
+	}
+	return nil
 }
 
 // MoveFile moves a file to a different folder
