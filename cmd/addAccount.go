@@ -103,6 +103,11 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to get user email: %w", err)
 	}
 
+	// Check if this email is already registered as a main account
+	if existingMain := config.GetMainAccount(cfg, model.Provider(provider)); existingMain != nil && existingMain.Email == email {
+		return fmt.Errorf("account %s is already registered as a main account", email)
+	}
+
 	logger.Info("Authorized as: %s", email)
 	if token.RefreshToken != "" {
 		logger.Info("Refresh token received successfully")

@@ -119,6 +119,7 @@ func GetGoogleOAuthConfig(clientID, clientSecret string) *oauth2.Config {
 			"https://www.googleapis.com/auth/drive",
 			"https://www.googleapis.com/auth/drive.file",
 			"https://www.googleapis.com/auth/drive.metadata",
+			"https://www.googleapis.com/auth/drive.activity",
 			"https://www.googleapis.com/auth/userinfo.email",
 		},
 		Endpoint: google.Endpoint,
