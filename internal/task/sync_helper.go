@@ -84,7 +84,14 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 
 	// Telegram doesn't support folders, so just return the sync channel ID
 	if provider == model.ProviderTelegram {
-		return currentID, nil
+		// For Telegram, we return the path itself as the "ID" so it can be stored in metadata
+		// Ensure path starts with /
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		// Replace backslashes with forward slashes
+		path = strings.ReplaceAll(path, "\\", "/")
+		return path, nil
 	}
 
 	// Clean path and split

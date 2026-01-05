@@ -30,12 +30,12 @@ const (
 
 // FileMetadata represents the metadata stored in the caption
 type FileMetadata struct {
-	FileName   string `json:"file_name"`
-	FolderPath string `json:"folder_path"`
-	Hash       string `json:"hash"`
-	Split      bool   `json:"split"`
-	Part       int    `json:"part"`
-	TotalParts int    `json:"total_parts"`
+	FileName    string `json:"file_name"`
+	FolderPath  string `json:"folder_path"`
+	GeneratedID string `json:"generated_id"`
+	Split       bool   `json:"split"`
+	Part        int    `json:"part"`
+	TotalParts  int    `json:"total_parts"`
 }
 
 // Client represents a Telegram client
@@ -517,12 +517,12 @@ func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size 
 
 	// Create metadata
 	meta := FileMetadata{
-		FileName:   name,
-		FolderPath: folderID,
-		Hash:       "", // Hash should be calculated before upload if possible, or passed in
-		Split:      split,
-		Part:       part,
-		TotalParts: totalParts,
+		FileName:    name,
+		FolderPath:  folderID,
+		GeneratedID: "", // Should be calculated before upload if possible
+		Split:       split,
+		Part:        part,
+		TotalParts:  totalParts,
 	}
 
 	// Serialize metadata
@@ -543,7 +543,8 @@ func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size 
 		AccessHash: c.accessHash,
 	}
 
-	updates, err := c.sender.To(inputChannel).File(c.ctx, f, styling.Plain(string(caption)))
+	// Use UploadedDocument to ensure filename is set
+	updates, err := c.sender.To(inputChannel).UploadedDocument(f, styling.Plain(string(caption))).Filename(name).Send(c.ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
