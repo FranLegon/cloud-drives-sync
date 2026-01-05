@@ -55,19 +55,19 @@ func runQuota(cmd *cobra.Command, args []string) error {
 	}
 
 	// Cross-check
-	// Error if used quota for any provider is bigger than available quota for any provider
+	// Error if used quota for any provider is bigger than total quota for any provider
 	var errs []string
 
 	for _, q1 := range quotas {
 		for _, q2 := range quotas {
 			// Skip if q2 is unlimited
-			if q2.Free == -1 {
+			if q2.Total == -1 {
 				continue
 			}
 
-			if q1.Used > q2.Free {
-				errs = append(errs, fmt.Sprintf("Provider %s Used (%s) > Provider %s Free (%s)",
-					q1.Provider, formatBytes(q1.Used), q2.Provider, formatBytes(q2.Free)))
+			if q1.Used > q2.Total {
+				errs = append(errs, fmt.Sprintf("Provider %s Used (%s) > Provider %s Total (%s)",
+					q1.Provider, formatBytes(q1.Used), q2.Provider, formatBytes(q2.Total)))
 			}
 		}
 	}

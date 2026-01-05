@@ -889,16 +889,18 @@ func (r *Runner) GetProviderQuotas() ([]*model.ProviderQuota, error) {
 		// Aggregate Used
 		pq.Used += q.Used
 
-		// Aggregate Total and Free
-		if pq.Total == -1 {
-			// Already unlimited, stay unlimited
-		} else if q.Total == -1 {
-			// Found an unlimited account, set provider to unlimited
-			pq.Total = -1
-			pq.Free = -1
-		} else {
-			pq.Total += q.Total
-			pq.Free += q.Free
+		// Aggregate Total and Free (skip for main account)
+		if !user.IsMain {
+			if pq.Total == -1 {
+				// Already unlimited, stay unlimited
+			} else if q.Total == -1 {
+				// Found an unlimited account, set provider to unlimited
+				pq.Total = -1
+				pq.Free = -1
+			} else {
+				pq.Total += q.Total
+				pq.Free += q.Free
+			}
 		}
 	}
 
