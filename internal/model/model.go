@@ -49,6 +49,14 @@ type Config struct {
 	Users           []User          `json:"users"`
 }
 
+// ProviderQuota represents aggregated quota for a provider
+type ProviderQuota struct {
+	Provider Provider
+	Total    int64
+	Used     int64
+	Free     int64
+}
+
 // File represents a file in cloud storage
 type File struct {
 	ID                   string
