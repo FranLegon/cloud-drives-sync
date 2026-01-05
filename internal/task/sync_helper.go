@@ -75,11 +75,16 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 }
 
 // ensureFolderStructure ensures that the folder structure exists in the destination
-func (r *Runner) ensureFolderStructure(client api.CloudClient, path string) (string, error) {
+func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, provider model.Provider) (string, error) {
 	// Get root sync folder
 	currentID, err := client.GetSyncFolderID()
 	if err != nil {
 		return "", err
+	}
+
+	// Telegram doesn't support folders, so just return the sync channel ID
+	if provider == model.ProviderTelegram {
+		return currentID, nil
 	}
 
 	// Clean path and split
@@ -148,8 +153,8 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider)
 	dir := filepath.Dir(masterFile.Path)
 	// Normalize path separators
 	dir = strings.ReplaceAll(dir, "\\", "/")
-	
-	parentID, err := r.ensureFolderStructure(destClient, dir)
+
+	parentID, err := r.ensureFolderStructure(destClient, dir, targetProvider)
 	if err != nil {
 		return fmt.Errorf("failed to ensure folder structure: %w", err)
 	}
