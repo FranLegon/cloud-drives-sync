@@ -65,13 +65,12 @@ func TestConfigModel(t *testing.T) {
 
 func TestFileModel(t *testing.T) {
 	file := File{
-		ID:            "file-123",
-		Name:          "test.txt",
-		Size:          1024,
-		Hash:          "abc123",
-		HashAlgorithm: "MD5",
-		Provider:      ProviderGoogle,
-		UserEmail:     "test@example.com",
+		ID:                   "file-123",
+		Name:                 "test.txt",
+		Size:                 1024,
+		CalculatedSHA256Hash: "abc123",
+		Provider:             ProviderGoogle,
+		UserEmail:            "test@example.com",
 	}
 
 	if file.ID != "file-123" {

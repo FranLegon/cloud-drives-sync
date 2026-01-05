@@ -70,6 +70,11 @@ and Telegram.`,
 			return fmt.Errorf("failed to open database: %w", err)
 		}
 
+		// Initialize database schema
+		if err := db.Initialize(); err != nil {
+			return fmt.Errorf("failed to initialize database: %w", err)
+		}
+
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {

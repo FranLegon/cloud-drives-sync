@@ -2,12 +2,13 @@ package crypto
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
 func TestGenerateAndSaveSalt(t *testing.T) {
 	// Create temp file
-	tmpFile := "/tmp/test_salt"
+	tmpFile := filepath.Join(t.TempDir(), "test_salt")
 	defer os.Remove(tmpFile)
 
 	salt, err := GenerateAndSaveSalt(tmpFile)
