@@ -37,6 +37,60 @@ type FileMetadata struct {
 	TotalParts  int    `json:"total_parts"`
 }
 
+// findMessagesByGeneratedID searches for messages with the given generated ID
+func (c *Client) findMessagesByGeneratedID(generatedID string) ([]tg.MessageClass, error) {
+	if c.channelID == 0 {
+		return nil, fmt.Errorf("channel not initialized")
+	}
+
+	// Search for the generated ID in the caption
+	// We use the JSON key to be more specific
+	query := fmt.Sprintf(`"generated_id":"%s"`, generatedID)
+
+	inputPeer := &tg.InputPeerChannel{
+		ChannelID:  c.channelID,
+		AccessHash: c.accessHash,
+	}
+
+	res, err := c.client.API().MessagesSearch(c.ctx, &tg.MessagesSearchRequest{
+		Peer:     inputPeer,
+		Q:        query,
+		Filter:   &tg.InputMessagesFilterDocument{},
+		Limit:    100, // Should be enough for split files
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to search messages: %w", err)
+	}
+
+	var messages []tg.MessageClass
+	switch r := res.(type) {
+	case *tg.MessagesChannelMessages:
+		messages = r.Messages
+	case *tg.MessagesMessages:
+		messages = r.Messages
+	case *tg.MessagesMessagesSlice:
+		messages = r.Messages
+	}
+
+	return messages, nil
+}
+
+// updateMessageCaption updates the caption of a message
+func (c *Client) updateMessageCaption(msgID int, caption string) error {
+	inputPeer := &tg.InputPeerChannel{
+		ChannelID:  c.channelID,
+		AccessHash: c.accessHash,
+	}
+
+	_, err := c.client.API().MessagesEditMessage(c.ctx, &tg.MessagesEditMessageRequest{
+		Peer:    inputPeer,
+		ID:      msgID,
+		Message: caption,
+	})
+	return err
+}
+
+
 // Client represents a Telegram client
 type Client struct {
 	user          *model.User
@@ -444,6 +498,81 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	const maxPartSize = 2000 * 1024 * 1024 // 2GB
 
 	generatedID := fmt.Sprintf("%s-%d", name, size)
+
+	// Check if file already exists
+	existingMessages, err := c.findMessagesByGeneratedID(generatedID)
+	if err == nil && len(existingMessages) > 0 {
+		// File exists, check if we need to update metadata
+		var updated bool
+		var firstMsgID int
+		var telegramUniqueID string
+
+		for _, msgClass := range existingMessages {
+			msg, ok := msgClass.(*tg.Message)
+			if !ok {
+				continue
+			}
+
+			// Parse metadata
+			var meta FileMetadata
+			if err := json.Unmarshal([]byte(msg.Message), &meta); err != nil {
+				continue
+			}
+
+			// Check if folder path changed
+			if meta.FolderPath != folderID {
+				meta.FolderPath = folderID
+				newCaption, err := json.Marshal(meta)
+				if err == nil {
+					if err := c.updateMessageCaption(msg.ID, string(newCaption)); err != nil {
+						logger.Error("Failed to update caption for message %d: %v", msg.ID, err)
+					} else {
+						updated = true
+					}
+				}
+			}
+
+			if meta.Part == 1 {
+				firstMsgID = msg.ID
+				telegramUniqueID = strconv.Itoa(msg.ID)
+			}
+		}
+
+		if updated {
+			logger.Info("Updated metadata for existing file %s", name)
+		} else {
+			logger.Info("File %s already exists with correct metadata", name)
+		}
+
+		// Return existing file info
+		// We construct a minimal file object since we didn't re-upload
+		// If it was split, we might not have all fragments here, but for sync purposes
+		// we mainly need the ID and Path.
+		
+		// If we didn't find part 1, use the first message ID found
+		if firstMsgID == 0 && len(existingMessages) > 0 {
+			if msg, ok := existingMessages[0].(*tg.Message); ok {
+				firstMsgID = msg.ID
+				telegramUniqueID = strconv.Itoa(msg.ID)
+			}
+		}
+
+		return &model.File{
+			ID:               strconv.Itoa(firstMsgID),
+			Name:             name,
+			Path:             folderID + "/" + name,
+			Size:             size,
+			TelegramUniqueID: telegramUniqueID,
+			CalculatedID:     generatedID,
+			Provider:         model.ProviderTelegram,
+			UserEmail:        c.user.Email,
+			CreatedTime:      time.Now(),
+			ModifiedTime:     time.Now(),
+			Split:            len(existingMessages) > 1,
+			TotalParts:       len(existingMessages),
+			// Fragments are not fully populated here, but that's usually fine for sync checks
+		}, nil
+	}
 
 	if size <= maxPartSize {
 		fragment, err := c.uploadSinglePart(folderID, name, reader, size, generatedID, false, 1, 1)
