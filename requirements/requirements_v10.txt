@@ -227,6 +227,12 @@ CREATE TABLE IF NOT EXISTS folders (
     *   Iterates through all refresh tokens in the config. For each, it attempts a simple, read-only API call. It reports any tokens that have expired or been revoked, indicating which account needs re-authentication.
     *   Includes Telegram session validation.
 
+*   **`delete-unsynced-files`**
+    *   Deletes all files in backup accounts that are not inside the `sync-cloud-drives` folder or its subfolders.
+    *   **Goal:** Clean up backup accounts to ensure they only contain synced data.
+    *   **Logic:** Iterates through all backup accounts. For each account, lists all files and folders in the root directory. Any item that is not the designated sync folder (e.g., `sync-cloud-drives` for Google, `sync-cloud-drives-accountname` for Microsoft) is deleted.
+    *   **Safety:** Respects the `--safe` flag to perform a dry run.
+
 *   **`help`**
     *   Lists all available commands, their purpose, and example usage.
 

@@ -789,3 +789,72 @@ func (r *Runner) SyncProviders() error {
 
 	return nil
 }
+
+// DeleteUnsyncedFiles deletes files in backup accounts that are not in the sync folder
+func (r *Runner) DeleteUnsyncedFiles() error {
+	for _, user := range r.config.Users {
+		// Skip main account
+		if user.IsMain {
+			continue
+		}
+
+		// Skip Telegram for now as it doesn't have a root folder structure
+		if user.Provider == model.ProviderTelegram {
+			continue
+		}
+
+		logger.InfoTagged([]string{string(user.Provider), user.Email}, "Checking for unsynced files...")
+
+		client, err := r.GetOrCreateClient(&user)
+		if err != nil {
+			logger.Error("Failed to create client for %s: %v", user.Email, err)
+			continue
+		}
+
+		// Get sync folder ID
+		syncFolderID, err := client.GetSyncFolderID()
+		if err != nil {
+			logger.Error("Failed to get sync folder for %s: %v", user.Email, err)
+			continue
+		}
+
+		// List folders in root
+		folders, err := client.ListFolders("root")
+		if err != nil {
+			logger.Error("Failed to list folders for %s: %v", user.Email, err)
+			continue
+		}
+
+		for _, folder := range folders {
+			if folder.ID != syncFolderID {
+				if !r.safeMode {
+					logger.InfoTagged([]string{string(user.Provider), user.Email}, "Deleting unsynced folder: %s", folder.Name)
+					if err := client.DeleteFolder(folder.ID); err != nil {
+						logger.Error("Failed to delete folder %s: %v", folder.Name, err)
+					}
+				} else {
+					logger.DryRunTagged([]string{string(user.Provider), user.Email}, "Would delete unsynced folder: %s", folder.Name)
+				}
+			}
+		}
+
+		// List files in root
+		files, err := client.ListFiles("root")
+		if err != nil {
+			logger.Error("Failed to list files for %s: %v", user.Email, err)
+			continue
+		}
+
+		for _, file := range files {
+			if !r.safeMode {
+				logger.InfoTagged([]string{string(user.Provider), user.Email}, "Deleting unsynced file: %s", file.Name)
+				if err := client.DeleteFile(file.ID); err != nil {
+					logger.Error("Failed to delete file %s: %v", file.Name, err)
+				}
+			} else {
+				logger.DryRunTagged([]string{string(user.Provider), user.Email}, "Would delete unsynced file: %s", file.Name)
+			}
+		}
+	}
+	return nil
+}
