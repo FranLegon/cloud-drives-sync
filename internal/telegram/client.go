@@ -443,8 +443,10 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 
 	const maxPartSize = 2000 * 1024 * 1024 // 2GB
 
+	generatedID := fmt.Sprintf("%s-%d", name, size)
+
 	if size <= maxPartSize {
-		fragment, err := c.uploadSinglePart(folderID, name, reader, size, false, 1, 1)
+		fragment, err := c.uploadSinglePart(folderID, name, reader, size, generatedID, false, 1, 1)
 		if err != nil {
 			return nil, err
 		}
@@ -455,7 +457,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 			Path:             folderID + "/" + name,
 			Size:             size,
 			TelegramUniqueID: fragment.TelegramUniqueID,
-			CalculatedID:     fmt.Sprintf("%s-%d", name, size),
+			CalculatedID:     generatedID,
 			Provider:         model.ProviderTelegram,
 			UserEmail:        c.user.Email,
 			CreatedTime:      time.Now(),
@@ -489,7 +491,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		// Use LimitReader for the part
 		partReader := io.LimitReader(reader, partSize)
 
-		fragment, err := c.uploadSinglePart(folderID, name, partReader, partSize, true, i, totalParts)
+		fragment, err := c.uploadSinglePart(folderID, name, partReader, partSize, generatedID, true, i, totalParts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to upload part %d: %w", i, err)
 		}
@@ -503,12 +505,12 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		fragment.FileID = logicalFile.ID
 	}
 
-	logicalFile.CalculatedID = fmt.Sprintf("%s-%d", name, size)
+	logicalFile.CalculatedID = generatedID
 
 	return logicalFile, nil
 }
 
-func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size int64, split bool, part, totalParts int) (*model.FileFragment, error) {
+func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size int64, generatedID string, split bool, part, totalParts int) (*model.FileFragment, error) {
 	// Ensure folder path is not empty
 	if folderID == "" {
 		folderID = "/"
@@ -518,7 +520,7 @@ func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size 
 	meta := FileMetadata{
 		FileName:    name,
 		FolderPath:  folderID,
-		GeneratedID: "", // Should be calculated before upload if possible
+		GeneratedID: generatedID,
 		Split:       split,
 		Part:        part,
 		TotalParts:  totalParts,
