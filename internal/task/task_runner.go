@@ -379,6 +379,10 @@ func (r *Runner) BalanceStorage() error {
 	// Group users by provider
 	usersByProvider := make(map[model.Provider][]model.User)
 	for _, user := range r.config.Users {
+		// Skip main account for balancing - only balance among backup accounts
+		if user.IsMain {
+			continue
+		}
 		usersByProvider[user.Provider] = append(usersByProvider[user.Provider], user)
 	}
 
