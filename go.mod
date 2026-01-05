@@ -6,8 +6,8 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0
 	github.com/gotd/td v0.136.0
 	github.com/manifoldco/promptui v0.9.0
-	github.com/mattn/go-sqlite3 v1.14.22
 	github.com/microsoftgraph/msgraph-sdk-go v1.92.0
+	github.com/mutecomm/go-sqlcipher/v4 v4.4.2
 	github.com/spf13/cobra v1.8.1
 	golang.org/x/crypto v0.45.0
 	golang.org/x/oauth2 v0.21.0

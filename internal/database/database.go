@@ -6,11 +6,10 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/mutecomm/go-sqlcipher/v4"
 )
 
 const (
@@ -36,30 +35,22 @@ func GetDBPath() string {
 func Open(masterPassword string) (*DB, error) {
 	dbPath := GetDBPath()
 
-	// Escape password for URL
-	escapedPwd := url.QueryEscape(masterPassword)
-
-	// For SQLCipher, we use the password with PRAGMA key or _key query param
-	// We also include _auth_user per requirements, although it's for User Auth extension
-	connStr := fmt.Sprintf("file:%s?_auth_user=%s&_key=%s", dbPath, DBUser, escapedPwd)
+	// SQLCipher connection string with _pragma_key parameter
+	// This is the proper way to set the encryption key for go-sqlcipher
+	// _pragma_key is used instead of _key to ensure the key is set via PRAGMA before any DB access
+	connStr := fmt.Sprintf("file:%s?_pragma_key=%s", dbPath, url.QueryEscape(masterPassword))
 
 	conn, err := sql.Open("sqlite3", connStr)
 	if err != nil {
 		return nil, err
 	}
 
-	// Set SQLCipher key using PRAGMA as a fallback/ensure
-	// Escape single quotes in password
-	safePwd := strings.ReplaceAll(masterPassword, "'", "''")
-	if _, err := conn.Exec(fmt.Sprintf("PRAGMA key = '%s';", safePwd)); err != nil {
+	// Verify access by querying sqlite_master
+	// This will fail if the key is wrong or the database is corrupted
+	var count int
+	if err := conn.QueryRow("SELECT COUNT(*) FROM sqlite_master").Scan(&count); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("failed to set encryption key: %w", err)
-	}
-
-	// Verify access (will fail if key is wrong or encryption not supported but DB is encrypted)
-	if _, err := conn.Exec("SELECT count(*) FROM sqlite_master;"); err != nil {
-		conn.Close()
-		return nil, fmt.Errorf("failed to access database: %w", err)
+		return nil, fmt.Errorf("failed to access database (wrong password or corrupted database): %w", err)
 	}
 
 	// Test connection
@@ -475,22 +466,24 @@ func DBExists() bool {
 func CreateDB(masterPassword string) error {
 	dbPath := GetDBPath()
 
-	// Create database file
-	connStr := fmt.Sprintf("file:%s?_auth&_auth_user=%s&_auth_pass=%s", dbPath, DBUser, masterPassword)
+	// Create database file with SQLCipher encryption using _pragma_key parameter
+	// This ensures the key is set via PRAGMA key before any DB operations
+	connStr := fmt.Sprintf("file:%s?_pragma_key=%s", dbPath, url.QueryEscape(masterPassword))
 	conn, err := sql.Open("sqlite3", connStr)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
-	// Set SQLCipher key
-	if _, err := conn.Exec(fmt.Sprintf("PRAGMA key = '%s';", masterPassword)); err != nil {
-		return err
-	}
-
-	// Create a test table to initialize the database
+	// Create a test table to initialize the encrypted database
+	// This forces SQLCipher to write the encrypted header
 	if _, err := conn.Exec("CREATE TABLE IF NOT EXISTS _init (id INTEGER PRIMARY KEY)"); err != nil {
-		return err
+		return fmt.Errorf("failed to initialize encrypted database: %w", err)
+	}
+	
+	// Insert a test row to ensure the database is properly written to disk
+	if _, err := conn.Exec("INSERT INTO _init (id) VALUES (1);"); err != nil {
+		return fmt.Errorf("failed to write to encrypted database: %w", err)
 	}
 
 	return nil
