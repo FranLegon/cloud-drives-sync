@@ -18,7 +18,6 @@ import (
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/downloader"
 	"github.com/gotd/td/telegram/message"
-	"github.com/gotd/td/telegram/message/styling"
 	"github.com/gotd/td/telegram/uploader"
 	"github.com/gotd/td/tg"
 )
@@ -550,10 +549,15 @@ func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size 
 		Attributes: []tg.DocumentAttributeClass{
 			&tg.DocumentAttributeFilename{FileName: name},
 		},
-		Message: string(caption), // Caption
 	}
 
-	updates, err := c.sender.To(inputChannel).Media(c.ctx, inputMedia)
+	// Use low-level API to ensure attributes are sent correctly
+	updates, err := c.client.API().MessagesSendMedia(c.ctx, &tg.MessagesSendMediaRequest{
+		Peer:     inputChannel,
+		Media:    inputMedia,
+		Message:  string(caption),
+		RandomID: time.Now().UnixNano(),
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
