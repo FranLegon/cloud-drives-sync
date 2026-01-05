@@ -767,12 +767,9 @@ func (r *Runner) SyncProviders() error {
 				logger.Info("File %s missing in %s", path, provider)
 
 				if !r.safeMode {
-					// Logic to copy file would go here:
-					// 1. Get source client
-					// 2. Get destination client (find account with space)
-					// 3. Download from source
-					// 4. Upload to destination
-					logger.Info("Copying %s from %s to %s (Not fully implemented)", path, masterFile.Provider, provider)
+					if err := r.copyFile(masterFile, provider); err != nil {
+						logger.Error("Failed to copy file: %v", err)
+					}
 				} else {
 					logger.DryRun("Would copy %s from %s to %s", path, masterFile.Provider, provider)
 				}
