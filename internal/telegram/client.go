@@ -543,8 +543,17 @@ func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size 
 		AccessHash: c.accessHash,
 	}
 
-	// Use UploadedDocument to ensure filename is set
-	updates, err := c.sender.To(inputChannel).UploadedDocument(f, styling.Plain(string(caption))).Filename(name).Send(c.ctx)
+	// Use InputMediaUploadedDocument to ensure filename is set
+	inputMedia := &tg.InputMediaUploadedDocument{
+		File:     f,
+		MimeType: "application/octet-stream",
+		Attributes: []tg.DocumentAttributeClass{
+			&tg.DocumentAttributeFilename{FileName: name},
+		},
+		Message: string(caption), // Caption
+	}
+
+	updates, err := c.sender.To(inputChannel).Media(c.ctx, inputMedia)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send message: %w", err)
 	}
