@@ -2,7 +2,9 @@ package task
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -767,7 +769,7 @@ func (r *Runner) SyncProviders() error {
 				logger.Info("File %s missing in %s", path, provider)
 
 				if !r.safeMode {
-					if err := r.copyFile(masterFile, provider); err != nil {
+					if err := r.copyFile(masterFile, provider, ""); err != nil {
 						logger.Error("Failed to copy file: %v", err)
 					}
 				} else {
@@ -778,7 +780,21 @@ func (r *Runner) SyncProviders() error {
 				existingFile := fileMap[provider]
 				if existingFile.CalculatedID != masterFile.CalculatedID {
 					logger.Warning("Conflict detected for %s in %s (CalculatedID mismatch)", path, provider)
-					// Logic to rename and upload would go here
+
+					// Generate conflict name
+					ext := filepath.Ext(masterFile.Name)
+					nameWithoutExt := strings.TrimSuffix(masterFile.Name, ext)
+					timestamp := time.Now().Format("2006-01-02_15-04-05")
+					conflictName := fmt.Sprintf("%s_conflict_%s%s", nameWithoutExt, timestamp, ext)
+
+					if !r.safeMode {
+						logger.Info("Resolving conflict by uploading as %s", conflictName)
+						if err := r.copyFile(masterFile, provider, conflictName); err != nil {
+							logger.Error("Failed to resolve conflict: %v", err)
+						}
+					} else {
+						logger.DryRun("Would resolve conflict by uploading %s as %s to %s", path, conflictName, provider)
+					}
 				}
 			}
 		}

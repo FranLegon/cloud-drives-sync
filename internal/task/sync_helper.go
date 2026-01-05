@@ -137,7 +137,7 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 }
 
 // copyFile copies a file from one provider to another
-func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider) error {
+func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider, targetName string) error {
 	// 1. Get source client
 	sourceClient, err := r.GetOrCreateClient(&model.User{
 		Provider: masterFile.Provider,
@@ -154,7 +154,12 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider)
 		return fmt.Errorf("failed to get destination client: %w", err)
 	}
 
-	logger.InfoTagged([]string{string(targetProvider), destUser.Email}, "Copying %s from %s...", masterFile.Path, masterFile.Provider)
+	finalName := masterFile.Name
+	if targetName != "" {
+		finalName = targetName
+	}
+
+	logger.InfoTagged([]string{string(targetProvider), destUser.Email}, "Copying %s (as %s) from %s...", masterFile.Path, finalName, masterFile.Provider)
 
 	// 3. Ensure folder structure
 	dir := filepath.Dir(masterFile.Path)
@@ -181,7 +186,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider)
 		close(errChan)
 	}()
 
-	_, err = destClient.UploadFile(parentID, masterFile.Name, pr, masterFile.Size)
+	_, err = destClient.UploadFile(parentID, finalName, pr, masterFile.Size)
 	// Close the reader to ensure the writer stops if it's still writing
 	_ = pr.Close()
 
