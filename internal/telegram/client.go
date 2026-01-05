@@ -437,6 +437,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 // UploadFile uploads a file to the sync channel
 func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64) (*model.File, error) {
+	// Telegram allows all file extensions to be sent as documents, so no renaming is required.
 	if c.channelID == 0 {
 		return nil, fmt.Errorf("channel not initialized")
 	}
@@ -444,7 +445,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	const maxPartSize = 2000 * 1024 * 1024 // 2GB
 
 	if size <= maxPartSize {
-		fragment, err := c.uploadSinglePart(folderID, name, reader, size, false, 0, 0)
+		fragment, err := c.uploadSinglePart(folderID, name, reader, size, false, 1, 1)
 		if err != nil {
 			return nil, err
 		}
@@ -509,6 +510,11 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 }
 
 func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size int64, split bool, part, totalParts int) (*model.FileFragment, error) {
+	// Ensure folder path is not empty
+	if folderID == "" {
+		folderID = "/"
+	}
+
 	// Create metadata
 	meta := FileMetadata{
 		FileName:   name,
@@ -677,7 +683,24 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 }
 
 func (c *Client) CreateFolder(parentID, name string) (*model.Folder, error) {
-	return nil, errors.New("not supported - Telegram doesn't have folders")
+	// Telegram doesn't have real folders, so we simulate them by constructing the path.
+	// The "ID" of a folder in Telegram is just its full path.
+
+	var newPath string
+	if parentID == "" || parentID == "/" {
+		newPath = "/" + name
+	} else {
+		newPath = parentID + "/" + name
+	}
+
+	// Return a dummy folder object
+	return &model.Folder{
+		ID:             newPath,
+		Name:           name,
+		Path:           newPath,
+		ParentFolderID: parentID,
+		Provider:       model.ProviderTelegram,
+	}, nil
 }
 
 func (c *Client) DeleteFolder(folderID string) error {
