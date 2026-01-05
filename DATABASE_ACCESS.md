@@ -87,7 +87,7 @@ Stores information about split files (primarily for Telegram).
 
 ## Security Notes
 
-- The database file itself is encrypted using AES-256
-- The encryption key is derived from your master password
+- The database file itself is encrypted using AES-256 via SQLCipher
+- The encryption key is your raw master password
 - Without the correct password, the database appears as random data
-- Always keep backups of your `config.salt` file - it's required for decryption
+- The database encryption is independent of the config file encryption (which uses `config.salt`)

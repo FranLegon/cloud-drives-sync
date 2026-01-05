@@ -8,26 +8,10 @@ import (
 
 // TestDatabaseEncryption verifies that the database is properly encrypted
 func TestDatabaseEncryption(t *testing.T) {
-	// Create a temporary directory for testing
-	testDir := t.TempDir()
-	
 	password := "testPassword123!"
 	wrongPassword := "wrongPassword456!"
 	
-	// Override the executable path by setting the environment or by creating the DB directly in testDir
-	dbPath := filepath.Join(testDir, DBFileName)
-	
-	// We need to temporarily override GetDBPath behavior for testing
-	// Save original working directory and executable
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	
-	// The executable will be in a temp directory during tests
-	// We'll create the database in testDir and then reference it
-	t.Logf("Test directory: %s", testDir)
-	t.Logf("Expected DB path: %s", dbPath)
-	t.Logf("GetDBPath returns: %s", GetDBPath())
-	
+	// Get the database path that will be used by CreateDB/Open
 	expectedPath := GetDBPath()
 	expectedDir := filepath.Dir(expectedPath)
 	
