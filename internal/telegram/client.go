@@ -31,7 +31,7 @@ const (
 type FileMetadata struct {
 	FileName    string `json:"file_name"`
 	FolderPath  string `json:"folder_path"`
-	GeneratedID string `json:"generated_id"`
+	GeneratedID string `json:"calculated_id"`
 	Split       bool   `json:"split"`
 	Part        int    `json:"part"`
 	TotalParts  int    `json:"total_parts"`
@@ -45,7 +45,7 @@ func (c *Client) findMessagesByGeneratedID(generatedID string) ([]tg.MessageClas
 
 	// Search for the generated ID in the caption
 	// We use the JSON key to be more specific
-	query := fmt.Sprintf(`"generated_id":"%s"`, generatedID)
+	query := fmt.Sprintf(`"calculated_id":"%s"`, generatedID)
 
 	inputPeer := &tg.InputPeerChannel{
 		ChannelID:  c.channelID,
@@ -414,7 +414,6 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 					ParentFolderID:   meta.FolderPath,
 					Size:             partSize,
 					TelegramUniqueID: strconv.Itoa(msg.ID),
-					CalculatedID:     fmt.Sprintf("%s-%d", meta.FileName, partSize),
 					Provider:         model.ProviderTelegram,
 					UserEmail:        c.user.Email,
 					CreatedTime:      time.Unix(int64(msg.Date), 0),
@@ -423,6 +422,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 					TotalParts:       1,
 					Fragments:        []*model.FileFragment{fragment},
 				}
+				file.UpdateCalculatedID()
 				// For single files, fragment FileID is the file ID
 				fragment.FileID = file.ID
 				fileMap[fullPath] = file
@@ -474,7 +474,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				file.TelegramUniqueID = file.Fragments[0].TelegramUniqueID
 			}
 			// Set CalculatedID with total size
-			file.CalculatedID = fmt.Sprintf("%s-%d", file.Name, file.Size)
+			file.UpdateCalculatedID()
 
 			// Set FileID for all fragments
 			for _, frag := range file.Fragments {
@@ -556,13 +556,12 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 			}
 		}
 
-		return &model.File{
+		file := &model.File{
 			ID:               strconv.Itoa(firstMsgID),
 			Name:             name,
 			Path:             folderID + "/" + name,
 			Size:             size,
 			TelegramUniqueID: telegramUniqueID,
-			CalculatedID:     generatedID,
 			Provider:         model.ProviderTelegram,
 			UserEmail:        c.user.Email,
 			CreatedTime:      time.Now(),
@@ -570,7 +569,9 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 			Split:            len(existingMessages) > 1,
 			TotalParts:       len(existingMessages),
 			// Fragments are not fully populated here, but that's usually fine for sync checks
-		}, nil
+		}
+		file.UpdateCalculatedID()
+		return file, nil
 	}
 
 	if size <= maxPartSize {
@@ -585,7 +586,6 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 			Path:             folderID + "/" + name,
 			Size:             size,
 			TelegramUniqueID: fragment.TelegramUniqueID,
-			CalculatedID:     generatedID,
 			Provider:         model.ProviderTelegram,
 			UserEmail:        c.user.Email,
 			CreatedTime:      time.Now(),
@@ -594,6 +594,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 			TotalParts:       1,
 			Fragments:        []*model.FileFragment{fragment},
 		}
+		file.UpdateCalculatedID()
 		fragment.FileID = file.ID
 		return file, nil
 	}

@@ -154,13 +154,13 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				Size:            f.Size,
 				GoogleDriveHash: f.Md5Checksum,
 				GoogleDriveID:   f.Id,
-				CalculatedID:    fmt.Sprintf("%s-%d", f.Name, f.Size),
 				Provider:        model.ProviderGoogle,
 				UserEmail:       c.user.Email,
 				CreatedTime:     parseTime(f.CreatedTime),
 				ModifiedTime:    parseTime(f.ModifiedTime),
 				ParentFolderID:  folderID,
 			}
+			file.UpdateCalculatedID()
 
 			if len(f.Owners) > 0 {
 				file.OwnerEmail = f.Owners[0].EmailAddress
@@ -258,13 +258,13 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		Size:            createdFile.Size,
 		GoogleDriveHash: createdFile.Md5Checksum,
 		GoogleDriveID:   createdFile.Id,
-		CalculatedID:    fmt.Sprintf("%s-%d", createdFile.Name, createdFile.Size),
 		Provider:        model.ProviderGoogle,
 		UserEmail:       c.user.Email,
 		CreatedTime:     parseTime(createdFile.CreatedTime),
 		ModifiedTime:    parseTime(createdFile.ModifiedTime),
 		ParentFolderID:  folderID,
 	}
+	result.UpdateCalculatedID()
 
 	if len(createdFile.Owners) > 0 {
 		result.OwnerEmail = createdFile.Owners[0].EmailAddress
@@ -394,12 +394,12 @@ func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
 		Size:            f.Size,
 		GoogleDriveHash: f.Md5Checksum,
 		GoogleDriveID:   f.Id,
-		CalculatedID:    fmt.Sprintf("%s-%d", f.Name, f.Size),
 		Provider:        model.ProviderGoogle,
 		UserEmail:       c.user.Email,
 		CreatedTime:     parseTime(f.CreatedTime),
 		ModifiedTime:    parseTime(f.ModifiedTime),
 	}
+	file.UpdateCalculatedID()
 
 	if len(f.Parents) > 0 {
 		file.ParentFolderID = f.Parents[0]

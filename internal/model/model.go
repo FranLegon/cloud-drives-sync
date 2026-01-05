@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // Provider represents a cloud storage provider
 type Provider string
@@ -80,6 +83,19 @@ type File struct {
 	Split                bool
 	TotalParts           int
 	Fragments            []*FileFragment
+}
+
+// UpdateCalculatedID updates the CalculatedID based on available hashes
+func (f *File) UpdateCalculatedID() {
+	if f.CalculatedSHA256Hash != "" {
+		f.CalculatedID = f.CalculatedSHA256Hash
+	} else if f.GoogleDriveHash != "" {
+		f.CalculatedID = f.GoogleDriveHash
+	} else if f.OneDriveHash != "" {
+		f.CalculatedID = f.OneDriveHash
+	} else {
+		f.CalculatedID = fmt.Sprintf("%s-%d", f.Name, f.Size)
+	}
 }
 
 // FileFragment represents a part of a split file
