@@ -173,12 +173,18 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider)
 	go func() {
 		defer pw.Close()
 		if err := sourceClient.DownloadFile(masterFile.ID, pw); err != nil {
-			errChan <- err
+			// Ignore closed pipe error (happens if upload is skipped or finishes early)
+			if err != io.ErrClosedPipe && !strings.Contains(err.Error(), "closed pipe") {
+				errChan <- err
+			}
 		}
 		close(errChan)
 	}()
 
 	_, err = destClient.UploadFile(parentID, masterFile.Name, pr, masterFile.Size)
+	// Close the reader to ensure the writer stops if it's still writing
+	_ = pr.Close()
+
 	if err != nil {
 		return fmt.Errorf("upload failed: %w", err)
 	}

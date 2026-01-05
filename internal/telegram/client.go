@@ -53,10 +53,10 @@ func (c *Client) findMessagesByGeneratedID(generatedID string) ([]tg.MessageClas
 	}
 
 	res, err := c.client.API().MessagesSearch(c.ctx, &tg.MessagesSearchRequest{
-		Peer:     inputPeer,
-		Q:        query,
-		Filter:   &tg.InputMessagesFilterDocument{},
-		Limit:    100, // Should be enough for split files
+		Peer:   inputPeer,
+		Q:      query,
+		Filter: &tg.InputMessagesFilterDocument{},
+		Limit:  100, // Should be enough for split files
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to search messages: %w", err)
@@ -89,7 +89,6 @@ func (c *Client) updateMessageCaption(msgID int, caption string) error {
 	})
 	return err
 }
-
 
 // Client represents a Telegram client
 type Client struct {
@@ -548,7 +547,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		// We construct a minimal file object since we didn't re-upload
 		// If it was split, we might not have all fragments here, but for sync purposes
 		// we mainly need the ID and Path.
-		
+
 		// If we didn't find part 1, use the first message ID found
 		if firstMsgID == 0 && len(existingMessages) > 0 {
 			if msg, ok := existingMessages[0].(*tg.Message); ok {
@@ -853,7 +852,7 @@ func (c *Client) DeleteFolder(folderID string) error {
 }
 
 func (c *Client) GetSyncFolderID() (string, error) {
-	return "", nil
+	return "/", nil
 }
 
 func (c *Client) ShareFolder(folderID, email string, role string) error {
