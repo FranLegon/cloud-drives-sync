@@ -751,10 +751,38 @@ func (r *Runner) SyncProviders() error {
 
 	// Check for missing files
 	providers := []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram}
+	softDeletedPath := "sync-cloud-drives-aux/soft-deleted"
 
 	for path, fileMap := range filesByPath {
 		// Determine master file (prioritize Google, then Microsoft, then Telegram)
 		var masterFile *model.File
+
+		// Check if any file is in soft-deleted folder
+		isSoftDeleted := false
+		if strings.Contains(path, softDeletedPath) {
+			isSoftDeleted = true
+		}
+
+		// Logic for "If a file is found in this special folder for one provider and in another folder for another provider,
+		// it must be moved to sync-cloud-drives-aux/soft-deleted for all providers."
+		// However, r.db.GetAllFilesAcrossProviders grouped by Path. So if it is in a different folder,
+		// it will be treated as a different entry in filesByPath.
+		// We need to inspect file content identity (CalculatedID) to catch moves, but that is complex across providers.
+		// For now, based strictly on requirements: "sync-providers should not sync this folder, just ignore it."
+		// But "If a file is found in this special folder for one provider and in another folder for another provider"
+		// This implies we need to look for duplicates across the map or iterate.
+		// Since CalculatedIDs might differ if not hashed, we rely on file name + size or weak hash if strong hash absent.
+
+		if isSoftDeleted {
+			// Ignore syncing creating files in this folder for other providers if missing?
+			// Requirement: "sync-providers should not sync this folder, just ignore it."
+			// BUT "If a file is found in this special folder for one provider and in another folder for another provider, it must be moved to sync-cloud-drives-aux/soft-deleted for all providers."
+
+			// Let's implement the move logic first. find identical files in other locations.
+			// We iterate through all OTHER entries in filesByPath to find matching files.
+			// This is O(N^2) which is bad, but N is number of unique files.
+			// Better: map {CalculatedID -> []paths}
+		}
 
 		if f, ok := fileMap[model.ProviderGoogle]; ok {
 			masterFile = f
@@ -765,6 +793,11 @@ func (r *Runner) SyncProviders() error {
 		}
 
 		if masterFile == nil {
+			continue
+		}
+
+		// Skip syncing if this is the soft deleted folder
+		if isSoftDeleted {
 			continue
 		}
 
@@ -803,6 +836,11 @@ func (r *Runner) SyncProviders() error {
 				}
 			}
 		}
+	}
+
+	// Check for soft-delete consistency
+	if err := r.checkSoftDeletedConsistency(filesByPath, softDeletedPath); err != nil {
+		logger.Error("Failed to check soft deleted consistency: %v", err)
 	}
 
 	// Phase 2: Distribute Shortcuts for Microsoft OneDrive
@@ -1008,4 +1046,75 @@ func (r *Runner) GetProviderQuotas() ([]*model.ProviderQuota, error) {
 	}
 
 	return result, nil
+}
+
+// checkSoftDeletedConsistency ensures that if a file is in soft-deleted in one provider, it moves it there for others.
+func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string) error {
+	// Map CalculatedID -> SoftDeletedFile (if exists)
+	softDeletedIDs := make(map[string]*model.File)
+
+	for path, fileMap := range filesByPath {
+		if strings.Contains(path, softDeletedPath) {
+			// Find a representative file
+			for _, f := range fileMap {
+				softDeletedIDs[f.CalculatedID] = f
+				break
+			}
+		}
+	}
+
+	for path, fileMap := range filesByPath {
+		// Skip if already in soft-deleted path
+		if strings.Contains(path, softDeletedPath) {
+			continue
+		}
+
+		for provider, file := range fileMap {
+			if target, ok := softDeletedIDs[file.CalculatedID]; ok {
+				// Found a file that should be soft deleted
+				logger.Info("File %s (CalculatedID: %s) found in %s but soft-deleted in another provider. Moving to soft-deleted.", path, file.CalculatedID, provider)
+
+				// Calculate target path
+				// "sync-cloud-drives-aux/soft-deleted" is relative to sync root.
+				// target.Path includes the full path relative to sync root.
+				// We want to move 'file' to 'target.Path' (or construct if target is just representative)
+				// Ideally we move it to the path defined by the file in soft-deleted.
+
+				targetSoftPath := target.Path
+				targetFolder := filepath.Dir(targetSoftPath)
+
+				if !r.safeMode {
+					// Find correct user/client
+					var client api.CloudClient
+					var err error
+
+					for i := range r.config.Users {
+						if r.config.Users[i].Provider == provider && (r.config.Users[i].Email == file.UserEmail || r.config.Users[i].Phone == file.UserPhone) {
+							client, err = r.GetOrCreateClient(&r.config.Users[i])
+							break
+						}
+					}
+
+					if client == nil || err != nil {
+						logger.Error("Could not find client for file %s", file.Path)
+						continue
+					}
+
+					// Get target folder ID
+					targetFolderID, err := r.ensureFolderStructure(client, targetFolder, provider)
+					if err != nil {
+						logger.Error("Failed to ensure folder structure for %s: %v", targetFolder, err)
+						continue
+					}
+
+					if err := client.MoveFile(file.ID, targetFolderID); err != nil {
+						logger.Error("Failed to move file %s to soft-deleted: %v", path, err)
+					}
+				} else {
+					logger.DryRun("Would move %s to %s in %s", path, targetSoftPath, provider)
+				}
+			}
+		}
+	}
+	return nil
 }

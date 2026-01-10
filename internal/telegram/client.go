@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +36,7 @@ type FileMetadata struct {
 	Split       bool   `json:"split"`
 	Part        int    `json:"part"`
 	TotalParts  int    `json:"total_parts"`
+	SoftDeleted bool   `json:"soft-deleted"`
 }
 
 // findMessagesByGeneratedID searches for messages with the given generated ID
@@ -653,6 +655,7 @@ func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size 
 		Split:       split,
 		Part:        part,
 		TotalParts:  totalParts,
+		SoftDeleted: strings.Contains(folderID, "sync-cloud-drives-aux/soft-deleted"),
 	}
 
 	// Serialize metadata
