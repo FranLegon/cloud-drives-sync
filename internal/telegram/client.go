@@ -801,24 +801,24 @@ func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
 	// But we lose the ID. This is tricky if "UpdateFile" implies keeping ID.
 	// For metadata.db sync, keeping ID isn't strictly necessary as long as "Download" finds it by name.
 	// But "metadata.db" is found by scanning the Aux folder for a file named "metadata.db".
-	
+
 	// Get old file info to get the folder ID/Parent
 	// We don't easily have it unless we query or it's passed.
 	// However, UploadMetadataDB knows the folder logic.
-	
+
 	// Since we are replacing the logic in UploadMetadataDB to use UpdateFile when file exists,
 	// checking if we can just Delete + Upload there is easier for Telegram.
 	// But to satisfy interface:
-	
+
 	if err := c.DeleteFile(fileID); err != nil {
 		return err
 	}
-	
+
 	// We need folderID. Since we lack it here, we assume standard sync channel?
 	// Actually, metadata.db is in "sync-cloud-drives-aux" "folder".
 	// In Telegram, folders are just paths in metadata.
 	// We can try to upload with the standard Aux path.
-	
+
 	folderID := "/sync-cloud-drives-aux"
 	_, err := c.UploadFile(folderID, "metadata.db", reader, size)
 	return err
@@ -920,4 +920,9 @@ func (c *Client) GetUserEmail() string {
 
 func (c *Client) GetUserIdentifier() string {
 	return c.user.Phone
+}
+
+// CreateShortcut creates a shortcut (not supported in Telegram)
+func (c *Client) CreateShortcut(parentID, name, targetID string) (*model.File, error) {
+	return nil, fmt.Errorf("not supported - Telegram does not support shortcuts")
 }

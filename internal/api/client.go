@@ -37,6 +37,7 @@ type CloudClient interface {
 	CreateFolder(parentID, name string) (*model.Folder, error)
 	DeleteFolder(folderID string) error
 	GetSyncFolderID() (string, error)
+	CreateShortcut(parentID, name, targetID string) (*model.File, error)
 
 	// Permission management
 	ShareFolder(folderID, email string, role string) error

@@ -583,3 +583,31 @@ func mustReadAll(r io.Reader) []byte {
 	data, _ := io.ReadAll(r)
 	return data
 }
+
+// CreateShortcut creates a shortcut to a file
+func (c *Client) CreateShortcut(parentID, name, targetID string) (*model.File, error) {
+	shortcut := &drive.File{
+		Name:     name,
+		MimeType: "application/vnd.google-apps.shortcut",
+		Parents:  []string{parentID},
+		ShortcutDetails: &drive.FileShortcutDetails{
+			TargetId: targetID,
+		},
+	}
+
+	createdShortcut, err := c.service.Files.Create(shortcut).Fields("id, name, mimeType, shortcutDetails").Do()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Google Drive shortcut: %w", err)
+	}
+
+	file := &model.File{
+		ID:             createdShortcut.Id,
+		Name:           createdShortcut.Name,
+		Provider:       model.ProviderGoogle,
+		UserEmail:      c.user.Email,
+		ParentFolderID: parentID,
+	}
+	file.UpdateCalculatedID()
+
+	return file, nil
+}

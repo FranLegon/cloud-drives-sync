@@ -805,6 +805,80 @@ func (r *Runner) SyncProviders() error {
 		}
 	}
 
+	// Phase 2: Distribute Shortcuts for Microsoft OneDrive
+	if err := r.distributeShortcuts(); err != nil {
+		logger.Error("Failed to distribute shortcuts: %v", err)
+	}
+
+	return nil
+}
+
+// distributeShortcuts ensures that for every file in Microsoft OneDrive,
+// all other OneDrive accounts have a shortcut to it.
+func (r *Runner) distributeShortcuts() error {
+	logger.Info("Distributing OneDrive shortcuts...")
+
+	files, err := r.db.GetAllFilesAcrossProviders()
+	if err != nil {
+		return err
+	}
+
+	// Group files by Path
+	filesByPath := make(map[string][]*model.File)
+	for _, f := range files {
+		filesByPath[f.Path] = append(filesByPath[f.Path], f)
+	}
+
+	// Identify all Microsoft accounts
+	var msUsers []model.User
+	for _, u := range r.config.Users {
+		if u.Provider == model.ProviderMicrosoft {
+			msUsers = append(msUsers, u)
+		}
+	}
+
+	if len(msUsers) < 2 {
+		return nil // No need to distribute if only 0 or 1 MS account
+	}
+
+	for path, pathFiles := range filesByPath {
+		// Check if this path exists in Microsoft
+		var msFiles []*model.File
+		for _, f := range pathFiles {
+			if f.Provider == model.ProviderMicrosoft {
+				msFiles = append(msFiles, f)
+			}
+		}
+
+		if len(msFiles) == 0 {
+			continue
+		}
+
+		// Pick a source file (preferably one that's not a shortcut if we knew, otherwise first)
+		sourceFile := msFiles[0]
+
+		// Ensure all other MS users have it
+		for _, user := range msUsers {
+			// Check if user has it
+			hasIt := false
+			for _, f := range msFiles {
+				if f.UserEmail == user.Email {
+					hasIt = true
+					break
+				}
+			}
+
+			if !hasIt {
+				if !r.safeMode {
+					if err := r.createShortcut(sourceFile, &user); err != nil {
+						logger.Error("Failed to create shortcut for %s in %s: %v", path, user.Email, err)
+					}
+				} else {
+					logger.DryRun("Would create shortcut for %s in %s -> %s", path, user.Email, sourceFile.UserEmail)
+				}
+			}
+		}
+	}
 	return nil
 }
 

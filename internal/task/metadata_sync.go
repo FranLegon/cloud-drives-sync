@@ -125,11 +125,11 @@ func DownloadMetadataDB(cfg *model.Config, dbPath string) error {
 
 		logger.Info("Downloading metadata.db from %s (%s)...", user.Provider, user.Email)
 		if err := client.DownloadFile(fileID, out); err != nil {
-            out.Close()
-            os.Remove(dbPath) // Clean up partial
-            return err
-        }
-        return nil
+			out.Close()
+			os.Remove(dbPath) // Clean up partial
+			return err
+		}
+		return nil
 	}
 
 	// Priority 1: Google Main
@@ -198,12 +198,14 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 		// Find or Create Aux Folder
 		var auxID string
 		if user.Provider == model.ProviderTelegram {
-            // Check if we need to 'create' it or just use the path string.
-            // CreateFolder calls return a dummy folder with ID=Path usually.
-            // Let's call CreateFolder to be consistent and get the 'ID'.
-            f, err := client.CreateFolder(rootID, AuxFolder)
-            if err != nil { return err }
-            auxID = f.ID
+			// Check if we need to 'create' it or just use the path string.
+			// CreateFolder calls return a dummy folder with ID=Path usually.
+			// Let's call CreateFolder to be consistent and get the 'ID'.
+			f, err := client.CreateFolder(rootID, AuxFolder)
+			if err != nil {
+				return err
+			}
+			auxID = f.ID
 		} else {
 			folders, err := client.ListFolders(rootID)
 			if err != nil {
@@ -243,7 +245,7 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 					match = true
 				}
 			}
-			
+
 			if match {
 				existingFileID = f.ID
 				break
@@ -265,30 +267,30 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 				return fmt.Errorf("failed to upload metadata.db: %w", err)
 			}
 		}
-        
-        return nil
-        
-        return nil
+
+		return nil
+
+		return nil
 	}
 
-    // Standardize path separators for logs
-    // dbPath logic is already standard
+	// Standardize path separators for logs
+	// dbPath logic is already standard
 
 	successCount := 0
 	for i := range cfg.Users {
 		user := &cfg.Users[i]
-        // Skip calling upload if token is known invalid? No, createClient handles refreshing.
-        
+		// Skip calling upload if token is known invalid? No, createClient handles refreshing.
+
 		if err := uploadToUser(user); err != nil {
 			logger.ErrorTagged([]string{string(user.Provider), user.Email}, "Failed to sync metadata: %v", err)
 		} else {
-            successCount++
-        }
+			successCount++
+		}
 	}
-    
-    if successCount == 0 && len(cfg.Users) > 0 {
-        return fmt.Errorf("failed to upload metadata.db to any provider")
-    }
+
+	if successCount == 0 && len(cfg.Users) > 0 {
+		return fmt.Errorf("failed to upload metadata.db to any provider")
+	}
 
 	return nil
 }

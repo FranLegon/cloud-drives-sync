@@ -13,6 +13,7 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
+	"github.com/microsoftgraph/msgraph-sdk-go/drives"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"golang.org/x/oauth2"
 )
@@ -203,36 +204,36 @@ func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
 func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64) (*model.File, error) {
 	ctx := context.Background()
 
-    // 1. Create the file placeholder
-    createRequestBody := models.NewDriveItem()
-    createRequestBody.SetName(&name)
-    fileFacet := models.NewFile()
-    createRequestBody.SetFile(fileFacet)
-    // We can't easily set conflict behavior here without config, but default is usually fail if exists.
+	// 1. Create the file placeholder
+	createRequestBody := models.NewDriveItem()
+	createRequestBody.SetName(&name)
+	fileFacet := models.NewFile()
+	createRequestBody.SetFile(fileFacet)
+	// We can't easily set conflict behavior here without config, but default is usually fail if exists.
 
-    createdItem, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(folderID).Children().Post(ctx, createRequestBody, nil)
-    if err != nil {
-        return nil, fmt.Errorf("failed to create file placeholder: %w", err)
-    }
+	createdItem, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(folderID).Children().Post(ctx, createRequestBody, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create file placeholder: %w", err)
+	}
 
 	// 2. Upload content
-    data, err := io.ReadAll(reader)
-    if err != nil {
-        return nil, fmt.Errorf("failed to read content: %w", err)
-    }
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read content: %w", err)
+	}
 
 	// Put content
-    // Note: Put requires []byte and config. We pass nil for config.
+	// Note: Put requires []byte and config. We pass nil for config.
 	_, err = c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(*createdItem.GetId()).Content().Put(ctx, data, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to upload file content: %w", err)
 	}
-    
-    // We reuse createdItem for metadata. Size might be 0 in createdItem, but we know what we uploaded.
+
+	// We reuse createdItem for metadata. Size might be 0 in createdItem, but we know what we uploaded.
 	file := &model.File{
 		ID:             *createdItem.GetId(),
 		Name:           *createdItem.GetName(),
-		Size:           size, 
+		Size:           size,
 		OneDriveID:     *createdItem.GetId(),
 		Provider:       model.ProviderMicrosoft,
 		UserEmail:      c.user.Email,
@@ -245,7 +246,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	if createdItem.GetLastModifiedDateTime() != nil {
 		file.ModifiedTime = *createdItem.GetLastModifiedDateTime()
 	}
-    
+
 	file.UpdateCalculatedID()
 
 	return file, nil
@@ -254,11 +255,11 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 // UpdateFile updates file content
 func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
 	ctx := context.Background()
-    
-    data, err := io.ReadAll(reader)
-    if err != nil {
-        return fmt.Errorf("failed to read content: %w", err)
-    }
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return fmt.Errorf("failed to read content: %w", err)
+	}
 
 	_, err = c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(fileID).Content().Put(ctx, data, nil)
 	if err != nil {
@@ -382,7 +383,30 @@ func (c *Client) CreateSyncFolder(name string) error {
 
 // ShareFolder shares a folder
 func (c *Client) ShareFolder(folderID, email string, role string) error {
-	logger.InfoTagged([]string{"Microsoft", c.user.Email}, "Would share folder %s with %s (role: %s) - not fully implemented", folderID, email, role)
+	ctx := context.Background()
+
+	requestBody := drives.NewItemItemsItemInvitePostRequestBody()
+	recipient := models.NewDriveRecipient()
+	recipient.SetEmail(&email)
+	requestBody.SetRecipients([]models.DriveRecipientable{recipient})
+
+	sendInvite := false
+	requestBody.SetSendInvitation(&sendInvite)
+
+	var msRole string
+	if role == "writer" {
+		msRole = "write"
+	} else {
+		msRole = "read"
+	}
+	requestBody.SetRoles([]string{msRole})
+
+	_, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(folderID).Invite().Post(ctx, requestBody, nil)
+	if err != nil {
+		return fmt.Errorf("failed to share item: %w", err)
+	}
+
+	logger.InfoTagged([]string{"Microsoft", c.user.Email}, "Shared item %s with %s (role: %s)", folderID, email, msRole)
 	return nil
 }
 
@@ -481,4 +505,41 @@ func (c *Client) GetUserEmail() string {
 // GetUserIdentifier returns the user identifier
 func (c *Client) GetUserIdentifier() string {
 	return c.user.Email
+}
+
+// CreateShortcut creates a shortcut (link) to a target item
+func (c *Client) CreateShortcut(parentID, name, targetID string) (*model.File, error) {
+	ctx := context.Background()
+
+	newItem := models.NewDriveItem()
+	newItem.SetName(&name)
+
+	remoteItem := models.NewRemoteItem()
+	remoteItem.SetId(&targetID)
+	// We assume permissions are already handled so simply pointing to ID works if accessible
+	newItem.SetRemoteItem(remoteItem)
+
+	// Post to children of parentID
+	item, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(parentID).Children().Post(ctx, newItem, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create shortcut: %w", err)
+	}
+
+	file := &model.File{
+		ID:             *item.GetId(),
+		Name:           *item.GetName(),
+		Provider:       model.ProviderMicrosoft,
+		UserEmail:      c.user.Email,
+		ParentFolderID: parentID,
+	}
+
+	// Attempt to get remote info
+	if item.GetRemoteItem() != nil {
+		if item.GetRemoteItem().GetSize() != nil {
+			file.Size = *item.GetRemoteItem().GetSize()
+		}
+	}
+
+	file.UpdateCalculatedID()
+	return file, nil
 }

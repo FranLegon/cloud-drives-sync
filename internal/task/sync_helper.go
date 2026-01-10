@@ -202,3 +202,46 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 	logger.InfoTagged([]string{string(targetProvider), destUser.Email}, "File copied successfully")
 	return nil
 }
+
+// createShortcut shares the source file and creates a shortcut in the target account
+func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) error {
+	// 1. Get Source Client
+	sourceClient, err := r.GetOrCreateClient(&model.User{
+		Provider: sourceFile.Provider,
+		Email:    sourceFile.UserEmail,
+		Phone:    "", // Phone not stored in File model, but only relevant for Telegram which doesn't support shortcuts
+	})
+	if err != nil {
+		return fmt.Errorf("failed to get source client: %w", err)
+	}
+
+	// 2. Share Source File with Target User
+	logger.InfoTagged([]string{string(sourceFile.Provider), sourceFile.UserEmail}, "Sharing %s with %s...", sourceFile.Name, targetUser.Email)
+	if err := sourceClient.ShareFolder(sourceFile.ID, targetUser.Email, "reader"); err != nil {
+		logger.Warning("Share failed (attempting shortcut anyway): %v", err)
+	}
+
+	// 3. Get Target Client
+	targetClient, err := r.GetOrCreateClient(targetUser)
+	if err != nil {
+		return fmt.Errorf("failed to get target client: %w", err)
+	}
+
+	// 4. Ensure Folder Structure in Target
+	dir := filepath.Dir(sourceFile.Path)
+	dir = strings.ReplaceAll(dir, "\\", "/")
+
+	parentID, err := r.ensureFolderStructure(targetClient, dir, targetUser.Provider)
+	if err != nil {
+		return fmt.Errorf("failed to ensure folder structure: %w", err)
+	}
+
+	// 5. Create Shortcut
+	logger.InfoTagged([]string{string(targetUser.Provider), targetUser.Email}, "Creating shortcut for %s...", sourceFile.Name)
+	_, err = targetClient.CreateShortcut(parentID, sourceFile.Name, sourceFile.ID)
+	if err != nil {
+		return fmt.Errorf("failed to create shortcut: %w", err)
+	}
+
+	return nil
+}
