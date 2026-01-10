@@ -16,8 +16,9 @@ The application must only interact with files and folders contained within speci
 - Backup accounts own the files but do not own folders.
 
 **Microsoft OneDrive for Business:**
-- Multiple folders named `sync-cloud-drives` (distinguished by account like `sync-cloud-drives-msbackuper1` for msbackuper1@outlook.com, `sync-cloud-drives-msbackuper2` for msbackuper2@outlook.com, etc.) exist, one per backup account.
-- Each backup account owns its own `sync-cloud-drives-accountname` folder and all files within it.
+- A single folder named `sync-cloud-drives` resides in each backup account.
+- Each backup account owns its own `sync-cloud-drives` folder and all subfolders within it.
+- Files are distributed across backup accounts. To maintain a consistent directory structure across all accounts, if a file is owned by Account A, Account B will contain a shortcut to that file in the corresponding location within its own `sync-cloud-drives` structure.
 - Folder owner is always the file owner in OneDrive.
 
 **Telegram:**
@@ -27,7 +28,7 @@ The application must only interact with files and folders contained within speci
 *   **Isolation:** The tool must never read, list, modify, or delete any file or folder outside of the designated `sync-cloud-drives` directories.
 *   **Pre-flight Check:** Before executing any command that interacts with the cloud, the tool must perform a "pre-flight check":
     *   **Google Drive:** Verifies that exactly one folder named `sync-cloud-drives` is owned by the main account. It will search all active folders and explicitly ignore any folders that are marked as trashed/in the recycle bin. If the folder is found but is not in the root directory, it will be moved there. If more than one active folder with this name are found, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
-    *   **Microsoft OneDrive:** Verifies that each backup account has exactly one `sync-cloud-drives-accountname` folder. If more than one active folder with this name are found in a backup account, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
+    *   **Microsoft OneDrive:** Verifies that exactly one folder named `sync-cloud-drives` exists in each backup account. If more than one active folder with this name are found in a backup account, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
     *   **Telegram:** Verifies that the Telegram account is accessible and ready for file operations.
 
 #### **3. Architecture & Design Principles**
@@ -91,7 +92,6 @@ The application must only interact with files and folders contained within speci
       "provider": "Microsoft",
       "email": "work.backup@company.com",
       "is_main": false,
-      "sync_folder_name": "sync-cloud-drives-1",
       "refresh_token": "..."
     },
     {
@@ -171,13 +171,13 @@ CREATE TABLE IF NOT EXISTS folders (
     *   Exits with an error if no main account exists.
     *   Initiates OAuth 2.0 flow by starting a local web server.
     *   **Google Drive:** Upon successful authorization, the main account shares its `sync-cloud-drives` folder with the new backup account, granting "editor" permissions.
-    *   **Microsoft OneDrive:** Upon successful authorization, prompts for a unique sync folder name (e.g., `sync-cloud-drives-msexample`) and creates this folder in the backup account's root.
+    *   **Microsoft OneDrive:** Upon successful authorization, creates a `sync-cloud-drives` folder in the backup account's root if it doesn't exist.
     *   **Telegram:** Allows adding Telegram account for backup storage purposes.
 
 *   **`get-metadata`**
     *   After passing the pre-flight checks, it recursively scans the designated sync folders for every account.
     *   **Google Drive:** Scans the `sync-cloud-drives` folder and all shared content within it.
-    *   **Microsoft OneDrive:** Scans all `sync-cloud-drives-accountname` folders.
+    *   **Microsoft OneDrive:** Scans the `sync-cloud-drives` folder in each account, handling both actual files and shortcuts to files owned by other accounts.
     *   **Telegram:** Lists all files stored in the Telegram account.
     *   For each file, it retrieves available provider-specific identifiers and hashes:
         *   **Google Drive:** Retrieves `id` (mapped to `googledrive_id`) and `md5Checksum` (mapped to `googledrive_hash`).
@@ -230,7 +230,7 @@ CREATE TABLE IF NOT EXISTS folders (
 *   **`delete-unsynced-files`**
     *   Deletes all files in backup accounts that are not inside the `sync-cloud-drives` folder or its subfolders.
     *   **Goal:** Clean up backup accounts to ensure they only contain synced data.
-    *   **Logic:** Iterates through all backup accounts. For each account, lists all files and folders in the root directory. Any item that is not the designated sync folder (e.g., `sync-cloud-drives` for Google, `sync-cloud-drives-accountname` for Microsoft) is deleted.
+    *   **Logic:** Iterates through all backup accounts. For each account, lists all files and folders in the root directory. Any item that is not the designated sync folder (e.g., `sync-cloud-drives`) is deleted.
     *   **Safety:** Respects the `--safe` flag to perform a dry run.
 
 *   **`help`**
@@ -263,9 +263,10 @@ CREATE TABLE IF NOT EXISTS folders (
 - Single `sync-cloud-drives` folder shared among all accounts.
 
 **Microsoft OneDrive for Business:**
-- Each backup account owns its own `sync-cloud-drives-accountname` folder.
+- Each backup account owns its own `sync-cloud-drives` folder.
 - Folder owner is always the file owner.
-- Each backup account must have a uniquely named sync folder. Subfolders can be duplicated across accounts, but not files. E.g., two backup accounts can each have a folder named `Projects`, but they cannot both have a file named `report.pdf` with the same hash in their respective `Projects` folders.
+- Consistency is maintained via shortcuts. If Account A owns a file, Account B holds a shortcut to it.
+- Each backup account effectively has a full view of the directory structure via a mix of owned files and shortcuts.
 
 **Telegram:**
 - Subject to Telegram API file size limits and rate limits.

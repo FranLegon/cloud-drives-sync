@@ -89,38 +89,29 @@ func (c *Client) initializeDrive() error {
 func (c *Client) PreFlightCheck() error {
 	ctx := context.Background()
 
-	if !c.user.IsMain && c.user.SyncFolderName != "" {
-		// List root children to find the sync folder
-		result, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId("root").Children().Get(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("failed to list root: %w", err)
-		}
-
-		found := false
-		for _, item := range result.GetValue() {
-			if item.GetName() != nil && *item.GetName() == c.user.SyncFolderName && item.GetFolder() != nil {
-				c.syncFolderID = *item.GetId()
-				found = true
-				break
-			}
-		}
-
-		if !found {
-			return fmt.Errorf("sync folder '%s' not found", c.user.SyncFolderName)
-		}
-
-		logger.InfoTagged([]string{"Microsoft", c.user.Email}, "Found sync folder '%s' (%s)", c.user.SyncFolderName, c.syncFolderID)
-		return nil
-	} else if c.user.IsMain {
-		// Should not happen as per new requirements (Main is Google only)
-		// But keeping for safety
-		_, err := c.graphClient.Me().Drive().Get(ctx, nil)
-		if err != nil {
-			return fmt.Errorf("failed to access drive: %w", err)
-		}
-		logger.InfoTagged([]string{"Microsoft", c.user.Email}, "Pre-flight check passed for main account")
+	// List root children to find the sync folder
+	result, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId("root").Children().Get(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to list root: %w", err)
 	}
 
+	found := false
+	for _, item := range result.GetValue() {
+		if item.GetName() != nil && *item.GetName() == syncFolderPrefix && item.GetFolder() != nil {
+			c.syncFolderID = *item.GetId()
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		// New Requirement: If pre-flight check fails to find the folder during initialization/check,
+		// it might be cleaner to just error out, unless we are in the "init/add" phase where we create it.
+		// However, PreFlightCheck implies checking existing state.
+		return fmt.Errorf("sync folder '%s' not found", syncFolderPrefix)
+	}
+
+	logger.InfoTagged([]string{"Microsoft", c.user.Email}, "Found sync folder '%s' (%s)", syncFolderPrefix, c.syncFolderID)
 	return nil
 }
 
@@ -138,8 +129,25 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 	var allFiles []*model.File
 	for _, item := range items.GetValue() {
-		if item.GetFolder() != nil {
-			continue
+		isFolder := item.GetFolder() != nil
+		isShortcut := item.GetRemoteItem() != nil
+
+		// If it's a shortcut, it might be a shortcut to a file or folder.
+		// We only want file shortcuts here (or direct files).
+		// If it's a shortcut to a folder, it should be handled in ListFolders?
+		// Actually ListFolders skips non-folders.
+		// Let's refine:
+		// If it's a direct folder -> Skip
+		// If it's a shortcut to a folder -> Skip (handled in ListFolders?)
+		// If it's a file -> Process
+		// If it's a shortcut to a file -> Process
+
+		if isShortcut {
+			if item.GetRemoteItem().GetFolder() != nil {
+				continue // It's a folder shortcut
+			}
+		} else if isFolder {
+			continue // It's a regular folder
 		}
 
 		file := &model.File{
@@ -159,12 +167,22 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			file.ModifiedTime = *item.GetLastModifiedDateTime()
 		}
 
-		if item.GetFile() != nil && item.GetFile().GetHashes() != nil {
-			hashes := item.GetFile().GetHashes()
+		// Get hashes
+		var fileFacet models.Fileable
+		if isShortcut {
+			fileFacet = item.GetRemoteItem().GetFile()
+			// Use remote item ID as the "real" ID for cross-reference if needed,
+			// but we store the shortcut ID as the main ID for operations in this account.
+			// Maybe we should store RemoteID somewhere?
+			// For now, let's just get the hash from the remote item.
+		} else {
+			fileFacet = item.GetFile()
+		}
+
+		if fileFacet != nil && fileFacet.GetHashes() != nil {
+			hashes := fileFacet.GetHashes()
 			if hashes.GetSha1Hash() != nil {
 				file.OneDriveHash = *hashes.GetSha1Hash()
-			} else if hashes.GetQuickXorHash() != nil {
-				// Fallback or additional hash if needed, but SHA1 is preferred for OneDrive in our model
 			}
 		}
 
@@ -277,15 +295,26 @@ func (c *Client) GetSyncFolderID() (string, error) {
 	return c.syncFolderID, nil
 }
 
-// CreateSyncFolder creates the sync folder for a backup account
-func (c *Client) CreateSyncFolder() (string, error) {
-	if c.user.SyncFolderName == "" {
-		return "", fmt.Errorf("sync folder name not set for user")
+// CreateSyncFolder ensures the sync folder exists for a backup account
+func (c *Client) CreateSyncFolder(name string) error {
+	if name == "" {
+		return fmt.Errorf("sync folder name is required")
 	}
 
-	// Note: Full implementation would create folder via API
-	logger.InfoTagged([]string{"Microsoft", c.user.Email}, "Would create sync folder '%s' (not fully implemented)", c.user.SyncFolderName)
-	return "placeholder-folder-id", nil
+	// First check if it exists
+	if err := c.PreFlightCheck(); err == nil {
+		return nil // Already exists
+	}
+
+	// Create folder
+	logger.InfoTagged([]string{"Microsoft", c.user.Email}, "Creating sync folder '%s'", name)
+	folder, err := c.CreateFolder("root", name)
+	if err != nil {
+		return fmt.Errorf("failed to create sync folder: %w", err)
+	}
+
+	c.syncFolderID = folder.ID
+	return nil
 }
 
 // ShareFolder shares a folder

@@ -148,17 +148,7 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 		}
 
 	case "Microsoft":
-		// Prompt for sync folder name
-		defaultName := fmt.Sprintf("sync-cloud-drives-%s", email)
-		folderPrompt := promptui.Prompt{
-			Label:   "Sync Folder Name",
-			Default: defaultName,
-		}
-		syncFolderName, err := folderPrompt.Run()
-		if err != nil {
-			return fmt.Errorf("failed to get folder name: %w", err)
-		}
-		user.SyncFolderName = syncFolderName
+		syncFolderName := "sync-cloud-drives"
 
 		// Create folder in backup account
 		if !safeMode {
@@ -167,13 +157,13 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("failed to create microsoft client: %w", err)
 			}
 
-			logger.Info("Creating sync folder '%s'...", syncFolderName)
-			if _, err := client.CreateFolder("root", syncFolderName); err != nil {
-				return fmt.Errorf("failed to create sync folder: %w", err)
+			logger.Info("Checking for sync folder '%s'...", syncFolderName)
+			if err := client.CreateSyncFolder(syncFolderName); err != nil {
+				return fmt.Errorf("failed to ensure sync folder: %w", err)
 			}
-			logger.Info("Sync folder created successfully")
+			logger.Info("Sync folder verified/created successfully")
 		} else {
-			logger.DryRun("Would create sync folder '%s' in Microsoft account", syncFolderName)
+			logger.DryRun("Would create/verify sync folder '%s' in Microsoft account", syncFolderName)
 		}
 	}
 

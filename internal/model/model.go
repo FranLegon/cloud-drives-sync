@@ -34,13 +34,12 @@ type TelegramClient struct {
 
 // User represents a user account for a provider
 type User struct {
-	Provider       Provider `json:"provider"`
-	Email          string   `json:"email,omitempty"`
-	Phone          string   `json:"phone,omitempty"`
-	IsMain         bool     `json:"is_main"`
-	RefreshToken   string   `json:"refresh_token,omitempty"`
-	SessionData    string   `json:"session_data,omitempty"`
-	SyncFolderName string   `json:"sync_folder_name,omitempty"`
+	Provider     Provider `json:"provider"`
+	Email        string   `json:"email,omitempty"`
+	Phone        string   `json:"phone,omitempty"`
+	IsMain       bool     `json:"is_main"`
+	RefreshToken string   `json:"refresh_token,omitempty"`
+	SessionData  string   `json:"session_data,omitempty"`
 }
 
 // Config represents the application configuration
