@@ -1,7 +1,6 @@
 package model
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -58,52 +57,36 @@ type ProviderQuota struct {
 	Free     int64
 }
 
-// File represents a file in cloud storage
+// File represents a logical file
 type File struct {
-	ID                   string
-	Name                 string
-	Path                 string
-	Size                 int64
-	GoogleDriveHash      string
-	GoogleDriveID        string
-	OneDriveHash         string
-	OneDriveID           string
-	TelegramUniqueID     string
-	CalculatedSHA256Hash string
-	CalculatedID         string
-	Provider             Provider
-	UserEmail            string
-	UserPhone            string
-	CreatedTime          time.Time
-	ModifiedTime         time.Time
-	OwnerEmail           string
-	ParentFolderID       string
-	Split                bool
-	TotalParts           int
-	Fragments            []*FileFragment
+	ID        string             // Internal UUID
+	Path      string             // Logical relative path
+	Name      string             // Filename
+	Size      int64              // File size
+	ModTime   time.Time          // Modification timestamp
+	Hash      string             // Logical hash (SHA256 if calculated)
+	Status    string             // active, softdeleted, deleted
+	Replicas  []*Replica         // Physical copies
+	Fragments []*ReplicaFragment // Fragments for large files
 }
 
-// UpdateCalculatedID updates the CalculatedID based on available hashes
-func (f *File) UpdateCalculatedID() {
-	if f.CalculatedSHA256Hash != "" {
-		f.CalculatedID = f.CalculatedSHA256Hash
-	} else if f.GoogleDriveHash != "" {
-		f.CalculatedID = f.GoogleDriveHash
-	} else if f.OneDriveHash != "" {
-		f.CalculatedID = f.OneDriveHash
-	} else {
-		f.CalculatedID = fmt.Sprintf("%s-%d", f.Name, f.Size)
-	}
+// Replica represents a physical copy of a file on a cloud provider
+type Replica struct {
+	ID         int64
+	FileID     string
+	Provider   Provider
+	AccountID  string // Email or Phone
+	NativeID   string // Cloud Provider ID
+	NativeHash string // Cloud Provider Hash (MD5, SHA1)
+	Status     string // synced, pending_upload, pending_download
 }
 
-// FileFragment represents a part of a split file
-type FileFragment struct {
-	ID               string
-	FileID           string
-	Name             string
-	Size             int64
-	Part             int
-	TelegramUniqueID string
+// ReplicaFragment represents a part of a split file (Telegram)
+type ReplicaFragment struct {
+	ID               int64
+	ReplicaID        int64
+	SequenceNumber   int
+	NativeFragmentID string // Telegram file_unique_id for the part
 }
 
 // Folder represents a folder in cloud storage

@@ -121,35 +121,31 @@ The application must only interact with files and folders contained within speci
 ```sql
 CREATE TABLE IF NOT EXISTS files (
     id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
     path TEXT NOT NULL,
+    name TEXT NOT NULL,
     size INTEGER NOT NULL,
-    googledrive_hash TEXT,
-    googledrive_id TEXT,
-    onedrive_hash TEXT,
-    onedrive_id TEXT,
-    telegram_unique_id TEXT,
-    calculated_sha256_hash TEXT,
-    calculated_id TEXT,
-    provider TEXT NOT NULL,
-    user_email TEXT,
-    user_phone TEXT,
-    created_time DATETIME NOT NULL,
-    modified_time DATETIME NOT NULL,
-    owner_email TEXT,
-    parent_folder_id TEXT,
-    split BOOLEAN DEFAULT 0,
-    total_parts INTEGER DEFAULT 0
+    mod_time INTEGER NOT NULL,
+    hash TEXT,
+    status TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS files_fragments (
-    id TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS replicas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     file_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    size INTEGER NOT NULL,
-    part INTEGER NOT NULL,
-    telegram_unique_id TEXT,
+    provider TEXT NOT NULL,
+    account_id TEXT NOT NULL,
+    native_id TEXT NOT NULL,
+    native_hash TEXT,
+    status TEXT NOT NULL,
     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS replica_fragments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    replica_id INTEGER NOT NULL,
+    sequence_number INTEGER NOT NULL,
+    native_fragment_id TEXT NOT NULL,
+    FOREIGN KEY(replica_id) REFERENCES replicas(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS folders (
@@ -191,15 +187,11 @@ CREATE TABLE IF NOT EXISTS folders (
     *   **Google Drive:** Scans the `sync-cloud-drives` folder and all shared content within it.
     *   **Microsoft OneDrive:** Scans the `sync-cloud-drives` folder in each account, handling both actual files and shortcuts to files owned by other accounts.
     *   **Telegram:** Lists all files stored in the Telegram account.
-    *   For each file, it retrieves available provider-specific identifiers and hashes:
-        *   **Google Drive:** Retrieves `id` (mapped to `googledrive_id`) and `md5Checksum` (mapped to `googledrive_hash`).
-        *   **Microsoft OneDrive:** Retrieves `id` (mapped to `onedrive_id`) and `sha1Hash` (mapped to `onedrive_hash`).
-        *   **Telegram:** Retrieves `file_unique_id` (mapped to `telegram_unique_id`).
-    *   **Calculated ID:** The tool populates a `calculated_id` field for every file to serve as a consistent standard for comparison and de-duplication across providers.
-        *   This field is derived as `COALESCE(calculated_sha256_hash, CONCAT(name, '-', size))`.
-        *   `calculated_sha256_hash` is optional and only populated if explicitly calculated (e.g. during upload or specific verification).
-        *   Downloading every file to calculate a hash is inefficient and should be avoided during standard metadata sync.
-    *   Updates the file and folder records in the local encrypted database, populating the specific fields.
+    *   For each found file, it updates the `files` (logical) and `replicas` (physical) tables:
+        *   **replicas:** Stores the provider-specific `native_id`, `native_hash` (MD5 for Google, SHA1 for OneDrive), `account_id`, and `provider`.
+        *   **files:** logical entry derived from path, name, size and mod_time.
+    *   **Telegram:** Retrieves `file_unique_id` (mapped to `native_id`) and fragments if split.
+    *   Updates the file, replica, and folder records in the local encrypted database.
 
 *   **`check-for-duplicates`**
     *   First, runs the `get-metadata` logic to ensure the local DB is up-to-date.
