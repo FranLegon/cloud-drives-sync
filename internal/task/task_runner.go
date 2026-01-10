@@ -228,6 +228,11 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 	}
 
 	for _, folder := range folders {
+		// Skip sync-cloud-drives-aux folder
+		if folder.Name == "sync-cloud-drives-aux" {
+			continue
+		}
+
 		folder.Path = pathPrefix + "/" + folder.Name
 		folderChan <- folder
 

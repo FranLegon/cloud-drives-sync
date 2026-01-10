@@ -50,6 +50,15 @@ The application must only interact with files and folders contained within speci
 *   **Logging and Exit Codes:**
     *   Log all major actions, successes, and detailed errors to the console. Logs should be prefixed with tags when appropriate (e.g., `[Google]`, `[Microsoft]`, `[Telegram]`, `[main.user@gmail.com]`).
     *   The application will exit with a status code of `0` on success and a non-zero status code on any error, making it suitable for scripting.
+    *   **Metadata Sync:**
+        *   **Upload:** All commands that alter `metadata.db` (e.g., `init`, `get-metadata`, `sync-providers`, `remove-duplicates*`, `balance-storage`, `free-main`) must upload the `metadata.db` file to a dedicated folder named `sync-cloud-drives/sync-cloud-drives-aux` in the main account (Google) and all backup accounts (Google/OneDrive/Telegram) at the end of successful execution.
+        *   **Download:** All commands that require `metadata.db` must first check for the file locally. If it is missing, the tool must attempt to download it from `sync-cloud-drives/sync-cloud-drives-aux/metadata.db`.
+        *   **Download Priority:** 
+            1.  Local file system.
+            2.  Google Drive (Main Account).
+            3.  Microsoft OneDrive (Backup Accounts).
+            4.  Telegram (Backup Account).
+        *   If the file is not found in any location, the command (unless it is `init`) should fail with a clear error.
 
 #### **4. Configuration Schema**
 

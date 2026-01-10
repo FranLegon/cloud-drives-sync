@@ -273,6 +273,15 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	return result, nil
 }
 
+// UpdateFile updates file content
+func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
+	_, err := c.service.Files.Update(fileID, nil).Media(reader).Do()
+	if err != nil {
+		return fmt.Errorf("failed to update file content: %w", err)
+	}
+	return nil
+}
+
 // DeleteFile deletes a file
 func (c *Client) DeleteFile(fileID string) error {
 	err := c.service.Files.Delete(fileID).Do()

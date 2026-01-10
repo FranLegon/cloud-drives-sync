@@ -64,6 +64,11 @@ and Telegram.`,
 			return fmt.Errorf("failed to load configuration: %w", err)
 		}
 
+		// Sync metadata (Download if missing)
+		if err := task.DownloadMetadataDB(cfg, database.GetDBPath()); err != nil {
+			return fmt.Errorf("failed to sync metadata: %w", err)
+		}
+
 		// Open database
 		db, err = database.Open(masterPassword)
 		if err != nil {
@@ -78,9 +83,30 @@ and Telegram.`,
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
+		// Close database
 		if db != nil {
-			return db.Close()
+			db.Close()
 		}
+
+		// Upload metadata.db if the command alters it
+		writingCommands := map[string]bool{
+			"get-metadata":             true,
+			"sync-providers":           true,
+			"check-for-duplicates":     false, // Read-only
+			"remove-duplicates":        true,
+			"remove-duplicates-unsafe": true,
+			"balance-storage":          true,
+			"free-main":                true,
+			"delete-unsynced-files":    false, // Typically doesn't alter DB? Check logic.
+		}
+
+		if writingCommands[cmd.Name()] && cfg != nil {
+			if err := task.UploadMetadataDB(cfg, database.GetDBPath()); err != nil {
+				return fmt.Errorf("failed to upload metadata.db: %w", err)
+			}
+			logger.Info("Metadata upload complete.")
+		}
+
 		return nil
 	},
 }

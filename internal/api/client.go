@@ -28,6 +28,7 @@ type CloudClient interface {
 	ListFiles(folderID string) ([]*model.File, error)
 	DownloadFile(fileID string, writer io.Writer) error
 	UploadFile(folderID, name string, reader io.Reader, size int64) (*model.File, error)
+	UpdateFile(fileID string, reader io.Reader, size int64) error
 	DeleteFile(fileID string) error
 	MoveFile(fileID, targetFolderID string) error
 

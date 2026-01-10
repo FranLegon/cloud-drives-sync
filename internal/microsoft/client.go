@@ -201,7 +201,70 @@ func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
 
 // UploadFile uploads a file
 func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64) (*model.File, error) {
-	return nil, fmt.Errorf("upload not fully implemented for Microsoft OneDrive")
+	ctx := context.Background()
+
+    // 1. Create the file placeholder
+    createRequestBody := models.NewDriveItem()
+    createRequestBody.SetName(&name)
+    fileFacet := models.NewFile()
+    createRequestBody.SetFile(fileFacet)
+    // We can't easily set conflict behavior here without config, but default is usually fail if exists.
+
+    createdItem, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(folderID).Children().Post(ctx, createRequestBody, nil)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create file placeholder: %w", err)
+    }
+
+	// 2. Upload content
+    data, err := io.ReadAll(reader)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read content: %w", err)
+    }
+
+	// Put content
+    // Note: Put requires []byte and config. We pass nil for config.
+	_, err = c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(*createdItem.GetId()).Content().Put(ctx, data, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to upload file content: %w", err)
+	}
+    
+    // We reuse createdItem for metadata. Size might be 0 in createdItem, but we know what we uploaded.
+	file := &model.File{
+		ID:             *createdItem.GetId(),
+		Name:           *createdItem.GetName(),
+		Size:           size, 
+		OneDriveID:     *createdItem.GetId(),
+		Provider:       model.ProviderMicrosoft,
+		UserEmail:      c.user.Email,
+		ParentFolderID: folderID,
+	}
+
+	if createdItem.GetCreatedDateTime() != nil {
+		file.CreatedTime = *createdItem.GetCreatedDateTime()
+	}
+	if createdItem.GetLastModifiedDateTime() != nil {
+		file.ModifiedTime = *createdItem.GetLastModifiedDateTime()
+	}
+    
+	file.UpdateCalculatedID()
+
+	return file, nil
+}
+
+// UpdateFile updates file content
+func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
+	ctx := context.Background()
+    
+    data, err := io.ReadAll(reader)
+    if err != nil {
+        return fmt.Errorf("failed to read content: %w", err)
+    }
+
+	_, err = c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(fileID).Content().Put(ctx, data, nil)
+	if err != nil {
+		return fmt.Errorf("failed to update file content: %w", err)
+	}
+	return nil
 }
 
 // DeleteFile deletes a file

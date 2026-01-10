@@ -12,6 +12,7 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/google"
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
+	"github.com/FranLegon/cloud-drives-sync/internal/task"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
@@ -174,6 +175,11 @@ func firstTimeInit() error {
 		return fmt.Errorf("failed to initialize database: %w", err)
 	}
 	logger.Info("Database schema initialized")
+
+	// Upload empty metadata DB
+	if err := task.UploadMetadataDB(cfg, database.GetDBPath()); err != nil {
+		logger.Warning("Failed to upload metadata.db: %v", err)
+	}
 
 	logger.Info("Initialization complete! You can now add accounts using the 'init' command")
 	return nil
@@ -454,6 +460,11 @@ func updateMainAccount(cfg *model.Config, password string) error {
 				return fmt.Errorf("failed to create sync folder: %w", err)
 			}
 		}
+	}
+
+	// Upload metadata DB
+	if err := task.UploadMetadataDB(cfg, database.GetDBPath()); err != nil {
+		logger.Warning("Failed to upload metadata.db: %v", err)
 	}
 
 	return nil
