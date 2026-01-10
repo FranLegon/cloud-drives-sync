@@ -30,7 +30,6 @@ type MicrosoftClient struct {
 type TelegramClient struct {
 	APIID   string `json:"api_id"`
 	APIHash string `json:"api_hash"`
-	Phone   string `json:"phone"`
 }
 
 // User represents a user account for a provider

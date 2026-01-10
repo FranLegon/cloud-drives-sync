@@ -124,9 +124,6 @@ func firstTimeInit() error {
 		telegramHashPrompt := promptui.Prompt{Label: "Telegram API Hash", Mask: '*'}
 		telegramHash, _ := telegramHashPrompt.Run()
 
-		telegramPhonePrompt := promptui.Prompt{Label: "Telegram Phone"}
-		telegramPhone, _ := telegramPhonePrompt.Run()
-
 		// Create configuration
 		cfg = &model.Config{
 			GoogleClient: model.GoogleClient{
@@ -140,7 +137,6 @@ func firstTimeInit() error {
 			TelegramClient: model.TelegramClient{
 				APIID:   telegramID,
 				APIHash: telegramHash,
-				Phone:   telegramPhone,
 			},
 			Users: []model.User{},
 		}
@@ -286,12 +282,6 @@ func updateTelegramCredentials(cfg *model.Config, password string) error {
 		cfg.TelegramClient.APIHash = telegramHash
 	}
 
-	telegramPhonePrompt := promptui.Prompt{Label: fmt.Sprintf("Telegram Phone [%s]", cfg.TelegramClient.Phone), AllowEdit: true}
-	telegramPhone, _ := telegramPhonePrompt.Run()
-	if telegramPhone != "" {
-		cfg.TelegramClient.Phone = telegramPhone
-	}
-
 	if err := config.SaveConfig(cfg, password); err != nil {
 		return fmt.Errorf("failed to save configuration: %w", err)
 	}
@@ -333,9 +323,6 @@ func updateCredentialsFromJson() error {
 	}
 	if newCfg.TelegramClient.APIHash != "" {
 		cfg.TelegramClient.APIHash = newCfg.TelegramClient.APIHash
-	}
-	if newCfg.TelegramClient.Phone != "" {
-		cfg.TelegramClient.Phone = newCfg.TelegramClient.Phone
 	}
 
 	if err := config.SaveConfig(cfg, password); err != nil {

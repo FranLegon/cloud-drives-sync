@@ -23,7 +23,7 @@ var addAccountCmd = &cobra.Command{
 	Long: `Adds a backup account to a provider that already has a configured main account.
 Google Drive: Shares the main account's sync folder with the backup account.
 Microsoft OneDrive: Creates a new sync folder in the backup account and shares with main.
-Telegram: Adds the single Telegram account for backup storage.`,
+Telegram: Adds a Telegram account for backup storage.`,
 	RunE: runAddAccount,
 }
 
@@ -191,14 +191,23 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 
 func addTelegramAccount(cfg *model.Config, password string) error {
 	// Check if Telegram credentials are configured
-	if cfg.TelegramClient.APIID == "" || cfg.TelegramClient.APIHash == "" || cfg.TelegramClient.Phone == "" {
+	if cfg.TelegramClient.APIID == "" || cfg.TelegramClient.APIHash == "" {
 		return fmt.Errorf("telegram credentials not configured - please run 'init' to configure them")
+	}
+
+	// Prompt for phone number
+	prompt := promptui.Prompt{
+		Label: "Enter Telegram Phone Number (e.g. +1234567890)",
+	}
+	phone, err := prompt.Run()
+	if err != nil {
+		return fmt.Errorf("failed to get phone number: %w", err)
 	}
 
 	// Create user record
 	user := model.User{
 		Provider: model.ProviderTelegram,
-		Phone:    cfg.TelegramClient.Phone,
+		Phone:    phone,
 		IsMain:   false,
 	}
 
