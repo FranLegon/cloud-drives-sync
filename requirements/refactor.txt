@@ -49,7 +49,7 @@ Code Logic:
 - When deciding which provider to move/rename, we prioritize based on max mod_time in replicas. After propagating these changes to all replicas, we update the files table with the new path/name/mod_time.
 - Calculating hashes locally is out of the ecuation because we want to avoid downloading files just for hash calculation. Remove any references to local hash calculation.
 - `sync-cloud-drives-aux/soft-deleted` folder is freed (free-main) and synced (sync-providers) just like any other folder, but files moved there are marked as softdeleted in the db. The only difference is that if the logical file existed as soft deleted and then is not found in google in a subsequent run (any account, not just main), it is marked as deleted and removed from all providers.
-- Replace "soft-deleted" for "state" in Telegram caption containing metadata. Special case: since Telegram offers unlimited quota, we do not delete files from Telegram even if they are marked as deleted in our db. Instead, we just mark them as deleted in both our db and in Telegram caption metadata.
+- Replace "soft-deleted" with "state" in Telegram caption containing metadata to track the status. Special case: since Telegram offers unlimited quota, we do not delete files from Telegram even if they are marked as deleted in our db. Instead, we just mark them as deleted in both our db and in Telegram caption metadata.
 
 Immediate Tasks:
 
