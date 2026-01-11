@@ -409,7 +409,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 			if !meta.Replica.Fragmented {
 				// Single file - create File with Replica
-				
+
 				file := &model.File{
 					ID:           meta.Replica.FileID,
 					Name:         meta.Replica.Name,
@@ -419,7 +419,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 					ModTime:      modTime,
 					Status:       meta.Replica.Status,
 				}
-				
+
 				// Ensure CalculatedID is set if missing (backward compatibility or correction)
 				if file.CalculatedID == "" {
 					file.CalculatedID = fmt.Sprintf("%s-%d", file.Name, file.Size)
@@ -553,7 +553,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 
 	// Prepare common Replica data
 	replica := &model.Replica{
-		ID:           0, // DB ID
+		ID:           0,                   // DB ID
 		FileID:       uuid.New().String(), // Generate new UUID for File
 		CalculatedID: calculatedID,
 		Path:         fullPath,
@@ -642,7 +642,7 @@ func (c *Client) uploadPart(folderID, name string, reader io.Reader, replica *mo
 		Replica:         replica,
 		ReplicaFragment: fragment,
 	}
-	
+
 	caption, err := json.Marshal(meta)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal metadata: %w", err)
@@ -710,7 +710,7 @@ func (c *Client) uploadPart(folderID, name string, reader io.Reader, replica *mo
 	// Update metadata with the new ID
 	// If this is the first part (or single file), update Replica.NativeID
 	// If it's a fragment, update NativeFragmentID
-	
+
 	needsUpdate := false
 	if !replica.Fragmented || (fragment != nil && fragment.FragmentNumber == 1) {
 		if replica.NativeID != msgIDStr {
