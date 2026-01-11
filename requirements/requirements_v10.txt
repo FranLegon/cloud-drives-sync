@@ -116,7 +116,49 @@ The application must only interact with files and folders contained within speci
 }
 ```
 
-**Note:** The database schema is defined as follows:
+**Note:** The database schema uses a normalized architecture with logical files and physical replicas:
+
+**files Table (Logical files):**
+- `id` (TEXT, PK, UUID): Internal unique ID
+- `path` (TEXT NOT NULL): Logical relative path (e.g., /photos/img.jpg)
+- `name` (TEXT NOT NULL): Filename
+- `size` (INTEGER NOT NULL): File size in bytes
+- `calculated_id` (TEXT): CONCAT(name, '-', size) for deduplication
+- `mod_time` (INTEGER NOT NULL): Modification timestamp
+- `status` (TEXT NOT NULL): active, softdeleted, deleted
+
+**replicas Table (Physical copies on cloud):**
+- `id` (INTEGER, PK, AutoIncrement)
+- `file_id` (TEXT, FK): References files.id (nullable initially for upserts)
+- `calculated_id` (TEXT): CONCAT(name, '-', size) for matching with files table
+- `path` (TEXT NOT NULL): Logical relative path
+- `name` (TEXT NOT NULL): Filename
+- `size` (INTEGER NOT NULL): File size in bytes
+- `provider` (TEXT NOT NULL): google, onedrive, telegram
+- `account_id` (TEXT NOT NULL): email or phone number
+- `native_id` (TEXT NOT NULL): Cloud provider's stable ID (critical for move detection)
+- `native_hash` (TEXT): Cloud provider's hash (MD5 for Google, SHA1 for OneDrive, null for Telegram)
+- `mod_time` (INTEGER NOT NULL): Modification timestamp
+- `status` (TEXT NOT NULL): active, softdeleted, deleted
+- `fragmented` (BOOLEAN NOT NULL DEFAULT 0): true for Telegram files split into parts
+
+**replica_fragments Table (Telegram-specific for files split into 2GB chunks):**
+- `id` (INTEGER, PK, AutoIncrement)
+- `replica_id` (INTEGER NOT NULL, FK): References replicas.id
+- `fragment_number` (INTEGER NOT NULL): 1-based index
+- `fragments_total` (INTEGER NOT NULL): Total number of fragments
+- `size` (INTEGER NOT NULL): Fragment size in bytes
+- `native_fragment_id` (TEXT NOT NULL): Telegram unique ID for this fragment
+
+**folders Table:**
+- `id` (TEXT, PK)
+- `name` (TEXT NOT NULL)
+- `path` (TEXT NOT NULL)
+- `provider` (TEXT NOT NULL)
+- `user_email` (TEXT)
+- `user_phone` (TEXT)
+- `parent_folder_id` (TEXT)
+- `owner_email` (TEXT)
 
 ```sql
 CREATE TABLE IF NOT EXISTS files (
@@ -124,29 +166,50 @@ CREATE TABLE IF NOT EXISTS files (
     path TEXT NOT NULL,
     name TEXT NOT NULL,
     size INTEGER NOT NULL,
+    calculated_id TEXT,
     mod_time INTEGER NOT NULL,
-    hash TEXT,
     status TEXT NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
+CREATE INDEX IF NOT EXISTS idx_files_calculated_id ON files(calculated_id);
+CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
+
 CREATE TABLE IF NOT EXISTS replicas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_id TEXT NOT NULL,
+    file_id TEXT,
+    calculated_id TEXT,
+    path TEXT NOT NULL,
+    name TEXT NOT NULL,
+    size INTEGER NOT NULL,
     provider TEXT NOT NULL,
     account_id TEXT NOT NULL,
     native_id TEXT NOT NULL,
     native_hash TEXT,
+    mod_time INTEGER NOT NULL,
     status TEXT NOT NULL,
+    fragmented BOOLEAN NOT NULL DEFAULT 0,
     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_replicas_file_id ON replicas(file_id);
+CREATE INDEX IF NOT EXISTS idx_replicas_calculated_id ON replicas(calculated_id);
+CREATE INDEX IF NOT EXISTS idx_replicas_provider ON replicas(provider);
+CREATE INDEX IF NOT EXISTS idx_replicas_account_id ON replicas(account_id);
+CREATE INDEX IF NOT EXISTS idx_replicas_native_id ON replicas(native_id);
+CREATE INDEX IF NOT EXISTS idx_replicas_status ON replicas(status);
 
 CREATE TABLE IF NOT EXISTS replica_fragments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     replica_id INTEGER NOT NULL,
-    sequence_number INTEGER NOT NULL,
+    fragment_number INTEGER NOT NULL,
+    fragments_total INTEGER NOT NULL,
+    size INTEGER NOT NULL,
     native_fragment_id TEXT NOT NULL,
     FOREIGN KEY(replica_id) REFERENCES replicas(id) ON DELETE CASCADE
 );
+
+CREATE INDEX IF NOT EXISTS idx_replica_fragments_replica_id ON replica_fragments(replica_id);
 
 CREATE TABLE IF NOT EXISTS folders (
     id TEXT PRIMARY KEY,
@@ -158,6 +221,9 @@ CREATE TABLE IF NOT EXISTS folders (
     parent_folder_id TEXT,
     owner_email TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_folders_provider ON folders(provider);
+CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 ```
 
 ---
