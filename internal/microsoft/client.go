@@ -574,7 +574,7 @@ func (c *Client) CreateShortcut(parentID, name, targetID string) (*model.File, e
 		CalculatedID: calculatedID,
 		ModTime:      time.Now(),
 		Status:       "active",
-		Replicas:     []*model.Replica{}, // Shortcuts don't have physical replicas
+		Replicas:     nil, // Shortcuts don't have physical replicas
 	}
 
 	return file, nil

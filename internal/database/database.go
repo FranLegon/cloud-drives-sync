@@ -170,7 +170,7 @@ func (db *DB) InsertFile(file *model.File) error {
 			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
-		res, err := tx.Exec(replicaQuery,
+		_, err := tx.Exec(replicaQuery,
 			file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 			replica.ModTime.Unix(), replica.Status, replica.Fragmented)
@@ -178,15 +178,8 @@ func (db *DB) InsertFile(file *model.File) error {
 			return fmt.Errorf("failed to insert replica: %w", err)
 		}
 
-		// Get the replica ID for inserting fragments
-		replicaID, err := res.LastInsertId()
-		if err != nil {
-			return fmt.Errorf("failed to get replica ID: %w", err)
-		}
-
 		// Note: Fragments should be inserted separately via InsertReplicaFragment
 		// This is because fragments are associated with replicas, not files
-		_ = replicaID
 	}
 
 	return tx.Commit()

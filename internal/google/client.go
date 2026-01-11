@@ -634,7 +634,7 @@ func (c *Client) CreateShortcut(parentID, name, targetID string) (*model.File, e
 		return nil, fmt.Errorf("failed to create Google Drive shortcut: %w", err)
 	}
 
-	// For shortcuts, we create a minimal file entry
+	// For shortcuts, we create a minimal file entry without replicas
 	file := &model.File{
 		ID:           createdShortcut.Id,
 		Name:         createdShortcut.Name,
@@ -643,7 +643,7 @@ func (c *Client) CreateShortcut(parentID, name, targetID string) (*model.File, e
 		CalculatedID: fmt.Sprintf("%s-0", createdShortcut.Name),
 		ModTime:      time.Now(),
 		Status:       "active",
-		Replicas:     []*model.Replica{}, // Shortcuts don't have physical replicas
+		Replicas:     nil, // Shortcuts don't have physical replicas
 	}
 
 	return file, nil
