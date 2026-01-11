@@ -148,24 +148,37 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 		}
 
 		for _, f := range fileList.Files {
+			modTime := parseTime(f.ModifiedTime)
+			calculatedID := fmt.Sprintf("%s-%d", f.Name, f.Size)
+			
+			// Create the logical file
 			file := &model.File{
-				ID:              f.Id,
-				Name:            f.Name,
-				Size:            f.Size,
-				GoogleDriveHash: f.Md5Checksum,
-				GoogleDriveID:   f.Id,
-				Provider:        model.ProviderGoogle,
-				UserEmail:       c.user.Email,
-				CreatedTime:     parseTime(f.CreatedTime),
-				ModifiedTime:    parseTime(f.ModifiedTime),
-				ParentFolderID:  folderID,
-			}
-			file.UpdateCalculatedID()
-
-			if len(f.Owners) > 0 {
-				file.OwnerEmail = f.Owners[0].EmailAddress
+				ID:           f.Id, // Will be replaced with UUID in database layer
+				Name:         f.Name,
+				Size:         f.Size,
+				Path:         "", // Path will be set by caller based on folder hierarchy
+				CalculatedID: calculatedID,
+				ModTime:      modTime,
+				Status:       "active",
 			}
 
+			// Create the replica for this file
+			replica := &model.Replica{
+				FileID:       "", // Will be set when linking to logical file
+				CalculatedID: calculatedID,
+				Path:         "", // Path will be set by caller
+				Name:         f.Name,
+				Size:         f.Size,
+				Provider:     model.ProviderGoogle,
+				AccountID:    c.user.Email,
+				NativeID:     f.Id,
+				NativeHash:   f.Md5Checksum,
+				ModTime:      modTime,
+				Status:       "active",
+				Fragmented:   false,
+			}
+			
+			file.Replicas = []*model.Replica{replica}
 			allFiles = append(allFiles, file)
 		}
 
@@ -252,23 +265,35 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		return nil, fmt.Errorf("failed to upload file: %w", err)
 	}
 
-	result := &model.File{
-		ID:              createdFile.Id,
-		Name:            createdFile.Name,
-		Size:            createdFile.Size,
-		GoogleDriveHash: createdFile.Md5Checksum,
-		GoogleDriveID:   createdFile.Id,
-		Provider:        model.ProviderGoogle,
-		UserEmail:       c.user.Email,
-		CreatedTime:     parseTime(createdFile.CreatedTime),
-		ModifiedTime:    parseTime(createdFile.ModifiedTime),
-		ParentFolderID:  folderID,
-	}
-	result.UpdateCalculatedID()
+	modTime := parseTime(createdFile.ModifiedTime)
+	calculatedID := fmt.Sprintf("%s-%d", createdFile.Name, createdFile.Size)
 
-	if len(createdFile.Owners) > 0 {
-		result.OwnerEmail = createdFile.Owners[0].EmailAddress
+	result := &model.File{
+		ID:           createdFile.Id, // Will be replaced with UUID in database layer
+		Name:         createdFile.Name,
+		Size:         createdFile.Size,
+		Path:         "", // Path will be set by caller
+		CalculatedID: calculatedID,
+		ModTime:      modTime,
+		Status:       "active",
 	}
+
+	replica := &model.Replica{
+		FileID:       "", // Will be set when linking to logical file
+		CalculatedID: calculatedID,
+		Path:         "", // Path will be set by caller
+		Name:         createdFile.Name,
+		Size:         createdFile.Size,
+		Provider:     model.ProviderGoogle,
+		AccountID:    c.user.Email,
+		NativeID:     createdFile.Id,
+		NativeHash:   createdFile.Md5Checksum,
+		ModTime:      modTime,
+		Status:       "active",
+		Fragmented:   false,
+	}
+	
+	result.Replicas = []*model.Replica{replica}
 
 	return result, nil
 }
@@ -397,30 +422,39 @@ func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
 		return nil, fmt.Errorf("failed to get file metadata: %w", err)
 	}
 
+	modTime := parseTime(f.ModifiedTime)
+	calculatedID := fmt.Sprintf("%s-%d", f.Name, f.Size)
+
 	file := &model.File{
-		ID:              f.Id,
-		Name:            f.Name,
-		Size:            f.Size,
-		GoogleDriveHash: f.Md5Checksum,
-		GoogleDriveID:   f.Id,
-		Provider:        model.ProviderGoogle,
-		UserEmail:       c.user.Email,
-		CreatedTime:     parseTime(f.CreatedTime),
-		ModifiedTime:    parseTime(f.ModifiedTime),
-	}
-	file.UpdateCalculatedID()
-
-	if len(f.Parents) > 0 {
-		file.ParentFolderID = f.Parents[0]
+		ID:           f.Id, // Will be replaced with UUID in database layer
+		Name:         f.Name,
+		Size:         f.Size,
+		Path:         "", // Path will be set by caller
+		CalculatedID: calculatedID,
+		ModTime:      modTime,
+		Status:       "active",
 	}
 
-	if len(f.Owners) > 0 {
-		file.OwnerEmail = f.Owners[0].EmailAddress
+	replica := &model.Replica{
+		FileID:       "", // Will be set when linking to logical file
+		CalculatedID: calculatedID,
+		Path:         "", // Path will be set by caller
+		Name:         f.Name,
+		Size:         f.Size,
+		Provider:     model.ProviderGoogle,
+		AccountID:    c.user.Email,
+		NativeID:     f.Id,
+		NativeHash:   f.Md5Checksum,
+		ModTime:      modTime,
+		Status:       "active",
+		Fragmented:   false,
 	}
 
-	// If no MD5 hash (e.g., Google Docs), need to download and hash
-	if file.GoogleDriveHash == "" {
-		logger.InfoTagged([]string{"Google", c.user.Email}, "No native hash for file %s, will need to calculate SHA-256", f.Name)
+	file.Replicas = []*model.Replica{replica}
+
+	// If no MD5 hash (e.g., Google Docs), log a warning
+	if replica.NativeHash == "" {
+		logger.InfoTagged([]string{"Google", c.user.Email}, "No native hash for file %s", f.Name)
 	}
 
 	return file, nil
@@ -600,14 +634,17 @@ func (c *Client) CreateShortcut(parentID, name, targetID string) (*model.File, e
 		return nil, fmt.Errorf("failed to create Google Drive shortcut: %w", err)
 	}
 
+	// For shortcuts, we create a minimal file entry
 	file := &model.File{
-		ID:             createdShortcut.Id,
-		Name:           createdShortcut.Name,
-		Provider:       model.ProviderGoogle,
-		UserEmail:      c.user.Email,
-		ParentFolderID: parentID,
+		ID:           createdShortcut.Id,
+		Name:         createdShortcut.Name,
+		Size:         0,
+		Path:         "",
+		CalculatedID: fmt.Sprintf("%s-0", createdShortcut.Name),
+		ModTime:      time.Now(),
+		Status:       "active",
+		Replicas:     []*model.Replica{}, // Shortcuts don't have physical replicas
 	}
-	file.UpdateCalculatedID()
 
 	return file, nil
 }
