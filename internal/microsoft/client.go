@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
@@ -151,31 +152,28 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			continue // It's a regular folder
 		}
 
-		file := &model.File{
-			ID:             *item.GetId(),
-			Name:           *item.GetName(),
-			Size:           *item.GetSize(),
-			OneDriveID:     *item.GetId(),
-			Provider:       model.ProviderMicrosoft,
-			UserEmail:      c.user.Email,
-			ParentFolderID: folderID,
-		}
-
-		if item.GetCreatedDateTime() != nil {
-			file.CreatedTime = *item.GetCreatedDateTime()
-		}
+		modTime := time.Now()
 		if item.GetLastModifiedDateTime() != nil {
-			file.ModifiedTime = *item.GetLastModifiedDateTime()
+			modTime = *item.GetLastModifiedDateTime()
+		}
+		
+		calculatedID := fmt.Sprintf("%s-%d", *item.GetName(), *item.GetSize())
+
+		file := &model.File{
+			ID:           *item.GetId(), // Will be replaced with UUID in database layer
+			Name:         *item.GetName(),
+			Size:         *item.GetSize(),
+			Path:         "", // Path will be set by caller
+			CalculatedID: calculatedID,
+			ModTime:      modTime,
+			Status:       "active",
 		}
 
 		// Get hashes
+		var nativeHash string
 		var fileFacet models.Fileable
 		if isShortcut {
 			fileFacet = item.GetRemoteItem().GetFile()
-			// Use remote item ID as the "real" ID for cross-reference if needed,
-			// but we store the shortcut ID as the main ID for operations in this account.
-			// Maybe we should store RemoteID somewhere?
-			// For now, let's just get the hash from the remote item.
 		} else {
 			fileFacet = item.GetFile()
 		}
@@ -183,12 +181,26 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 		if fileFacet != nil && fileFacet.GetHashes() != nil {
 			hashes := fileFacet.GetHashes()
 			if hashes.GetSha1Hash() != nil {
-				file.OneDriveHash = *hashes.GetSha1Hash()
+				nativeHash = *hashes.GetSha1Hash()
 			}
 		}
 
-		file.UpdateCalculatedID()
+		replica := &model.Replica{
+			FileID:       "", // Will be set when linking to logical file
+			CalculatedID: calculatedID,
+			Path:         "", // Path will be set by caller
+			Name:         *item.GetName(),
+			Size:         *item.GetSize(),
+			Provider:     model.ProviderMicrosoft,
+			AccountID:    c.user.Email,
+			NativeID:     *item.GetId(),
+			NativeHash:   nativeHash,
+			ModTime:      modTime,
+			Status:       "active",
+			Fragmented:   false,
+		}
 
+		file.Replicas = []*model.Replica{replica}
 		allFiles = append(allFiles, file)
 	}
 
@@ -229,25 +241,39 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		return nil, fmt.Errorf("failed to upload file content: %w", err)
 	}
 
-	// We reuse createdItem for metadata. Size might be 0 in createdItem, but we know what we uploaded.
-	file := &model.File{
-		ID:             *createdItem.GetId(),
-		Name:           *createdItem.GetName(),
-		Size:           size,
-		OneDriveID:     *createdItem.GetId(),
-		Provider:       model.ProviderMicrosoft,
-		UserEmail:      c.user.Email,
-		ParentFolderID: folderID,
-	}
-
-	if createdItem.GetCreatedDateTime() != nil {
-		file.CreatedTime = *createdItem.GetCreatedDateTime()
-	}
+	modTime := time.Now()
 	if createdItem.GetLastModifiedDateTime() != nil {
-		file.ModifiedTime = *createdItem.GetLastModifiedDateTime()
+		modTime = *createdItem.GetLastModifiedDateTime()
 	}
 
-	file.UpdateCalculatedID()
+	calculatedID := fmt.Sprintf("%s-%d", *createdItem.GetName(), size)
+
+	file := &model.File{
+		ID:           *createdItem.GetId(), // Will be replaced with UUID in database layer
+		Name:         *createdItem.GetName(),
+		Size:         size,
+		Path:         "", // Path will be set by caller
+		CalculatedID: calculatedID,
+		ModTime:      modTime,
+		Status:       "active",
+	}
+
+	replica := &model.Replica{
+		FileID:       "", // Will be set when linking to logical file
+		CalculatedID: calculatedID,
+		Path:         "", // Path will be set by caller
+		Name:         *createdItem.GetName(),
+		Size:         size,
+		Provider:     model.ProviderMicrosoft,
+		AccountID:    c.user.Email,
+		NativeID:     *createdItem.GetId(),
+		NativeHash:   "", // Will be populated when we get the file metadata
+		ModTime:      modTime,
+		Status:       "active",
+		Fragmented:   false,
+	}
+
+	file.Replicas = []*model.Replica{replica}
 
 	return file, nil
 }
@@ -447,42 +473,49 @@ func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
 		return nil, fmt.Errorf("failed to get file metadata: %w", err)
 	}
 
-	file := &model.File{
-		ID:         *item.GetId(),
-		Name:       *item.GetName(),
-		Size:       *item.GetSize(),
-		OneDriveID: *item.GetId(),
-		Provider:   model.ProviderMicrosoft,
-		UserEmail:  c.user.Email,
-	}
-
-	if item.GetCreatedDateTime() != nil {
-		file.CreatedTime = *item.GetCreatedDateTime()
-	}
+	modTime := time.Now()
 	if item.GetLastModifiedDateTime() != nil {
-		file.ModifiedTime = *item.GetLastModifiedDateTime()
+		modTime = *item.GetLastModifiedDateTime()
 	}
 
+	calculatedID := fmt.Sprintf("%s-%d", *item.GetName(), *item.GetSize())
+
+	file := &model.File{
+		ID:           *item.GetId(), // Will be replaced with UUID in database layer
+		Name:         *item.GetName(),
+		Size:         *item.GetSize(),
+		Path:         "", // Path will be set by caller
+		CalculatedID: calculatedID,
+		ModTime:      modTime,
+		Status:       "active",
+	}
+
+	var nativeHash string
 	if item.GetFile() != nil && item.GetFile().GetHashes() != nil {
 		hashes := item.GetFile().GetHashes()
 		if hashes.GetSha1Hash() != nil {
-			file.OneDriveHash = *hashes.GetSha1Hash()
+			nativeHash = *hashes.GetSha1Hash()
+		} else if hashes.GetQuickXorHash() != nil {
+			nativeHash = *hashes.GetQuickXorHash()
 		}
 	}
 
-	file.UpdateCalculatedID()
-	if item.GetParentReference() != nil && item.GetParentReference().GetId() != nil {
-		file.ParentFolderID = *item.GetParentReference().GetId()
+	replica := &model.Replica{
+		FileID:       "", // Will be set when linking to logical file
+		CalculatedID: calculatedID,
+		Path:         "", // Path will be set by caller
+		Name:         *item.GetName(),
+		Size:         *item.GetSize(),
+		Provider:     model.ProviderMicrosoft,
+		AccountID:    c.user.Email,
+		NativeID:     *item.GetId(),
+		NativeHash:   nativeHash,
+		ModTime:      modTime,
+		Status:       "active",
+		Fragmented:   false,
 	}
 
-	if item.GetFile() != nil && item.GetFile().GetHashes() != nil {
-		hashes := item.GetFile().GetHashes()
-		if hashes.GetQuickXorHash() != nil {
-			file.OneDriveHash = *hashes.GetQuickXorHash()
-		} else if hashes.GetSha1Hash() != nil {
-			file.OneDriveHash = *hashes.GetSha1Hash()
-		}
-	}
+	file.Replicas = []*model.Replica{replica}
 
 	return file, nil
 }
@@ -525,21 +558,24 @@ func (c *Client) CreateShortcut(parentID, name, targetID string) (*model.File, e
 		return nil, fmt.Errorf("failed to create shortcut: %w", err)
 	}
 
-	file := &model.File{
-		ID:             *item.GetId(),
-		Name:           *item.GetName(),
-		Provider:       model.ProviderMicrosoft,
-		UserEmail:      c.user.Email,
-		ParentFolderID: parentID,
-	}
-
+	size := int64(0)
 	// Attempt to get remote info
-	if item.GetRemoteItem() != nil {
-		if item.GetRemoteItem().GetSize() != nil {
-			file.Size = *item.GetRemoteItem().GetSize()
-		}
+	if item.GetRemoteItem() != nil && item.GetRemoteItem().GetSize() != nil {
+		size = *item.GetRemoteItem().GetSize()
 	}
 
-	file.UpdateCalculatedID()
+	calculatedID := fmt.Sprintf("%s-%d", *item.GetName(), size)
+
+	file := &model.File{
+		ID:           *item.GetId(),
+		Name:         *item.GetName(),
+		Size:         size,
+		Path:         "",
+		CalculatedID: calculatedID,
+		ModTime:      time.Now(),
+		Status:       "active",
+		Replicas:     nil, // Shortcuts don't have physical replicas
+	}
+
 	return file, nil
 }

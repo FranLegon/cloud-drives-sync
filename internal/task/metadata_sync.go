@@ -3,6 +3,7 @@ package task
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
 	"github.com/FranLegon/cloud-drives-sync/internal/auth"
@@ -97,7 +98,8 @@ func DownloadMetadataDB(cfg *model.Config, dbPath string) error {
 		for _, f := range files {
 			match := false
 			if user.Provider == model.ProviderTelegram {
-				if f.Name == MetadataFileName && f.ParentFolderID == auxID {
+				// For Telegram, check if the file's path matches the aux folder structure
+				if f.Name == MetadataFileName && strings.Contains(f.Path, auxID) {
 					match = true
 				}
 			} else {
@@ -237,7 +239,8 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 		for _, f := range files {
 			match := false
 			if user.Provider == model.ProviderTelegram {
-				if f.Name == MetadataFileName && f.ParentFolderID == auxID {
+				// For Telegram, check if the file's path matches the aux folder structure
+				if f.Name == MetadataFileName && strings.Contains(f.Path, auxID) {
 					match = true
 				}
 			} else {

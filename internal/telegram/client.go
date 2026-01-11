@@ -338,6 +338,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 	// We'll use the raw API to get history
 
 	fileMap := make(map[string]*model.File)
+	replicaFragmentMap := make(map[string][]*model.ReplicaFragment) // key is file path
 	offsetID := 0
 	limit := 100
 
@@ -398,60 +399,68 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				}
 			}
 
-			// Create fragment
-			fragment := &model.FileFragment{
-				ID:               strconv.Itoa(msg.ID), // Fragment ID is message ID
-				Name:             meta.FileName,
-				Size:             partSize,
-				Part:             meta.Part,
-				TelegramUniqueID: strconv.Itoa(msg.ID),
-			}
+			modTime := time.Unix(int64(msg.Date), 0)
+			msgID := strconv.Itoa(msg.ID)
 
 			if !meta.Split {
-				// Single file
+				// Single file - create File with Replica
+				calculatedID := fmt.Sprintf("%s-%d", meta.FileName, partSize)
+				
 				file := &model.File{
-					ID:               strconv.Itoa(msg.ID),
-					Name:             meta.FileName,
-					Path:             fullPath,
-					ParentFolderID:   meta.FolderPath,
-					Size:             partSize,
-					TelegramUniqueID: strconv.Itoa(msg.ID),
-					Provider:         model.ProviderTelegram,
-					UserEmail:        c.user.Email,
-					CreatedTime:      time.Unix(int64(msg.Date), 0),
-					ModifiedTime:     time.Unix(int64(msg.Date), 0),
-					Split:            false,
-					TotalParts:       1,
-					Fragments:        []*model.FileFragment{fragment},
+					ID:           msgID, // Will be replaced with UUID in database layer
+					Name:         meta.FileName,
+					Path:         fullPath,
+					Size:         partSize,
+					CalculatedID: calculatedID,
+					ModTime:      modTime,
+					Status:       "active",
 				}
-				file.UpdateCalculatedID()
-				// For single files, fragment FileID is the file ID
-				fragment.FileID = file.ID
+
+				replica := &model.Replica{
+					FileID:       "", // Will be set when linking to logical file
+					CalculatedID: calculatedID,
+					Path:         fullPath,
+					Name:         meta.FileName,
+					Size:         partSize,
+					Provider:     model.ProviderTelegram,
+					AccountID:    c.user.Phone,
+					NativeID:     msgID,
+					NativeHash:   "", // Telegram doesn't provide hashes
+					ModTime:      modTime,
+					Status:       "active",
+					Fragmented:   false,
+				}
+
+				file.Replicas = []*model.Replica{replica}
 				fileMap[fullPath] = file
 			} else {
-				// Split file
+				// Split file - accumulate fragments
 				if _, exists := fileMap[fullPath]; !exists {
+					// Create file structure (will finalize later)
 					fileMap[fullPath] = &model.File{
-						Name:           meta.FileName,
-						Path:           fullPath,
-						ParentFolderID: meta.FolderPath,
-						Provider:       model.ProviderTelegram,
-						UserEmail:      c.user.Email,
-						CreatedTime:    time.Unix(int64(msg.Date), 0),
-						ModifiedTime:   time.Unix(int64(msg.Date), 0),
-						Split:          true,
-						TotalParts:     meta.TotalParts,
-						Fragments:      []*model.FileFragment{},
+						Name: meta.FileName,
+						Path: fullPath,
 					}
+					replicaFragmentMap[fullPath] = []*model.ReplicaFragment{}
 				}
-				file := fileMap[fullPath]
-				file.Fragments = append(file.Fragments, fragment)
-				file.Size += partSize // Accumulate size
+
+				// Create fragment
+				fragment := &model.ReplicaFragment{
+					ReplicaID:        0, // Will be set after replica is created
+					FragmentNumber:   meta.Part,
+					FragmentsTotal:   meta.TotalParts,
+					Size:             partSize,
+					NativeFragmentID: msgID,
+				}
+
+				replicaFragmentMap[fullPath] = append(replicaFragmentMap[fullPath], fragment)
+
+				// Accumulate total size
+				fileMap[fullPath].Size += partSize
 
 				// If this is part 1, set the main ID
 				if meta.Part == 1 {
-					file.ID = strconv.Itoa(msg.ID)
-					file.TelegramUniqueID = strconv.Itoa(msg.ID)
+					fileMap[fullPath].ID = msgID
 				}
 			}
 
@@ -466,23 +475,45 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 		}
 	}
 
-	// Convert map to slice and finalize split files
+	// Finalize split files with replicas and fragments
+	for fullPath, file := range fileMap {
+		if fragments, isFragmented := replicaFragmentMap[fullPath]; isFragmented && len(fragments) > 0 {
+			// This is a fragmented file
+			calculatedID := fmt.Sprintf("%s-%d", file.Name, file.Size)
+			
+			// Ensure ID is set (use first fragment if part 1 was missing)
+			if file.ID == "" {
+				file.ID = fragments[0].NativeFragmentID
+			}
+
+			file.CalculatedID = calculatedID
+			file.ModTime = time.Now() // Use current time as we don't have it from fragments
+			file.Status = "active"
+
+			// Create replica for the fragmented file
+			replica := &model.Replica{
+				FileID:       "", // Will be set when linking to logical file
+				CalculatedID: calculatedID,
+				Path:         fullPath,
+				Name:         file.Name,
+				Size:         file.Size,
+				Provider:     model.ProviderTelegram,
+				AccountID:    c.user.Phone,
+				NativeID:     file.ID,
+				NativeHash:   "", // Telegram doesn't provide hashes
+				ModTime:      file.ModTime,
+				Status:       "active",
+				Fragmented:   true,
+			}
+
+			file.Replicas = []*model.Replica{replica}
+			// Note: fragments will need to be inserted separately after replica ID is known
+		}
+	}
+
+	// Convert map to slice
 	var files []*model.File
 	for _, file := range fileMap {
-		if file.Split {
-			// Ensure ID is set (in case Part 1 was missing, use first fragment's ID)
-			if file.ID == "" && len(file.Fragments) > 0 {
-				file.ID = file.Fragments[0].ID
-				file.TelegramUniqueID = file.Fragments[0].TelegramUniqueID
-			}
-			// Set CalculatedID with total size
-			file.UpdateCalculatedID()
-
-			// Set FileID for all fragments
-			for _, frag := range file.Fragments {
-				frag.FileID = file.ID
-			}
-		}
 		files = append(files, file)
 	}
 
@@ -499,6 +530,9 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	const maxPartSize = 2000 * 1024 * 1024 // 2GB
 
 	generatedID := fmt.Sprintf("%s-%d", name, size)
+	calculatedID := generatedID
+	modTime := time.Now()
+	fullPath := folderID + "/" + name
 
 	// Check if file already exists
 	existingMessages, err := c.findMessagesByGeneratedID(generatedID)
@@ -506,7 +540,6 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		// File exists, check if we need to update metadata
 		var updated bool
 		var firstMsgID int
-		var telegramUniqueID string
 
 		for _, msgClass := range existingMessages {
 			msg, ok := msgClass.(*tg.Message)
@@ -535,7 +568,6 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 
 			if meta.Part == 1 {
 				firstMsgID = msg.ID
-				telegramUniqueID = strconv.Itoa(msg.ID)
 			}
 		}
 
@@ -545,73 +577,84 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 			logger.Info("File %s already exists with correct metadata", name)
 		}
 
-		// Return existing file info
-		// We construct a minimal file object since we didn't re-upload
-		// If it was split, we might not have all fragments here, but for sync purposes
-		// we mainly need the ID and Path.
-
 		// If we didn't find part 1, use the first message ID found
 		if firstMsgID == 0 && len(existingMessages) > 0 {
 			if msg, ok := existingMessages[0].(*tg.Message); ok {
 				firstMsgID = msg.ID
-				telegramUniqueID = strconv.Itoa(msg.ID)
 			}
 		}
 
+		msgID := strconv.Itoa(firstMsgID)
+
 		file := &model.File{
-			ID:               strconv.Itoa(firstMsgID),
-			Name:             name,
-			Path:             folderID + "/" + name,
-			Size:             size,
-			TelegramUniqueID: telegramUniqueID,
-			Provider:         model.ProviderTelegram,
-			UserEmail:        c.user.Email,
-			CreatedTime:      time.Now(),
-			ModifiedTime:     time.Now(),
-			Split:            len(existingMessages) > 1,
-			TotalParts:       len(existingMessages),
-			// Fragments are not fully populated here, but that's usually fine for sync checks
+			ID:           msgID,
+			Name:         name,
+			Path:         fullPath,
+			Size:         size,
+			CalculatedID: calculatedID,
+			ModTime:      modTime,
+			Status:       "active",
 		}
-		file.UpdateCalculatedID()
+
+		replica := &model.Replica{
+			FileID:       "", // Will be set when linking to logical file
+			CalculatedID: calculatedID,
+			Path:         fullPath,
+			Name:         name,
+			Size:         size,
+			Provider:     model.ProviderTelegram,
+			AccountID:    c.user.Phone,
+			NativeID:     msgID,
+			NativeHash:   "",
+			ModTime:      modTime,
+			Status:       "active",
+			Fragmented:   len(existingMessages) > 1,
+		}
+
+		file.Replicas = []*model.Replica{replica}
 		return file, nil
 	}
 
 	if size <= maxPartSize {
-		fragment, err := c.uploadSinglePart(folderID, name, reader, size, generatedID, false, 1, 1)
+		// Single part upload
+		msgID, err := c.uploadSinglePartNew(folderID, name, reader, size, generatedID, false, 1, 1)
 		if err != nil {
 			return nil, err
 		}
 
 		file := &model.File{
-			ID:               fragment.ID,
-			Name:             name,
-			Path:             folderID + "/" + name,
-			Size:             size,
-			TelegramUniqueID: fragment.TelegramUniqueID,
-			Provider:         model.ProviderTelegram,
-			UserEmail:        c.user.Email,
-			CreatedTime:      time.Now(),
-			ModifiedTime:     time.Now(),
-			Split:            false,
-			TotalParts:       1,
-			Fragments:        []*model.FileFragment{fragment},
+			ID:           msgID,
+			Name:         name,
+			Path:         fullPath,
+			Size:         size,
+			CalculatedID: calculatedID,
+			ModTime:      modTime,
+			Status:       "active",
 		}
-		file.UpdateCalculatedID()
-		fragment.FileID = file.ID
+
+		replica := &model.Replica{
+			FileID:       "", // Will be set when linking to logical file
+			CalculatedID: calculatedID,
+			Path:         fullPath,
+			Name:         name,
+			Size:         size,
+			Provider:     model.ProviderTelegram,
+			AccountID:    c.user.Phone,
+			NativeID:     msgID,
+			NativeHash:   "",
+			ModTime:      modTime,
+			Status:       "active",
+			Fragmented:   false,
+		}
+
+		file.Replicas = []*model.Replica{replica}
 		return file, nil
 	}
 
 	// Split upload
 	totalParts := int(math.Ceil(float64(size) / float64(maxPartSize)))
-
-	logicalFile := &model.File{
-		Name:       name,
-		Path:       folderID + "/" + name,
-		Size:       size,
-		Split:      true,
-		TotalParts: totalParts,
-		Fragments:  make([]*model.FileFragment, 0, totalParts),
-	}
+	var firstMsgID string
+	fragments := make([]*model.ReplicaFragment, 0, totalParts)
 
 	for i := 1; i <= totalParts; i++ {
 		partSize := int64(maxPartSize)
@@ -622,26 +665,58 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		// Use LimitReader for the part
 		partReader := io.LimitReader(reader, partSize)
 
-		fragment, err := c.uploadSinglePart(folderID, name, partReader, partSize, generatedID, true, i, totalParts)
+		msgID, err := c.uploadSinglePartNew(folderID, name, partReader, partSize, generatedID, true, i, totalParts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to upload part %d: %w", i, err)
 		}
 
-		logicalFile.Fragments = append(logicalFile.Fragments, fragment)
-
 		if i == 1 {
-			logicalFile.ID = fragment.ID
-			logicalFile.TelegramUniqueID = fragment.TelegramUniqueID
+			firstMsgID = msgID
 		}
-		fragment.FileID = logicalFile.ID
+
+		fragment := &model.ReplicaFragment{
+			ReplicaID:        0, // Will be set after replica is created
+			FragmentNumber:   i,
+			FragmentsTotal:   totalParts,
+			Size:             partSize,
+			NativeFragmentID: msgID,
+		}
+		fragments = append(fragments, fragment)
 	}
 
-	logicalFile.CalculatedID = generatedID
+	file := &model.File{
+		ID:           firstMsgID,
+		Name:         name,
+		Path:         fullPath,
+		Size:         size,
+		CalculatedID: calculatedID,
+		ModTime:      modTime,
+		Status:       "active",
+	}
 
-	return logicalFile, nil
+	replica := &model.Replica{
+		FileID:       "", // Will be set when linking to logical file
+		CalculatedID: calculatedID,
+		Path:         fullPath,
+		Name:         name,
+		Size:         size,
+		Provider:     model.ProviderTelegram,
+		AccountID:    c.user.Phone,
+		NativeID:     firstMsgID,
+		NativeHash:   "",
+		ModTime:      modTime,
+		Status:       "active",
+		Fragmented:   true,
+	}
+
+	file.Replicas = []*model.Replica{replica}
+	// Note: fragments need to be inserted separately after replica ID is known
+
+	return file, nil
 }
 
-func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size int64, generatedID string, split bool, part, totalParts int) (*model.FileFragment, error) {
+// uploadSinglePartNew uploads a single part and returns the message ID
+func (c *Client) uploadSinglePartNew(folderID, name string, reader io.Reader, size int64, generatedID string, split bool, part, totalParts int) (string, error) {
 	// Ensure folder path is not empty
 	if folderID == "" {
 		folderID = "/"
@@ -661,13 +736,13 @@ func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size 
 	// Serialize metadata
 	caption, err := json.Marshal(meta)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal metadata: %w", err)
+		return "", fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
 	// Upload file
 	f, err := c.uploader.FromReader(c.ctx, name, reader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to upload file: %w", err)
+		return "", fmt.Errorf("failed to upload file: %w", err)
 	}
 
 	// Send message with document
@@ -693,18 +768,11 @@ func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size 
 		RandomID: time.Now().UnixNano(),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to send message: %w", err)
+		return "", fmt.Errorf("failed to send message: %w", err)
 	}
 
 	// Get message ID from updates
 	var msgID int
-	// This is tricky with gotd/message sender, it returns Updates.
-	// We need to parse updates to find the message ID.
-	// For now, we might need to list history or assume it's the last one?
-	// Or use the Updates object.
-
-	// Simplified: assume we can get it.
-	// Actually, sender.File returns (tg.UpdatesClass, error).
 
 	switch u := updates.(type) {
 	case *tg.Updates:
@@ -727,18 +795,13 @@ func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size 
 		}
 	}
 
-	// If we couldn't find msgID, we might have a problem.
-	// But for now let's proceed.
+	if msgID == 0 {
+		return "", fmt.Errorf("failed to get message ID from updates")
+	}
 
-	// Return fragment
-	return &model.FileFragment{
-		ID:               strconv.Itoa(msgID),
-		Name:             name,
-		Size:             size,
-		Part:             part,
-		TelegramUniqueID: strconv.Itoa(msgID),
-	}, nil
+	return strconv.Itoa(msgID), nil
 }
+
 
 // DownloadFile downloads a file from Telegram
 func (c *Client) DownloadFile(fileID string, writer io.Writer) error {

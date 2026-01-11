@@ -31,3 +31,4 @@ metadata.db-wal
 
 # Temporary files
 install_deps.sh
+*.bak

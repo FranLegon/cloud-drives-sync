@@ -79,33 +79,45 @@ func (db *DB) Initialize() error {
 		path TEXT NOT NULL,
 		name TEXT NOT NULL,
 		size INTEGER NOT NULL,
+		calculated_id TEXT,
 		mod_time INTEGER NOT NULL,
-		hash TEXT,
 		status TEXT NOT NULL
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
-	CREATE INDEX IF NOT EXISTS idx_files_hash ON files(hash);
+	CREATE INDEX IF NOT EXISTS idx_files_calculated_id ON files(calculated_id);
+	CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
 
 	CREATE TABLE IF NOT EXISTS replicas (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		file_id TEXT NOT NULL,
+		file_id TEXT,
+		calculated_id TEXT,
+		path TEXT NOT NULL,
+		name TEXT NOT NULL,
+		size INTEGER NOT NULL,
 		provider TEXT NOT NULL,
 		account_id TEXT NOT NULL,
 		native_id TEXT NOT NULL,
 		native_hash TEXT,
+		mod_time INTEGER NOT NULL,
 		status TEXT NOT NULL,
+		fragmented BOOLEAN NOT NULL DEFAULT 0,
 		FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_replicas_file_id ON replicas(file_id);
+	CREATE INDEX IF NOT EXISTS idx_replicas_calculated_id ON replicas(calculated_id);
 	CREATE INDEX IF NOT EXISTS idx_replicas_provider ON replicas(provider);
 	CREATE INDEX IF NOT EXISTS idx_replicas_account_id ON replicas(account_id);
+	CREATE INDEX IF NOT EXISTS idx_replicas_native_id ON replicas(native_id);
+	CREATE INDEX IF NOT EXISTS idx_replicas_status ON replicas(status);
 
 	CREATE TABLE IF NOT EXISTS replica_fragments (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		replica_id INTEGER NOT NULL,
-		sequence_number INTEGER NOT NULL,
+		fragment_number INTEGER NOT NULL,
+		fragments_total INTEGER NOT NULL,
+		size INTEGER NOT NULL,
 		native_fragment_id TEXT NOT NULL,
 		FOREIGN KEY(replica_id) REFERENCES replicas(id) ON DELETE CASCADE
 	);
@@ -142,11 +154,11 @@ func (db *DB) InsertFile(file *model.File) error {
 	// Insert into files table
 	fileQuery := `
 	INSERT OR REPLACE INTO files (
-		id, path, name, size, mod_time, hash, status
+		id, path, name, size, calculated_id, mod_time, status
 	) VALUES (?, ?, ?, ?, ?, ?, ?)
 	`
 	_, err = tx.Exec(fileQuery,
-		file.ID, file.Path, file.Name, file.Size, file.ModTime.Unix(), file.Hash, file.Status)
+		file.ID, file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status)
 	if err != nil {
 		return fmt.Errorf("failed to insert file: %w", err)
 	}
@@ -155,70 +167,133 @@ func (db *DB) InsertFile(file *model.File) error {
 	for _, replica := range file.Replicas {
 		replicaQuery := `
 		INSERT OR REPLACE INTO replicas (
-			file_id, provider, account_id, native_id, native_hash, status
-		) VALUES (?, ?, ?, ?, ?, ?)
+			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
-		res, err := tx.Exec(replicaQuery,
-			file.ID, string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash, replica.Status)
+		_, err := tx.Exec(replicaQuery,
+			file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+			replica.ModTime.Unix(), replica.Status, replica.Fragmented)
 		if err != nil {
 			return fmt.Errorf("failed to insert replica: %w", err)
 		}
 
-		replicaID, err := res.LastInsertId()
+		// Note: Fragments should be inserted separately via InsertReplicaFragment
+		// This is because fragments are associated with replicas, not files
+	}
+
+	return tx.Commit()
+}
+
+// BatchInsertFiles inserts multiple files in a single transaction
+func (db *DB) BatchInsertFiles(files []*model.File) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	fileStmt, err := tx.Prepare(`
+		INSERT OR REPLACE INTO files (
+			id, path, name, size, calculated_id, mod_time, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer fileStmt.Close()
+
+	replicaStmt, err := tx.Prepare(`
+		INSERT OR REPLACE INTO replicas (
+			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer replicaStmt.Close()
+
+	for _, file := range files {
+		_, err = fileStmt.Exec(
+			file.ID, file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status)
 		if err != nil {
-			return fmt.Errorf("failed to get replica ID: %w", err)
+			return fmt.Errorf("failed to insert file: %w", err)
 		}
 
-		// Insert fragments if any
-		if replica.Provider == model.ProviderTelegram {
-			for _, fragment := range file.Fragments {
-				// We need to associate fragments with the correct replica.
-				// Assuming model structure handles this or we iterate appropriately.
-				// In this simplified insert, we assume fragments belong to the current replica if logic dictates.
-				// But strictly speaking, fragments are children of replicas.
-				// Let's assume the passed file object structure is cleaner, but based on the previous model.go update:
-				// Fragments are attached to File, but they should be attached to Replica in the new model?
-				// The prompt says "Refactor Model: Update model.go to define the new structs (File, Replica, ReplicaFragment)."
-				// I updated model.go:
-				// type File struct { ... Fragments []*ReplicaFragment }
-				// This looks slightly wrong in retrospect if Fragments belong to Replicas.
-				// However, sticking to the provided plan.
-				
-				// Wait, checking the prompt again: "replica_fragments Table ... replica_id (FK)".
-				// So fragments belong to a replica.
-				// In my model.go update:
-				// type File struct { ... Fragments []*ReplicaFragment } 
-				// type ReplicaFragment struct { ReplicaID int64 ... }
-				
-				// If I am inserting a NEW file structure, user might not have set ReplicaID yet if it's auto-increment.
-				// This `InsertFile` method needs to be robust. 
-				// For now, I will just insert the file and replicas. 
-				// The logic for fragments needs to ensure they are linked to the correct replica.
-				
-				// Let's refine the Insert logic in a follow up if needed, but for now I will focus on File and Replicas.
-				// Actually, I should probably remove the old InsertFile logic completely and let the user re-implement the logic later or do a basic implementation now.
-				// I'll stick to a basic implementation that supports the new schema.
-				
-				if fragment.ReplicaID == 0 {
-					fragment.ReplicaID = replicaID
-				}
-				
-				if fragment.ReplicaID == replicaID {
-					fragmentQuery := `
-					INSERT INTO replica_fragments (
-						replica_id, sequence_number, native_fragment_id
-					) VALUES (?, ?, ?)
-					`
-					_, err = tx.Exec(fragmentQuery, replicaID, fragment.SequenceNumber, fragment.NativeFragmentID)
-					if err != nil {
-						return fmt.Errorf("failed to insert fragment: %w", err)
-					}
-				}
+		for _, replica := range file.Replicas {
+			_, err = replicaStmt.Exec(
+				file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+				string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+				replica.ModTime.Unix(), replica.Status, replica.Fragmented)
+			if err != nil {
+				return fmt.Errorf("failed to insert replica: %w", err)
 			}
 		}
 	}
 
 	return tx.Commit()
+}
+
+// InsertReplica inserts a replica record into the database
+func (db *DB) InsertReplica(replica *model.Replica) error {
+	query := `
+	INSERT INTO replicas (
+		file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+	res, err := db.conn.Exec(query,
+		replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+		replica.ModTime.Unix(), replica.Status, replica.Fragmented)
+	if err != nil {
+		return fmt.Errorf("failed to insert replica: %w", err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("failed to get replica ID: %w", err)
+	}
+	replica.ID = id
+	return nil
+}
+
+// UpsertReplica inserts or updates a replica record
+func (db *DB) UpsertReplica(replica *model.Replica) error {
+	query := `
+	INSERT OR REPLACE INTO replicas (
+		id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+	_, err := db.conn.Exec(query,
+		replica.ID, replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+		replica.ModTime.Unix(), replica.Status, replica.Fragmented)
+	return err
+}
+
+// InsertReplicaFragment inserts a fragment record into the database
+func (db *DB) InsertReplicaFragment(fragment *model.ReplicaFragment) error {
+	query := `
+	INSERT INTO replica_fragments (
+		replica_id, fragment_number, fragments_total, size, native_fragment_id
+	) VALUES (?, ?, ?, ?, ?)
+	`
+	res, err := db.conn.Exec(query,
+		fragment.ReplicaID, fragment.FragmentNumber, fragment.FragmentsTotal, fragment.Size, fragment.NativeFragmentID)
+	if err != nil {
+		return fmt.Errorf("failed to insert fragment: %w", err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return fmt.Errorf("failed to get fragment ID: %w", err)
+	}
+	fragment.ID = id
+	return nil
 }
 
 
@@ -268,16 +343,16 @@ func (db *DB) BatchInsertFolders(folders []*model.Folder) error {
 	return tx.Commit()
 }
 
-// GetFilesByHash returns all files with a specific hash
-func (db *DB) GetFilesByHash(hash string) ([]*model.File, error) {
+// GetFilesByCalculatedID returns all files with a specific calculated_id
+func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error) {
 	query := `
-	SELECT id, path, name, size, mod_time, hash, status
+	SELECT id, path, name, size, calculated_id, mod_time, status
 	FROM files
-	WHERE hash = ?
+	WHERE calculated_id = ?
 	ORDER BY mod_time ASC
 	`
 
-	rows, err := db.conn.Query(query, hash)
+	rows, err := db.conn.Query(query, calculatedID)
 	if err != nil {
 		return nil, err
 	}
@@ -288,7 +363,7 @@ func (db *DB) GetFilesByHash(hash string) ([]*model.File, error) {
 		file := &model.File{}
 		var modTime int64
 		err := rows.Scan(
-			&file.ID, &file.Path, &file.Name, &file.Size, &modTime, &file.Hash, &file.Status,
+			&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status,
 		)
 		if err != nil {
 			return nil, err
@@ -311,7 +386,7 @@ func (db *DB) GetFilesByHash(hash string) ([]*model.File, error) {
 // GetAllFiles returns all files
 func (db *DB) GetAllFiles() ([]*model.File, error) {
 	query := `
-	SELECT id, path, name, size, mod_time, hash, status
+	SELECT id, path, name, size, calculated_id, mod_time, status
 	FROM files
 	ORDER BY path ASC
 	`
@@ -327,7 +402,7 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 		file := &model.File{}
 		var modTime int64
 		err := rows.Scan(
-			&file.ID, &file.Path, &file.Name, &file.Size, &modTime, &file.Hash, &file.Status,
+			&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status,
 		)
 		if err != nil {
 			return nil, err
@@ -336,40 +411,27 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 		files = append(files, file)
 	}
 
-	// Optimizaton: Load Replicas in batch or lazily? 
-	// For now, let's load them one by one to keep it simple, or user can load them when needed.
-	// But since the interface doesn't change, we should probably populate them?
-	// The prompt implies a major refactor.
-	// Let's assume we populate replicas for consistency.
+	// Load replicas for each file
 	for _, file := range files {
 		replicas, err := db.GetReplicas(file.ID)
 		if err != nil {
 			return nil, err
 		}
 		file.Replicas = replicas
-		
-		// Load Fragments if any
-		for _, replica := range file.Replicas {
-			if replica.Provider == model.ProviderTelegram {
-				fragments, err := db.GetReplicaFragments(replica.ID)
-				if err != nil {
-					return nil, err
-				}
-				// Attach fragments to file.Fragments as per model definition?
-				// model.File has Fragments []*ReplicaFragment
-				// We should probably aggregate them.
-				file.Fragments = append(file.Fragments, fragments...)
-			}
-		}
 	}
 
 	return files, rows.Err()
 }
 
+// GetAllFilesAcrossProviders returns all files (alias for GetAllFiles for backwards compatibility)
+func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
+	return db.GetAllFiles()
+}
+
 // GetReplicas returns all replicas for a file
 func (db *DB) GetReplicas(fileID string) ([]*model.Replica, error) {
 	query := `
-	SELECT id, file_id, provider, account_id, native_id, native_hash, status
+	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
 	FROM replicas
 	WHERE file_id = ?
 	`
@@ -383,11 +445,14 @@ func (db *DB) GetReplicas(fileID string) ([]*model.Replica, error) {
 	for rows.Next() {
 		r := &model.Replica{}
 		var providerStr string
-		err := rows.Scan(&r.ID, &r.FileID, &providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &r.Status)
+		var modTime int64
+		err := rows.Scan(&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
+			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented)
 		if err != nil {
 			return nil, err
 		}
 		r.Provider = model.Provider(providerStr)
+		r.ModTime = time.Unix(modTime, 0)
 		replicas = append(replicas, r)
 	}
 	return replicas, nil
@@ -396,10 +461,10 @@ func (db *DB) GetReplicas(fileID string) ([]*model.Replica, error) {
 // GetReplicaFragments returns all fragments for a replica
 func (db *DB) GetReplicaFragments(replicaID int64) ([]*model.ReplicaFragment, error) {
 	query := `
-	SELECT id, replica_id, sequence_number, native_fragment_id
+	SELECT id, replica_id, fragment_number, fragments_total, size, native_fragment_id
 	FROM replica_fragments
 	WHERE replica_id = ?
-	ORDER BY sequence_number ASC
+	ORDER BY fragment_number ASC
 	`
 	rows, err := db.conn.Query(query, replicaID)
 	if err != nil {
@@ -410,7 +475,7 @@ func (db *DB) GetReplicaFragments(replicaID int64) ([]*model.ReplicaFragment, er
 	var fragments []*model.ReplicaFragment
 	for rows.Next() {
 		f := &model.ReplicaFragment{}
-		err := rows.Scan(&f.ID, &f.ReplicaID, &f.SequenceNumber, &f.NativeFragmentID)
+		err := rows.Scan(&f.ID, &f.ReplicaID, &f.FragmentNumber, &f.FragmentsTotal, &f.Size, &f.NativeFragmentID)
 		if err != nil {
 			return nil, err
 		}
@@ -418,20 +483,11 @@ func (db *DB) GetReplicaFragments(replicaID int64) ([]*model.ReplicaFragment, er
 	}
 	return fragments, nil
 }
-		if err != nil {
-			return nil, err
-		}
-		file.Provider = model.Provider(providerStr)
-		files = append(files, file)
-	}
-
-	return files, rows.Err()
-}
 
 // GetReplicasByAccount returns all replicas for a specific account
 func (db *DB) GetReplicasByAccount(provider model.Provider, accountID string) ([]*model.Replica, error) {
 	query := `
-	SELECT id, file_id, provider, account_id, native_id, native_hash, status
+	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
 	FROM replicas
 	WHERE provider = ? AND account_id = ?
 	`
@@ -445,11 +501,14 @@ func (db *DB) GetReplicasByAccount(provider model.Provider, accountID string) ([
 	for rows.Next() {
 		r := &model.Replica{}
 		var providerStr string
-		err := rows.Scan(&r.ID, &r.FileID, &providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &r.Status)
+		var modTime int64
+		err := rows.Scan(&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
+			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented)
 		if err != nil {
 			return nil, err
 		}
 		r.Provider = model.Provider(providerStr)
+		r.ModTime = time.Unix(modTime, 0)
 		replicas = append(replicas, r)
 	}
 	return replicas, nil
@@ -469,12 +528,13 @@ func (db *DB) DeleteFolder(id string) error {
 	return err
 }
 
-// GetDuplicateHashes returns hashes that appear more than once
-func (db *DB) GetDuplicateHashes() ([]string, error) {
+// GetDuplicateCalculatedIDs returns calculated_ids that appear more than once
+func (db *DB) GetDuplicateCalculatedIDs() ([]string, error) {
 	query := `
-	SELECT hash
+	SELECT calculated_id
 	FROM files
-	GROUP BY hash
+	WHERE calculated_id IS NOT NULL
+	GROUP BY calculated_id
 	HAVING COUNT(*) > 1
 	`
 	rows, err := db.conn.Query(query)
@@ -483,15 +543,15 @@ func (db *DB) GetDuplicateHashes() ([]string, error) {
 	}
 	defer rows.Close()
 
-	var hashes []string
+	var ids []string
 	for rows.Next() {
-		var hash string
-		if err := rows.Scan(&hash); err != nil {
+		var id string
+		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
-		hashes = append(hashes, hash)
+		ids = append(ids, id)
 	}
-	return hashes, nil
+	return ids, nil
 }
 
 // ClearProvider is removed/refactored.
@@ -505,7 +565,6 @@ func (db *DB) DeleteReplicasForProvider(provider model.Provider) error {
 	_, err := db.conn.Exec("DELETE FROM replicas WHERE provider = ?", string(provider))
 	return err
 }
-
 
 // DBExists checks if the database file exists
 func DBExists() bool {
@@ -544,106 +603,110 @@ func CreateDB(masterPassword string) error {
 // GetFileByID retrieves a file by its ID
 func (db *DB) GetFileByID(id string) (*model.File, error) {
 	query := `
-	SELECT id, name, path, size, 
-		   googledrive_hash, googledrive_id, onedrive_hash, onedrive_id, telegram_unique_id,
-		   calculated_sha256_hash, calculated_id,
-		   provider, user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
-		   split, total_parts
+	SELECT id, path, name, size, calculated_id, mod_time, status
 	FROM files
 	WHERE id = ?
 	`
 
 	file := &model.File{}
-	var providerStr string
+	var modTime int64
 	err := db.conn.QueryRow(query, id).Scan(
-		&file.ID, &file.Name, &file.Path, &file.Size,
-		&file.GoogleDriveHash, &file.GoogleDriveID, &file.OneDriveHash, &file.OneDriveID, &file.TelegramUniqueID,
-		&file.CalculatedSHA256Hash, &file.CalculatedID,
-		&providerStr, &file.UserEmail, &file.UserPhone, &file.CreatedTime,
-		&file.ModifiedTime, &file.OwnerEmail, &file.ParentFolderID,
-		&file.Split, &file.TotalParts,
+		&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status,
 	)
 	if err != nil {
 		return nil, err
 	}
-	file.Provider = model.Provider(providerStr)
+	file.ModTime = time.Unix(modTime, 0)
+
+	// Load Replicas
+	replicas, err := db.GetReplicas(file.ID)
+	if err != nil {
+		return nil, err
+	}
+	file.Replicas = replicas
+
 	return file, nil
 }
 
-// GetAllFilesAcrossProviders returns all files across all providers
-func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
+// UpdateFile updates a file record in the database
+func (db *DB) UpdateFile(file *model.File) error {
 	query := `
-	SELECT id, name, path, size, 
-		   googledrive_hash, googledrive_id, onedrive_hash, onedrive_id, telegram_unique_id,
-		   calculated_sha256_hash, calculated_id,
-		   provider, user_email, user_phone, created_time, modified_time, owner_email, parent_folder_id,
-		   split, total_parts
-	FROM files
-	ORDER BY provider, path ASC
+	UPDATE files 
+	SET path = ?, name = ?, size = ?, calculated_id = ?, mod_time = ?, status = ?
+	WHERE id = ?
 	`
+	_, err := db.conn.Exec(query,
+		file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status, file.ID)
+	return err
+}
 
+// UpdateReplica updates a replica record
+func (db *DB) UpdateReplica(replica *model.Replica) error {
+	query := `
+	UPDATE replicas SET
+		file_id = ?, calculated_id = ?, path = ?, name = ?, size = ?,
+		provider = ?, account_id = ?, native_id = ?, native_hash = ?,
+		mod_time = ?, status = ?, fragmented = ?
+	WHERE id = ?
+	`
+	_, err := db.conn.Exec(query,
+		replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.ID)
+	return err
+}
+
+// UpdateFileStatus updates the status of a file
+func (db *DB) UpdateFileStatus(id string, status string) error {
+	query := "UPDATE files SET status = ? WHERE id = ?"
+	_, err := db.conn.Exec(query, status, id)
+	return err
+}
+
+// UpdateFileModTime updates the modification time of a file
+func (db *DB) UpdateFileModTime(id string, modTime time.Time) error {
+	query := "UPDATE files SET mod_time = ? WHERE id = ?"
+	_, err := db.conn.Exec(query, modTime.Unix(), id)
+	return err
+}
+
+// UpdateReplicaFileID updates the file_id of a replica
+func (db *DB) UpdateReplicaFileID(replicaID int64, fileID string) error {
+	query := "UPDATE replicas SET file_id = ? WHERE id = ?"
+	_, err := db.conn.Exec(query, fileID, replicaID)
+	return err
+}
+
+// GetReplicasWithNullFileID returns all replicas without a file_id
+func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
+	query := `
+	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
+	FROM replicas
+	WHERE file_id IS NULL
+	`
 	rows, err := db.conn.Query(query)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var files []*model.File
+	var replicas []*model.Replica
 	for rows.Next() {
-		file := &model.File{}
+		r := &model.Replica{}
 		var providerStr string
-		err := rows.Scan(
-			&file.ID, &file.Name, &file.Path, &file.Size,
-			&file.GoogleDriveHash, &file.GoogleDriveID, &file.OneDriveHash, &file.OneDriveID, &file.TelegramUniqueID,
-			&file.CalculatedSHA256Hash, &file.CalculatedID,
-			&providerStr, &file.UserEmail, &file.UserPhone, &file.CreatedTime,
-			&file.ModifiedTime, &file.OwnerEmail, &file.ParentFolderID,
-			&file.Split, &file.TotalParts,
-		)
+		var modTime int64
+		var fileID sql.NullString
+		err := rows.Scan(&r.ID, &fileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
+			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented)
 		if err != nil {
 			return nil, err
 		}
-		file.Provider = model.Provider(providerStr)
-		files = append(files, file)
-	}
-
-	return files, rows.Err()
-}
-
-// GetFileFragments returns all fragments for a given file ID
-func (db *DB) GetFileFragments(fileID string) ([]*model.FileFragment, error) {
-	query := `
-	SELECT id, file_id, name, size, part, telegram_unique_id
-	FROM files_fragments
-	WHERE file_id = ?
-	ORDER BY part ASC
-	`
-
-	rows, err := db.conn.Query(query, fileID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var fragments []*model.FileFragment
-	for rows.Next() {
-		fragment := &model.FileFragment{}
-		err := rows.Scan(
-			&fragment.ID, &fragment.FileID, &fragment.Name, &fragment.Size,
-			&fragment.Part, &fragment.TelegramUniqueID,
-		)
-		if err != nil {
-			return nil, err
+		r.Provider = model.Provider(providerStr)
+		r.ModTime = time.Unix(modTime, 0)
+		if fileID.Valid {
+			r.FileID = fileID.String
 		}
-		fragments = append(fragments, fragment)
+		replicas = append(replicas, r)
 	}
-
-	return fragments, rows.Err()
-}
-
-// UpdateFileModifiedTime updates the modified time of a file
-func (db *DB) UpdateFileModifiedTime(id string, modifiedTime time.Time) error {
-	query := "UPDATE files SET modified_time = ? WHERE id = ?"
-	_, err := db.conn.Exec(query, modifiedTime, id)
-	return err
+	return replicas, nil
 }
