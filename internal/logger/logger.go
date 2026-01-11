@@ -2,6 +2,7 @@ package logger
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -31,6 +32,13 @@ func init() {
 // SetLevel sets the minimum log level to display
 func SetLevel(level LogLevel) {
 	currentLevel = level
+}
+
+// SetOutput sets the output destination for the loggers
+func SetOutput(w io.Writer) { // Changed signature to accept io.Writer
+	infoLogger.SetOutput(w)
+	warningLogger.SetOutput(w)
+	errorLogger.SetOutput(w)
 }
 
 // Info logs an informational message

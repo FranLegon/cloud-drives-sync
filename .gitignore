@@ -8,6 +8,7 @@ cloud-drives-sync
 
 # Test binary
 *.test
+test.log
 
 # Output of the go coverage tool
 *.out
