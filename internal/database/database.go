@@ -192,6 +192,59 @@ func (db *DB) InsertFile(file *model.File) error {
 	return tx.Commit()
 }
 
+// BatchInsertFiles inserts multiple files in a single transaction
+func (db *DB) BatchInsertFiles(files []*model.File) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	fileStmt, err := tx.Prepare(`
+		INSERT OR REPLACE INTO files (
+			id, path, name, size, calculated_id, mod_time, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer fileStmt.Close()
+
+	replicaStmt, err := tx.Prepare(`
+		INSERT OR REPLACE INTO replicas (
+			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer replicaStmt.Close()
+
+	for _, file := range files {
+		_, err = fileStmt.Exec(
+			file.ID, file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status)
+		if err != nil {
+			return fmt.Errorf("failed to insert file: %w", err)
+		}
+
+		for _, replica := range file.Replicas {
+			_, err = replicaStmt.Exec(
+				file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+				string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+				replica.ModTime.Unix(), replica.Status, replica.Fragmented)
+			if err != nil {
+				return fmt.Errorf("failed to insert replica: %w", err)
+			}
+		}
+	}
+
+	return tx.Commit()
+}
+
 // InsertReplica inserts a replica record into the database
 func (db *DB) InsertReplica(replica *model.Replica) error {
 	query := `
@@ -377,6 +430,11 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 	return files, rows.Err()
 }
 
+// GetAllFilesAcrossProviders returns all files (alias for GetAllFiles for backwards compatibility)
+func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
+	return db.GetAllFiles()
+}
+
 // GetReplicas returns all replicas for a file
 func (db *DB) GetReplicas(fileID string) ([]*model.Replica, error) {
 	query := `
@@ -429,6 +487,10 @@ func (db *DB) GetReplicaFragments(replicaID int64) ([]*model.ReplicaFragment, er
 			return nil, err
 		}
 		fragments = append(fragments, f)
+	}
+	return fragments, nil
+}
+
 // GetReplicasByAccount returns all replicas for a specific account
 func (db *DB) GetReplicasByAccount(provider model.Provider, accountID string) ([]*model.Replica, error) {
 	query := `

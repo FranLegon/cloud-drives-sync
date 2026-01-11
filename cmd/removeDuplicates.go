@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
-	"github.com/FranLegon/cloud-drives-sync/internal/model"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 )
@@ -43,88 +42,92 @@ func runRemoveDuplicates(cmd *cobra.Command, args []string) error {
 	}
 
 	// Find duplicates
-	providers := []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram}
+	// Note: In normalized schema, duplicates are at file level, not provider level
+	ids, err := db.GetDuplicateCalculatedIDs()
+	if err != nil {
+		logger.Error("Failed to query duplicates: %v", err)
+		return err
+	}
 
-	for _, provider := range providers {
-		ids, err := db.GetDuplicateCalculatedIDs(provider)
+	if len(ids) == 0 {
+		logger.Info("No duplicates found")
+		return nil
+	}
+
+	logger.Info("Found %d duplicate file groups", len(ids))
+
+	for _, id := range ids {
+		files, err := db.GetFilesByCalculatedID(id)
 		if err != nil {
-			logger.ErrorTagged([]string{string(provider)}, "Failed to query duplicates: %v", err)
 			continue
 		}
 
-		if len(ids) == 0 {
-			logger.InfoTagged([]string{string(provider)}, "No duplicates found")
-			continue
-		}
-
-		logger.InfoTagged([]string{string(provider)}, "Found %d duplicate file groups", len(ids))
-
-		for _, id := range ids {
-			files, err := db.GetFilesByCalculatedID(id, provider)
-			if err != nil {
-				continue
+		for {
+			if len(files) <= 1 {
+				break
 			}
 
-			for {
-				if len(files) <= 1 {
-					break
+			// Display files
+			fmt.Printf("\nDuplicate files (CalculatedID: %s):\n", id)
+			var fileNames []string
+			for i, file := range files {
+				providerList := []string{}
+				for _, replica := range file.Replicas {
+					providerList = append(providerList, string(replica.Provider))
 				}
+				label := fmt.Sprintf("%d. %s (ID: %s, Size: %d, ModTime: %s, Providers: %v)",
+					i+1, file.Path, file.ID, file.Size, file.ModTime.Format("2006-01-02"), providerList)
+				fmt.Println("  " + label)
+				fileNames = append(fileNames, label)
+			}
 
-				// Display files
-				fmt.Printf("\n[%s] Duplicate files (CalculatedID: %s):\n", provider, id)
-				var fileNames []string
-				for i, file := range files {
-					label := fmt.Sprintf("%d. %s (ID: %s, Size: %d, Created: %s)",
-						i+1, file.Path, file.ID, file.Size, file.CreatedTime.Format("2006-01-02"))
-					fmt.Println("  " + label)
-					fileNames = append(fileNames, label)
-				}
+			// Add "Skip" option
+			fileNames = append(fileNames, "Skip this group")
 
-				// Add "Skip" option
-				fileNames = append(fileNames, "Skip this group")
+			// Prompt for deletion
+			selectPrompt := promptui.Select{
+				Label: "Select file(s) to DELETE",
+				Items: fileNames,
+			}
 
-				// Prompt for deletion
-				selectPrompt := promptui.Select{
-					Label: "Select file(s) to DELETE",
-					Items: fileNames,
-				}
+			idx, _, err := selectPrompt.Run()
+			if err != nil {
+				break
+			}
 
-				idx, _, err := selectPrompt.Run()
-				if err != nil {
-					break
-				}
+			if idx >= len(files) {
+				// Skip selected
+				break
+			}
 
-				if idx >= len(files) {
-					// Skip selected
-					break
-				}
-
-				// Delete the selected file
-				file := files[idx]
-				deleted := false
-				if !safeMode {
-					client, err := getClientForFile(runner, file)
+			// Delete the selected file
+			file := files[idx]
+			deleted := false
+			if !safeMode {
+				// Delete all replicas of this file
+				for _, replica := range file.Replicas {
+					client, err := getClientForReplica(runner, replica)
 					if err != nil {
-						logger.ErrorTagged([]string{string(provider)}, "Failed to get client: %v", err)
-						break
+						logger.ErrorTagged([]string{string(replica.Provider)}, "Failed to get client: %v", err)
+						continue
 					}
 
-					if err := client.DeleteFile(file.ID); err != nil {
-						logger.ErrorTagged([]string{string(provider)}, "Failed to delete file: %v", err)
+					if err := client.DeleteFile(replica.NativeID); err != nil {
+						logger.ErrorTagged([]string{string(replica.Provider)}, "Failed to delete file: %v", err)
 					} else {
-						logger.InfoTagged([]string{string(provider)}, "Deleted file: %s", file.Path)
-						db.DeleteFile(file.ID)
-						deleted = true
+						logger.InfoTagged([]string{string(replica.Provider)}, "Deleted replica: %s", file.Path)
 					}
-				} else {
-					logger.DryRunTagged([]string{string(provider)}, "Would delete file: %s (ID: %s)", file.Path, file.ID)
-					deleted = true
 				}
+				db.DeleteFile(file.ID)
+				deleted = true
+			} else {
+				logger.DryRun("Would delete file: %s (ID: %s)", file.Path, file.ID)
+				deleted = true
+			}
 
-				if deleted {
-					// Remove from files slice
-					files = append(files[:idx], files[idx+1:]...)
-				}
+			if deleted {
+				// Remove from files slice
+				files = append(files[:idx], files[idx+1:]...)
 			}
 		}
 	}
@@ -146,52 +149,63 @@ func runRemoveDuplicatesUnsafe(cmd *cobra.Command, args []string) error {
 	}
 
 	// Find and remove duplicates
-	providers := []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram}
+	ids, err := db.GetDuplicateCalculatedIDs()
+	if err != nil {
+		logger.Error("Failed to query duplicates: %v", err)
+		return err
+	}
+
+	if len(ids) == 0 {
+		logger.Info("No duplicates found")
+		return nil
+	}
 
 	totalDeleted := 0
 
-	for _, provider := range providers {
-		ids, err := db.GetDuplicateCalculatedIDs(provider)
+	logger.Info("Found %d duplicate file groups", len(ids))
+
+	for _, id := range ids {
+		files, err := db.GetFilesByCalculatedID(id)
 		if err != nil {
-			logger.ErrorTagged([]string{string(provider)}, "Failed to query duplicates: %v", err)
 			continue
 		}
 
-		if len(ids) == 0 {
-			logger.InfoTagged([]string{string(provider)}, "No duplicates found")
-			continue
-		}
-
-		logger.InfoTagged([]string{string(provider)}, "Found %d duplicate file groups", len(ids))
-
-		for _, id := range ids {
-			files, err := db.GetFilesByCalculatedID(id, provider)
-			if err != nil {
-				continue
+		// Keep the oldest file (by ModTime), delete the rest
+		if len(files) > 1 {
+			// Sort by ModTime to find oldest
+			oldestIdx := 0
+			for i, file := range files {
+				if file.ModTime.Before(files[oldestIdx].ModTime) {
+					oldestIdx = i
+				}
 			}
+			oldestFile := files[oldestIdx]
 
-			// Keep the oldest file, delete the rest
-			if len(files) > 1 {
-				oldestFile := files[0]
-				for _, file := range files[1:] {
-					if !safeMode {
-						client, err := getClientForFile(runner, file)
+			for i, file := range files {
+				if i == oldestIdx {
+					continue // Skip the oldest file
+				}
+
+				if !safeMode {
+					// Delete all replicas of this file
+					for _, replica := range file.Replicas {
+						client, err := getClientForReplica(runner, replica)
 						if err != nil {
-							logger.ErrorTagged([]string{string(provider)}, "Failed to get client: %v", err)
+							logger.ErrorTagged([]string{string(replica.Provider)}, "Failed to get client: %v", err)
 							continue
 						}
 
-						if err := client.DeleteFile(file.ID); err != nil {
-							logger.ErrorTagged([]string{string(provider)}, "Failed to delete file: %v", err)
+						if err := client.DeleteFile(replica.NativeID); err != nil {
+							logger.ErrorTagged([]string{string(replica.Provider)}, "Failed to delete file: %v", err)
 						} else {
-							logger.InfoTagged([]string{string(provider)}, "Deleted duplicate: %s (kept %s)", file.Path, oldestFile.Path)
-							db.DeleteFile(file.ID)
-							totalDeleted++
+							logger.InfoTagged([]string{string(replica.Provider)}, "Deleted duplicate replica: %s (kept %s)", file.Path, oldestFile.Path)
 						}
-					} else {
-						logger.DryRunTagged([]string{string(provider)}, "Would delete duplicate: %s (would keep %s)", file.Path, oldestFile.Path)
-						totalDeleted++
 					}
+					db.DeleteFile(file.ID)
+					totalDeleted++
+				} else {
+					logger.DryRun("Would delete duplicate: %s (would keep %s)", file.Path, oldestFile.Path)
+					totalDeleted++
 				}
 			}
 		}

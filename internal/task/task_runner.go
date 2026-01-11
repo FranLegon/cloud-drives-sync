@@ -249,41 +249,45 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 func (r *Runner) CheckForDuplicates() error {
 	logger.Info("Checking for duplicate files...")
 
-	providers := []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram}
+	// Note: In the normalized schema, duplicates are at the file level, not provider level
+	// Each file can have multiple replicas across providers
+	ids, err := r.db.GetDuplicateCalculatedIDs()
+	if err != nil {
+		logger.Error("Failed to query duplicates: %v", err)
+		return err
+	}
+
+	if len(ids) == 0 {
+		logger.Info("No duplicates found")
+		return nil
+	}
 
 	foundDuplicates := false
 
-	for _, provider := range providers {
-		ids, err := r.db.GetDuplicateCalculatedIDs(provider)
+	for _, calculatedID := range ids {
+		files, err := r.db.GetFilesByCalculatedID(calculatedID)
 		if err != nil {
-			logger.ErrorTagged([]string{string(provider)}, "Failed to query duplicates: %v", err)
+			logger.Error("Failed to get files for calculated_id %s: %v", calculatedID, err)
 			continue
 		}
 
-		if len(ids) == 0 {
-			logger.InfoTagged([]string{string(provider)}, "No duplicates found")
-			continue
-		}
-
-		foundDuplicates = true
-		logger.InfoTagged([]string{string(provider)}, "Found %d duplicate file groups", len(ids))
-
-		for _, id := range ids {
-			files, err := r.db.GetFilesByCalculatedID(id, provider)
-			if err != nil {
-				continue
-			}
-
-			fmt.Printf("\n[%s] Duplicate files (CalculatedID: %s):\n", provider, id)
+		if len(files) > 1 {
+			foundDuplicates = true
+			fmt.Printf("\nDuplicate files (CalculatedID: %s):\n", calculatedID)
 			for i, file := range files {
-				fmt.Printf("  %d. %s (ID: %s, Size: %d, Created: %s)\n",
-					i+1, file.Path, file.ID, file.Size, file.CreatedTime.Format("2006-01-02"))
+				// Show replicas for each file
+				providerList := []string{}
+				for _, replica := range file.Replicas {
+					providerList = append(providerList, fmt.Sprintf("%s(%s)", replica.Provider, replica.AccountID))
+				}
+				fmt.Printf("  %d. %s (ID: %s, Size: %d, ModTime: %s, Providers: %v)\n",
+					i+1, file.Path, file.ID, file.Size, file.ModTime.Format("2006-01-02"), providerList)
 			}
 		}
 	}
 
 	if !foundDuplicates {
-		logger.Info("No duplicates found across all providers")
+		logger.Info("No duplicates found")
 	}
 
 	return nil
