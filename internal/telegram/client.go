@@ -881,6 +881,99 @@ func (c *Client) CreateFolder(parentID, name string) (*model.Folder, error) {
 	}, nil
 }
 
+// DeleteAllMessages deletes all messages in the sync channel
+func (c *Client) DeleteAllMessages() error {
+	if c.channelID == 0 {
+		return nil
+	}
+
+	inputChannel := &tg.InputPeerChannel{
+		ChannelID:  c.channelID,
+		AccessHash: c.accessHash,
+	}
+
+	for {
+		// Get history
+		res, err := c.client.API().MessagesGetHistory(c.ctx, &tg.MessagesGetHistoryRequest{
+			Peer:  inputChannel,
+			Limit: 100,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to get history: %w", err)
+		}
+
+		var messages []tg.MessageClass
+		switch m := res.(type) {
+		case *tg.MessagesMessages: // Should not happen for channels usually
+			messages = m.Messages
+		case *tg.MessagesMessagesSlice: // Should not happen for channels
+			messages = m.Messages
+		case *tg.MessagesChannelMessages:
+			messages = m.Messages
+		default:
+			return fmt.Errorf("unknown message response type: %T", res)
+		}
+
+		if len(messages) == 0 {
+			break
+		}
+
+		var ids []int
+		count := 0
+		for _, m := range messages {
+			// Skip service messages if we want? But we want to clean everything.
+			// Action messages (Service messages) usually cannot be deleted by bots if old?
+			// But creating/deleting files creates messages.
+			// Just try to delete everything.
+			if _, ok := m.(*tg.Message); ok {
+				ids = append(ids, m.GetID())
+				count++
+			} else if _, ok := m.(*tg.MessageService); ok {
+				ids = append(ids, m.GetID())
+				count++
+			}
+		}
+
+		if len(ids) > 0 {
+			_, err = c.client.API().ChannelsDeleteMessages(c.ctx, &tg.ChannelsDeleteMessagesRequest{
+				Channel: &tg.InputChannel{ChannelID: c.channelID, AccessHash: c.accessHash},
+				ID:      ids,
+			})
+			if err != nil {
+				// Continue on error? Only log?
+				// Common error: MESSAGE_DELETE_FORBIDDEN (if not admin), but we own the channel.
+				logger.Warning("Failed to delete batch of messages: %v", err)
+			}
+		}
+
+		if len(messages) < 100 {
+			break
+		}
+	}
+	return nil
+}
+
+// DeleteSyncChannel deletes the sync channel
+func (c *Client) DeleteSyncChannel() error {
+	if c.channelID == 0 {
+		return nil
+	}
+
+	inputChannel := &tg.InputChannel{
+		ChannelID:  c.channelID,
+		AccessHash: c.accessHash,
+	}
+
+	_, err := c.client.API().ChannelsDeleteChannel(c.ctx, inputChannel)
+	if err != nil {
+		return fmt.Errorf("failed to delete channel: %w", err)
+	}
+
+	c.channelID = 0
+	c.accessHash = 0
+	return nil
+}
+
 func (c *Client) DeleteFolder(folderID string) error {
 	return errors.New("not supported - Telegram doesn't have folders")
 }

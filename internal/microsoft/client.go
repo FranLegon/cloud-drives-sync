@@ -211,7 +211,18 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 // DownloadFile downloads a file
 func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
-	return fmt.Errorf("download not fully implemented for Microsoft OneDrive")
+	ctx := context.Background()
+	// Download content as bytes
+	data, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(fileID).Content().Get(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("microsoft download failed: %w", err)
+	}
+
+	// Copy to writer
+	if _, err := io.Copy(writer, bytes.NewReader(data)); err != nil {
+		return fmt.Errorf("failed to write to writer: %w", err)
+	}
+	return nil
 }
 
 // UploadFile uploads a file
@@ -455,6 +466,88 @@ func (c *Client) CreateFolder(parentID, name string) (*model.Folder, error) {
 	return folder, nil
 }
 
+// deleteItemRecursive attempts to delete an item, and if it fails (e.g. non-empty folder),
+// recursively deletes its content and tries again.
+func (c *Client) deleteItemRecursive(ctx context.Context, itemID string) error {
+	// 1. Try direct delete
+	err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(itemID).Delete(ctx, nil)
+	if err == nil {
+		return nil
+	}
+
+	// 2. If failed, assume it might be a non-empty folder. Try to empty it.
+	// We use a loop to handle pagination if there are many items.
+	for {
+		result, listErr := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(itemID).Children().Get(ctx, nil)
+		if listErr != nil {
+			// If we can't list children, we can't clean it. Return original delete error.
+			// It might not be a folder, or permission issue.
+			return err
+		}
+
+		items := result.GetValue()
+		if len(items) == 0 {
+			break // No more children
+		}
+
+		for _, item := range items {
+			if item.GetId() != nil {
+				if rErr := c.deleteItemRecursive(ctx, *item.GetId()); rErr != nil {
+					// We log but continue trying to delete others
+					logger.Warning("Failed to delete child item %s: %v", *item.GetName(), rErr)
+				}
+			}
+		}
+	}
+
+	// 3. Retry delete after emptying
+	return c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(itemID).Delete(ctx, nil)
+}
+
+// EmptySyncFolder deletes all items inside the sync folder
+func (c *Client) EmptySyncFolder() error {
+	folderID, err := c.GetSyncFolderID()
+	if err != nil || folderID == "" {
+		return nil
+	}
+
+	logger.InfoTagged([]string{"Microsoft", c.user.Email}, "Emptying sync folder %s...", folderID)
+
+	ctx := context.Background()
+
+	// List children
+	// Iterate pages if necessary
+	for {
+		result, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(folderID).Children().Get(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("failed to list children: %w", err)
+		}
+
+		items := result.GetValue()
+		if len(items) == 0 {
+			break
+		}
+
+		for _, item := range items {
+			id := *item.GetId()
+			name := "unknown"
+			if item.GetName() != nil {
+				name = *item.GetName()
+			}
+
+			logger.InfoTagged([]string{"Microsoft", c.user.Email}, "Deleting %s (%s)", name, id)
+
+			// Use recursive delete helper
+			if err := c.deleteItemRecursive(ctx, id); err != nil {
+				logger.Warning("Failed to delete %s: %v", name, err)
+			}
+		}
+
+		// If we deleted everything in this page, we list again.
+	}
+	return nil
+}
+
 // DeleteFolder deletes a folder
 func (c *Client) DeleteFolder(folderID string) error {
 	ctx := context.Background()
@@ -512,6 +605,20 @@ func (c *Client) ShareFolder(folderID, email string, role string) error {
 		msRole = "read"
 	}
 	requestBody.SetRoles([]string{msRole})
+
+	requireSignIn := true
+	requestBody.SetRequireSignIn(&requireSignIn)
+
+	// Graph API says: RequireSignIn and SendInvitation cannot both be false.
+	// We want to avoid email spam, so SendInvitation=false. Code above sets it to false.
+	// So RequireSignIn MUST be true.
+	// The default is often true but maybe SDK defaults it or sends explicit false?
+	// Let's set it explicitly to true to be safe.
+	// HOWEVER, user logs showed "RequireSignIn and SendInvitation cannot both be false".
+	// My previous code only set SendInvitation to false.
+	// Creating NewItemItemsItemInvitePostRequestBody might have default nulls.
+	// If the service defaults requireSignIn to false when implicit, we have issue.
+	// Let's explicitly set RequireSignIn to true.
 
 	_, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(folderID).Invite().Post(ctx, requestBody, nil)
 	if err != nil {

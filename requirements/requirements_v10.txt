@@ -341,6 +341,45 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
     *   **Logic:** Iterates through all backup accounts. For each account, lists all files and folders in the root directory. Any item that is not the designated sync folder (e.g., `sync-cloud-drives`) is deleted.
     *   **Safety:** Respects the `--safe` flag to perform a dry run.
 
+*   **`test`**
+    *   **Goal:** Validate system functionality and builds after code changes.
+    *   **Flags:**
+        *   `--safe`: If present, skips the initial deletion of cloud files and local metadata database.
+        *   `--password`: Master password.
+        *   `--help`: Help information.
+    *   **Process:**
+        1.  **Cleanup (Unsafe Mode):** If `--safe` is not provided:
+            *   Deletes `sync-cloud-drives`, all subfolders, and files from all accounts (main and backups, all providers).
+            *   Deletes local `metadata.db`.
+            *   Prompts user for confirmation before execution.
+        2.  **Metadata Initialization:** Re-initializes the database and runs `get-metadata`.
+        3.  **Test Case 1 (Single File Main):**
+            *   Generates a small local file with random data (`test_1.txt`) and uploads it to the main account.
+            *   Runs `free-main` to move it to backups.
+            *   Runs `sync-providers` to ensure consistency.
+            *   Runs `get` requests and compares with `metadata.db` to verify updates.
+        4.  **Test Case 2 (Multi-Provider Backups):**
+            *   Generates `test_2.txt`, `test_3.txt`, and `test_4.txt` locally.
+            *   Uploads one to a random Google backup account, one to a random Telegram backup account, and one to a random Microsoft account.
+            *   Runs `sync-providers`.
+            *   Compares `get` request results with `metadata.db`.
+        5.  **Test Case 3 (Large File):**
+            *   Generates `test_5.txt` (6 GB random data) locally and uploads it.
+            *   Runs `sync-providers`.
+            *   Compares results.
+        6.  **Test Case 4 (Folder & File Movements):**
+            *   Creates folders and moves `test_n.txt` files around in all providers.
+            *   Runs `sync-providers`.
+            *   Compares results.
+        7.  **Test Case 5 (Soft Deletion):**
+            *   Moves a different file in each provider to `sync-cloud-drives-aux/soft-deleted`.
+            *   Runs `sync-providers`.
+            *   Compares with expected results.
+        8.  **Test Case 6 (Hard Deletion):**
+            *   Deletes a file from `sync-cloud-drives-aux/soft-deleted`.
+            *   Runs `sync-providers`.
+            *   Compares with expected results (full deletes).
+
 *   **`help`**
     *   Lists all available commands, their purpose, and example usage.
 

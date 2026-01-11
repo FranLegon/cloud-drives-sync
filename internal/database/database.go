@@ -140,13 +140,16 @@ func (db *DB) Initialize() error {
 
 	CREATE INDEX IF NOT EXISTS idx_folders_provider ON folders(provider);
 	CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
+	`
+
+	if _, err := db.conn.Exec(schema); err != nil {
+		return err
+	}
 
 	// Migrations
 	_, _ = db.conn.Exec("ALTER TABLE replicas ADD COLUMN last_seen_at INTEGER DEFAULT 0")
-	`
 
-	_, err := db.conn.Exec(schema)
-	return err
+	return nil
 }
 
 // InsertFile inserts a file record into the database
@@ -221,13 +224,19 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 			status=excluded.status,
 			fragmented=excluded.fragmented,
 			last_seen_at=excluded.last_seen_at
-		RETURNING id
 	`
 	replicaStmt, err := tx.Prepare(replicaQuery)
 	if err != nil {
 		return err
 	}
 	defer replicaStmt.Close()
+
+	// Prepare ID lookup statement
+	idStmt, err := tx.Prepare(`SELECT id FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`)
+	if err != nil {
+		return err
+	}
+	defer idStmt.Close()
 
 	// Prepare fragment statements
 	deleteFragmentsStmt, err := tx.Prepare(`DELETE FROM replica_fragments WHERE replica_id = ?`)
@@ -248,14 +257,19 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 
 	for _, file := range files {
 		for _, replica := range file.Replicas {
-			var replicaID int64
-			err := replicaStmt.QueryRow(
+			_, err := replicaStmt.Exec(
 				replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 				string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-				replica.ModTime.Unix(), replica.Status, replica.Fragmented, now).Scan(&replicaID)
+				replica.ModTime.Unix(), replica.Status, replica.Fragmented, now)
 
 			if err != nil {
 				return fmt.Errorf("failed to upsert replica: %w", err)
+			}
+
+			var replicaID int64
+			err = idStmt.QueryRow(string(replica.Provider), replica.AccountID, replica.NativeID).Scan(&replicaID)
+			if err != nil {
+				return fmt.Errorf("failed to get replica ID: %w", err)
 			}
 
 			if len(replica.Fragments) > 0 {
@@ -638,6 +652,39 @@ func CreateDB(masterPassword string) error {
 	}
 
 	return nil
+}
+
+// GetFileByPath retrieves a file by its path
+func (db *DB) GetFileByPath(path string) (*model.File, error) {
+	query := `
+	SELECT id, path, name, size, calculated_id, mod_time, status
+	FROM files
+	WHERE path = ?
+	`
+	row := db.conn.QueryRow(query, path)
+
+	file := &model.File{}
+	var modTime int64
+	err := row.Scan(
+		&file.ID, &file.Path, &file.Name, &file.Size,
+		&file.CalculatedID, &modTime, &file.Status,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil // Return nil if not found
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan file: %w", err)
+	}
+	file.ModTime = time.Unix(modTime, 0)
+
+	// Get Replicas
+	replicas, err := db.GetReplicas(file.ID)
+	if err != nil {
+		return nil, err
+	}
+	file.Replicas = replicas
+
+	return file, nil
 }
 
 // GetFileByID retrieves a file by its ID

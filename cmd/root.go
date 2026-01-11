@@ -64,6 +64,11 @@ and Telegram.`,
 			return fmt.Errorf("failed to load configuration: %w", err)
 		}
 
+		// Skip DB/Metadata setup for test command as it manages its own lifecycle
+		if cmd.Name() == "test" {
+			return nil
+		}
+
 		// Sync metadata (Download if missing)
 		if err := task.DownloadMetadataDB(cfg, database.GetDBPath()); err != nil {
 			return fmt.Errorf("failed to sync metadata: %w", err)

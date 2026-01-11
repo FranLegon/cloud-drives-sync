@@ -150,7 +150,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 		for _, f := range fileList.Files {
 			modTime := parseTime(f.ModifiedTime)
 			calculatedID := fmt.Sprintf("%s-%d", f.Name, f.Size)
-			
+
 			// Create the logical file
 			file := &model.File{
 				ID:           f.Id, // Will be replaced with UUID in database layer
@@ -177,7 +177,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				Status:       "active",
 				Fragmented:   false,
 			}
-			
+
 			file.Replicas = []*model.Replica{replica}
 			allFiles = append(allFiles, file)
 		}
@@ -292,7 +292,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		Status:       "active",
 		Fragmented:   false,
 	}
-	
+
 	result.Replicas = []*model.Replica{replica}
 
 	return result, nil
@@ -365,6 +365,73 @@ func (c *Client) CreateFolder(parentID, name string) (*model.Folder, error) {
 	}
 
 	return result, nil
+}
+
+// EmptySyncFolder recursively deletes all items inside the sync folder that are owned by the user.
+// Backups will delete their files. Main will delete its files and folders.
+func (c *Client) EmptySyncFolder() error {
+	folderID, err := c.GetSyncFolderID()
+	if err != nil || folderID == "" {
+		return nil
+	}
+
+	logger.InfoTagged([]string{"Google", c.user.Email}, "Cleaning sync folder %s (Recursive)...", folderID)
+	return c.deleteContentsR(folderID)
+}
+
+func (c *Client) deleteContentsR(parentID string) error {
+	query := fmt.Sprintf("'%s' in parents and trashed = false", parentID)
+
+	// Collect all items to delete to avoid pagination issues while deleting
+	var allItems []*drive.File
+	nextPageToken := ""
+
+	for {
+		list, err := c.service.Files.List().Q(query).Fields("nextPageToken, files(id, name, mimeType, owners)").PageSize(100).PageToken(nextPageToken).Do()
+		if err != nil {
+			return fmt.Errorf("list failed: %w", err)
+		}
+
+		allItems = append(allItems, list.Files...)
+		nextPageToken = list.NextPageToken
+		if nextPageToken == "" {
+			break
+		}
+	}
+
+	for _, f := range allItems {
+		// Check ownership
+		isOwner := false
+		for _, o := range f.Owners {
+			if o.Me {
+				isOwner = true
+				break
+			}
+		}
+
+		if f.MimeType == "application/vnd.google-apps.folder" {
+			// Recurse first
+			if err := c.deleteContentsR(f.Id); err != nil {
+				logger.Warning("Failed to recurse into %s: %v", f.Name, err)
+			}
+			// Then delete folder if we own it
+			if isOwner {
+				logger.InfoTagged([]string{"Google", c.user.Email}, "Deleting Folder %s (%s)", f.Name, f.Id)
+				if err := c.DeleteFile(f.Id); err != nil {
+					logger.Warning("Failed to delete folder %s: %v", f.Name, err)
+				}
+			}
+		} else {
+			// File
+			if isOwner {
+				logger.InfoTagged([]string{"Google", c.user.Email}, "Deleting File %s (%s)", f.Name, f.Id)
+				if err := c.DeleteFile(f.Id); err != nil {
+					logger.Warning("Failed to delete file %s: %v", f.Name, err)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // DeleteFolder deletes a folder
