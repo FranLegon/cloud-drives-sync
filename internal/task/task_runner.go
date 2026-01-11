@@ -481,9 +481,12 @@ func (r *Runner) BalanceStorage() error {
 			// Filter files owned by user and sort by size (descending)
 			var candidates []*model.File
 			for _, f := range files {
-				// Check ownership (Google Drive specific check)
-				if f.OwnerEmail == source.User.Email {
-					candidates = append(candidates, f)
+				// Check if any replica belongs to the source user's account
+				for _, replica := range f.Replicas {
+					if replica.AccountID == source.User.Email || replica.AccountID == source.User.Phone {
+						candidates = append(candidates, f)
+						break
+					}
 				}
 			}
 
@@ -641,8 +644,12 @@ func (r *Runner) FreeMain() error {
 	// Filter files owned by main user
 	var candidates []*model.File
 	for _, f := range files {
-		if f.OwnerEmail == mainUser.Email {
-			candidates = append(candidates, f)
+		// Check if any replica belongs to the main user
+		for _, replica := range f.Replicas {
+			if replica.AccountID == mainUser.Email {
+				candidates = append(candidates, f)
+				break
+			}
 		}
 	}
 
@@ -744,13 +751,16 @@ func (r *Runner) SyncProviders() error {
 		return fmt.Errorf("failed to get files: %w", err)
 	}
 
-	// Group by normalized path
+	// Group by normalized path - now tracking which providers have replicas for each file
 	filesByPath := make(map[string]map[model.Provider]*model.File)
 	for _, f := range files {
 		if _, ok := filesByPath[f.Path]; !ok {
 			filesByPath[f.Path] = make(map[model.Provider]*model.File)
 		}
-		filesByPath[f.Path][f.Provider] = f
+		// Add entry for each provider that has a replica of this file
+		for _, replica := range f.Replicas {
+			filesByPath[f.Path][replica.Provider] = f
+		}
 	}
 
 	// Check for missing files
@@ -815,7 +825,12 @@ func (r *Runner) SyncProviders() error {
 						logger.Error("Failed to copy file: %v", err)
 					}
 				} else {
-					logger.DryRun("Would copy %s from %s to %s", path, masterFile.Provider, provider)
+					// Get the source provider from first replica
+					sourceProvider := ""
+					if len(masterFile.Replicas) > 0 {
+						sourceProvider = string(masterFile.Replicas[0].Provider)
+					}
+					logger.DryRun("Would copy %s from %s to %s", path, sourceProvider, provider)
 				}
 			} else {
 				// File exists, check calculated ID for conflict
@@ -887,8 +902,12 @@ func (r *Runner) distributeShortcuts() error {
 		// Check if this path exists in Microsoft
 		var msFiles []*model.File
 		for _, f := range pathFiles {
-			if f.Provider == model.ProviderMicrosoft {
-				msFiles = append(msFiles, f)
+			// Check if file has a Microsoft replica
+			for _, replica := range f.Replicas {
+				if replica.Provider == model.ProviderMicrosoft {
+					msFiles = append(msFiles, f)
+					break
+				}
 			}
 		}
 
@@ -904,8 +923,14 @@ func (r *Runner) distributeShortcuts() error {
 			// Check if user has it
 			hasIt := false
 			for _, f := range msFiles {
-				if f.UserEmail == user.Email {
-					hasIt = true
+				// Check if this file has a replica for this user
+				for _, replica := range f.Replicas {
+					if replica.Provider == model.ProviderMicrosoft && replica.AccountID == user.Email {
+						hasIt = true
+						break
+					}
+				}
+				if hasIt {
 					break
 				}
 			}
@@ -916,7 +941,12 @@ func (r *Runner) distributeShortcuts() error {
 						logger.Error("Failed to create shortcut for %s in %s: %v", path, user.Email, err)
 					}
 				} else {
-					logger.DryRun("Would create shortcut for %s in %s -> %s", path, user.Email, sourceFile.UserEmail)
+					// Get source account from first replica
+					sourceAccount := ""
+					if len(sourceFile.Replicas) > 0 {
+						sourceAccount = sourceFile.Replicas[0].AccountID
+					}
+					logger.DryRun("Would create shortcut for %s in %s -> %s", path, user.Email, sourceAccount)
 				}
 			}
 		}

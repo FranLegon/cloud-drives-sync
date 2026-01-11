@@ -138,11 +138,26 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 
 // copyFile copies a file from one provider to another
 func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider, targetName string) error {
-	// 1. Get source client
+	// 1. Get source replica to determine which client to use
+	if len(masterFile.Replicas) == 0 {
+		return fmt.Errorf("file has no replicas")
+	}
+	
+	// Use the first replica as the source
+	sourceReplica := masterFile.Replicas[0]
+	
+	// Get source client
+	var email, phone string
+	if sourceReplica.Provider == model.ProviderTelegram {
+		phone = sourceReplica.AccountID
+	} else {
+		email = sourceReplica.AccountID
+	}
+	
 	sourceClient, err := r.GetOrCreateClient(&model.User{
-		Provider: masterFile.Provider,
-		Email:    masterFile.UserEmail,
-		Phone:    masterFile.UserPhone,
+		Provider: sourceReplica.Provider,
+		Email:    email,
+		Phone:    phone,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get source client: %w", err)
@@ -159,7 +174,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		finalName = targetName
 	}
 
-	logger.InfoTagged([]string{string(targetProvider), destUser.Email}, "Copying %s (as %s) from %s...", masterFile.Path, finalName, masterFile.Provider)
+	logger.InfoTagged([]string{string(targetProvider), destUser.Email}, "Copying %s (as %s) from %s...", masterFile.Path, finalName, sourceReplica.Provider)
 
 	// 3. Ensure folder structure
 	dir := filepath.Dir(masterFile.Path)
@@ -205,19 +220,34 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 
 // createShortcut shares the source file and creates a shortcut in the target account
 func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) error {
-	// 1. Get Source Client
+	// 1. Get source replica to determine which client to use
+	if len(sourceFile.Replicas) == 0 {
+		return fmt.Errorf("file has no replicas")
+	}
+	
+	// Use the first replica as the source
+	sourceReplica := sourceFile.Replicas[0]
+	
+	// Get Source Client
+	var email, phone string
+	if sourceReplica.Provider == model.ProviderTelegram {
+		phone = sourceReplica.AccountID
+	} else {
+		email = sourceReplica.AccountID
+	}
+	
 	sourceClient, err := r.GetOrCreateClient(&model.User{
-		Provider: sourceFile.Provider,
-		Email:    sourceFile.UserEmail,
-		Phone:    "", // Phone not stored in File model, but only relevant for Telegram which doesn't support shortcuts
+		Provider: sourceReplica.Provider,
+		Email:    email,
+		Phone:    phone,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get source client: %w", err)
 	}
 
 	// 2. Share Source File with Target User
-	logger.InfoTagged([]string{string(sourceFile.Provider), sourceFile.UserEmail}, "Sharing %s with %s...", sourceFile.Name, targetUser.Email)
-	if err := sourceClient.ShareFolder(sourceFile.ID, targetUser.Email, "reader"); err != nil {
+	logger.InfoTagged([]string{string(sourceReplica.Provider), sourceReplica.AccountID}, "Sharing %s with %s...", sourceFile.Name, targetUser.Email)
+	if err := sourceClient.ShareFolder(sourceReplica.NativeID, targetUser.Email, "reader"); err != nil {
 		logger.Warning("Share failed (attempting shortcut anyway): %v", err)
 	}
 
@@ -238,7 +268,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 
 	// 5. Create Shortcut
 	logger.InfoTagged([]string{string(targetUser.Provider), targetUser.Email}, "Creating shortcut for %s...", sourceFile.Name)
-	_, err = targetClient.CreateShortcut(parentID, sourceFile.Name, sourceFile.ID)
+	_, err = targetClient.CreateShortcut(parentID, sourceFile.Name, sourceReplica.NativeID)
 	if err != nil {
 		return fmt.Errorf("failed to create shortcut: %w", err)
 	}
