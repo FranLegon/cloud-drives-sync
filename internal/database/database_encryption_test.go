@@ -113,12 +113,12 @@ func TestDatabaseOperationsWithEncryption(t *testing.T) {
 	
 	// Query to check if tables exist
 	var count int
-	err = db.conn.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('files', 'folders', 'files_fragments')").Scan(&count)
+	err = db.conn.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('files', 'folders', 'replicas', 'replica_fragments')").Scan(&count)
 	if err != nil {
 		t.Fatalf("Failed to query tables: %v", err)
 	}
-	if count != 3 {
-		t.Fatalf("Expected 3 tables, got %d", count)
+	if count != 4 {
+		t.Fatalf("Expected 4 tables, got %d", count)
 	}
 	
 	t.Logf("Successfully created and verified encrypted database with %d tables", count)
