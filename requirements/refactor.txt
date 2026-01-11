@@ -15,7 +15,6 @@ calculated_id (TEXT): CONCAT(name, '-', size)
 mod_time (INTEGER): Modification timestamp.
 status (TEXT): active, softdeleted, deleted.
 
-
 replicas Table (Physical copies on cloud):
 
 id (INTEGER, PK, AutoInc).
@@ -43,7 +42,7 @@ native_fragment_id (telegram unique id)
 Code Logic:
 - We must first query metadata from APIs an upsert to replicas table (for inserts, leave file_id null initially, unless known from a sync operation). Then, we join replicas with null file_id with [files] on calculated_id to populate file_id in replicas.
 - Next, we identify any new files in replicas that do not have a matching file_id and insert them into files table, then update replicas.file_id accordingly.
-- STRICT RULE: To minimize false positives in deduplication (same name+size = same file), we must explicitly populate the file_id field in the replicas table whenever a new replica is created via a sync operation (e.g., uploading a file from Google to OneDrive). Do not rely on calculate_id matching for these known counterparts.
+- To minimize false positives in deduplication (same name+size = same file), we must explicitly populate the file_id field in the replicas table whenever a new replica is created via a sync operation (e.g., uploading a file from Google to OneDrive). Do not rely on calculate_id matching for these known counterparts.
 - Then, we compare replicas.name and replicas.path with files.name and files.path to detect moves/renames to be executed through API calls.
 - Content Updates: Detect cases where a valid replica (with file_id) has a more recent mod_time than the logical file. Update the logical [files] table with the new size, mod_time, and calculated_id from this latest replica. This marks other replicas as outdated (their size/mod_time will no longer match the logical file), triggering a sync content operation.
 - Deletions: If no replica for a given file is found in any provider during a sync, mark the file as deleted in files table. If file is found in `sync-cloud-drives-aux/soft-deleted` for any Google Drive account (Main or Backup), mark as softdeleted and move file to soft-deleted folder for all other providers (in actual API calls, not just db). If a file is not found in any Google Drive account (Main or Backup) but exists in other providers, delete (actual API call) from those providers and mark as deleted in files table.
@@ -51,10 +50,14 @@ Code Logic:
 - Calculating hashes locally is out of the ecuation because we want to avoid downloading files just for hash calculation. Remove any references to local hash calculation.
 - `sync-cloud-drives-aux/soft-deleted` folder is freed (free-main) and synced (sync-providers) just like any other folder, but files moved there are marked as softdeleted in the db. The only difference is that if the logical file existed as soft deleted and then is not found in google in a subsequent run (any account, not just main), it is marked as deleted and removed from all providers.
 
+
 Immediate Tasks:
 
-Update Requirements: First, read and update requirements_v10.txt to replace the old flat schema design with this new Normalized Schema.
-Refactor Model: Update model.go to define the new structs (File, Replica, ReplicaFragment).
-Refactor Database: Update database.go to create these new tables instead of the old one.
-Please start by reading requirements_v10.txt and applying the updates there first.
+1.  **Update Requirements**: Read and update `requirements/requirements_v10.txt` to explicitly define the new Normalized Schema (Files, Replicas, ReplicaFragments) in the Database section, replacing any old schema description.
+2.  **Refactor Model**: Update `internal/model/model.go` to define the new structs (`File`, `Replica`, `ReplicaFragment`) and ensure they map correctly to the database schema.
+    *   *Note*: `database.go` already references `file.Replicas`, which is missing in current `model.go`. This is a blocking mismatch.
+3.  **Fix Database Implementation**: Review and finalize `internal/database/database.go`.
+    *   The `Initialize` method already contains the new schema (`files`, `replicas`, `replica_fragments`), but the read/write methods (`InsertFile`, `GetFiles`) need to be verified against the new `model.go` structs.
+    *   Ensure all database methods support the normalized structure (joining tables where necessary).
+4.  **Start Implementation**: Once Model and DB are aligned, proceed to update `cmd/` and `internal/task/` logic to use the new schema.
 
