@@ -99,10 +99,7 @@ func runTest(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("verification failed: found %d active files in clean state (e.g. %s)", len(files), files[0].Path)
 	}
 
-	// Create dummy files
-	if err := ensureDummyFiles(); err != nil {
-		return err
-	}
+	// Create dummy files - SKIPPED (In-Memory)
 
 	var mainUser *model.User
 	var backups []*model.User
@@ -500,34 +497,18 @@ func getUserForReplica(db *database.DB, path string, provider model.Provider, us
 	return nil, fmt.Errorf("no replica found for provider %s", provider)
 }
 
-func ensureDummyFiles() error {
-	logger.Info("Generating/Verifying dummy files...")
-	files := map[string]string{
-		"test_1.txt":    "This is test file 1 content.",
-		"test_2.txt":    "This is test file 2 content for specific backup.",
-		"test_3.txt":    "This is test file 3 content for another backup.",
-		"test_4.txt":    "This is test file 4 content.",
-		"test_move.txt": "This is a file dedicated to testing movement.",
-	}
-
-	for name, content := range files {
-		if _, err := os.Stat(name); os.IsNotExist(err) {
-			logger.Info("Creating local dummy file %s", name)
-			if err := os.WriteFile(name, []byte(content), 0666); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
+var testFileContents = map[string]string{
+	"test_1.txt":    "This is test file 1 content.",
+	"test_2.txt":    "This is test file 2 content for specific backup.",
+	"test_3.txt":    "This is test file 3 content for another backup.",
+	"test_4.txt":    "This is test file 4 content.",
+	"test_move.txt": "This is a file dedicated to testing movement.",
 }
 
 func runTestCase1(runner *task.Runner, mainUser *model.User) error {
 	logger.Info("\n--- Test Case 1: test_1.txt (Main -> Free -> Sync) ---")
 	f1Name := "test_1.txt"
-	f1Data, err := os.ReadFile(f1Name)
-	if err != nil {
-		return fmt.Errorf("missing local file %s: %w", f1Name, err)
-	}
+	f1Data := []byte(testFileContents[f1Name])
 
 	mainClient, err := runner.GetOrCreateClient(mainUser)
 	if err != nil {
@@ -575,10 +556,7 @@ func runTestCase2(runner *task.Runner, backups []*model.User) error {
 			return nil
 		}
 		u := users[int(mustRand(int64(len(users))))]
-		data, err := os.ReadFile(filename)
-		if err != nil {
-			return err
-		}
+		data := []byte(testFileContents[filename])
 
 		client, err := runner.GetOrCreateClient(u)
 		if err != nil {
@@ -688,10 +666,7 @@ func runTestCase4(runner *task.Runner, mainUser *model.User, backups []*model.Us
 
 	// Upload test_move.txt
 	moveName := "test_move.txt"
-	moveData, err := os.ReadFile(moveName)
-	if err != nil {
-		return fmt.Errorf("missing %s: %w", moveName, err)
-	}
+	moveData := []byte(testFileContents[moveName])
 
 	logger.Info("Uploading %s to Main...", moveName)
 	if _, err := mainClient.UploadFile(mainSyncID, moveName, bytes.NewReader(moveData), int64(len(moveData))); err != nil {
