@@ -1,10 +1,12 @@
 package microsoft
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -156,7 +158,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 		if item.GetLastModifiedDateTime() != nil {
 			modTime = *item.GetLastModifiedDateTime()
 		}
-		
+
 		calculatedID := fmt.Sprintf("%s-%d", *item.GetName(), *item.GetSize())
 
 		file := &model.File{
@@ -228,29 +230,70 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		return nil, fmt.Errorf("failed to create file placeholder: %w", err)
 	}
 
-	// 2. Upload content
-	data, err := io.ReadAll(reader)
+	// 2. Upload content via Upload Session
+	uploadSessionRequestBody := drives.NewItemItemsItemCreateUploadSessionPostRequestBody()
+
+	uploadSession, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(*createdItem.GetId()).CreateUploadSession().Post(ctx, uploadSessionRequestBody, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read content: %w", err)
+		return nil, fmt.Errorf("failed to create upload session: %w", err)
 	}
 
-	// Put content
-	// Note: Put requires []byte and config. We pass nil for config.
-	_, err = c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(*createdItem.GetId()).Content().Put(ctx, data, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to upload file content: %w", err)
+	uploadUrl := *uploadSession.GetUploadUrl()
+	chunkSize := int64(10 * 1024 * 1024) // 10MB
+	buf := make([]byte, chunkSize)
+	var offset int64 = 0
+
+	for offset < size {
+		remaining := size - offset
+		toRead := chunkSize
+		if remaining < toRead {
+			toRead = remaining
+		}
+
+		n, err := io.ReadFull(reader, buf[:toRead])
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return nil, fmt.Errorf("failed to read from stream: %w", err)
+		}
+		if n == 0 {
+			break
+		}
+
+		req, err := http.NewRequest("PUT", uploadUrl, bytes.NewReader(buf[:n]))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		req.ContentLength = int64(n)
+		start := offset
+		end := offset + int64(n) - 1
+		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to upload chunk: %w", err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return nil, fmt.Errorf("chunk upload failed status %s: %s", resp.Status, string(body))
+		}
+		resp.Body.Close()
+
+		offset += int64(n)
 	}
+
+	finalItem := createdItem
 
 	modTime := time.Now()
-	if createdItem.GetLastModifiedDateTime() != nil {
-		modTime = *createdItem.GetLastModifiedDateTime()
+	if finalItem.GetLastModifiedDateTime() != nil {
+		modTime = *finalItem.GetLastModifiedDateTime()
 	}
 
-	calculatedID := fmt.Sprintf("%s-%d", *createdItem.GetName(), size)
+	calculatedID := fmt.Sprintf("%s-%d", *finalItem.GetName(), size)
 
 	file := &model.File{
-		ID:           *createdItem.GetId(), // Will be replaced with UUID in database layer
-		Name:         *createdItem.GetName(),
+		ID:           *finalItem.GetId(), // Will be replaced with UUID in database layer
+		Name:         *finalItem.GetName(),
 		Size:         size,
 		Path:         "", // Path will be set by caller
 		CalculatedID: calculatedID,
@@ -262,11 +305,11 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		FileID:       "", // Will be set when linking to logical file
 		CalculatedID: calculatedID,
 		Path:         "", // Path will be set by caller
-		Name:         *createdItem.GetName(),
+		Name:         *finalItem.GetName(),
 		Size:         size,
 		Provider:     model.ProviderMicrosoft,
 		AccountID:    c.user.Email,
-		NativeID:     *createdItem.GetId(),
+		NativeID:     *finalItem.GetId(),
 		NativeHash:   "", // Will be populated when we get the file metadata
 		ModTime:      modTime,
 		Status:       "active",
@@ -282,15 +325,58 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
 	ctx := context.Background()
 
-	data, err := io.ReadAll(reader)
+	// Use Upload Session for updates
+	uploadSessionRequestBody := drives.NewItemItemsItemCreateUploadSessionPostRequestBody()
+
+	uploadSession, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(fileID).CreateUploadSession().Post(ctx, uploadSessionRequestBody, nil)
 	if err != nil {
-		return fmt.Errorf("failed to read content: %w", err)
+		return fmt.Errorf("failed to create upload session: %w", err)
 	}
 
-	_, err = c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(fileID).Content().Put(ctx, data, nil)
-	if err != nil {
-		return fmt.Errorf("failed to update file content: %w", err)
+	uploadUrl := *uploadSession.GetUploadUrl()
+	chunkSize := int64(10 * 1024 * 1024) // 10MB
+	buf := make([]byte, chunkSize)
+	var offset int64 = 0
+
+	for offset < size {
+		remaining := size - offset
+		toRead := chunkSize
+		if remaining < toRead {
+			toRead = remaining
+		}
+
+		n, err := io.ReadFull(reader, buf[:toRead])
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return fmt.Errorf("failed to read from stream: %w", err)
+		}
+		if n == 0 {
+			break
+		}
+
+		req, err := http.NewRequest("PUT", uploadUrl, bytes.NewReader(buf[:n]))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		req.ContentLength = int64(n)
+		start := offset
+		end := offset + int64(n) - 1
+		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to upload chunk: %w", err)
+		}
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			return fmt.Errorf("chunk upload failed status %s: %s", resp.Status, string(body))
+		}
+		resp.Body.Close()
+
+		offset += int64(n)
 	}
+
 	return nil
 }
 

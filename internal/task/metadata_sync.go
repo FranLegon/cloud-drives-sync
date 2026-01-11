@@ -15,8 +15,9 @@ import (
 )
 
 const (
-	AuxFolder        = "sync-cloud-drives-aux"
-	MetadataFileName = "metadata.db"
+	AuxFolder         = "sync-cloud-drives-aux"
+	SoftDeletedFolder = "soft-deleted"
+	MetadataFileName  = "metadata.db"
 )
 
 func createClient(user *model.User, cfg *model.Config) (api.CloudClient, error) {
@@ -226,6 +227,30 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 					return err
 				}
 				auxID = folder.ID
+			}
+		}
+
+		// Ensure soft-deleted folder exists
+		if user.Provider == model.ProviderTelegram {
+			if _, err := client.CreateFolder(auxID, SoftDeletedFolder); err != nil {
+				return fmt.Errorf("failed to create soft-deleted folder: %w", err)
+			}
+		} else {
+			folders, err := client.ListFolders(auxID)
+			if err != nil {
+				return fmt.Errorf("failed to list folders in aux: %w", err)
+			}
+			foundSoftDeleted := false
+			for _, f := range folders {
+				if f.Name == SoftDeletedFolder {
+					foundSoftDeleted = true
+					break
+				}
+			}
+			if !foundSoftDeleted {
+				if _, err := client.CreateFolder(auxID, SoftDeletedFolder); err != nil {
+					return fmt.Errorf("failed to create soft-deleted folder: %w", err)
+				}
 			}
 		}
 
