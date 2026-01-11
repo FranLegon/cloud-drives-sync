@@ -63,6 +63,43 @@ The application must only interact with files and folders contained within speci
             4.  Telegram (Backup Account).
         *   If the file is not found in any location, the command (unless it is `init`) should fail with a clear error.
 
+#### **3.1. Database Schema**
+
+The database uses a **Normalized Schema** to better handle multiple accounts, deduplication, and file lifecycle constraints.
+
+**files Table (Logical Source of Truth):**
+- `id` (TEXT, PK, UUID): Internal unique ID.
+- `path` (TEXT): Logical relative path (e.g., /photos/img.jpg).
+- `name` (TEXT): Filename.
+- `size` (INTEGER): File size in bytes.
+- `calculated_id` (TEXT): `CONCAT(name, '-', size)` (used for deduplication).
+- `mod_time` (INTEGER): Modification timestamp.
+- `status` (TEXT): `active`, `softdeleted`, `deleted`.
+
+**replicas Table (Physical Copies):**
+- `id` (INTEGER, PK, AutoInc).
+- `file_id` (TEXT, FK): References `files.id`. Can be NULL initially but must be linked.
+- `calculated_id` (TEXT): `CONCAT(name, '-', size)`.
+- `path` (TEXT): Logical relative path.
+- `name` (TEXT): Filename.
+- `size` (INTEGER): File size.
+- `provider` (TEXT): `google`, `microsoft`, `telegram`.
+- `account_id` (TEXT): User identifier (email/phone).
+- `native_id` (TEXT): Cloud provider's stable ID.
+- `native_hash` (TEXT): MD5/SHA1 provided by cloud.
+- `mod_time` (INTEGER): Modification timestamp.
+- `status` (TEXT): `active`, `softdeleted`, `deleted`.
+- `fragmented` (BOOL): True if split (Telegram).
+- `last_seen_at` (INTEGER): Timestamp of last verification (for deletion detection).
+
+**replica_fragments Table (Telegram Split Files):**
+- `id` (INTEGER, PK).
+- `replica_id` (INTEGER, FK): References `replicas.id`.
+- `fragment_number` (INTEGER): 1-based index.
+- `fragments_total` (INTEGER): Total fragments.
+- `size` (INTEGER): Fragment size.
+- `native_fragment_id` (TEXT): Telegram unique ID for the part.
+
 #### **4. Configuration Schema**
 
 *`config.json` (before encryption):*
@@ -342,7 +379,39 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 **Telegram:**
 - Subject to Telegram API file size limits and rate limits.
 - Files stored in dedicated channel called `sync-cloud-drives`.
-- Each file is uploaded as a message with the file as an attachment and a caption containing metadata as json (e.g. 1, `{"file_name":"bigfile.db","folder_path":"/examplefolder", "calculated_id":"ihrstfh45fbkeb", "split": true, "part": 1, "total_parts": 3, "soft-deleted": false}`, e.g. 2, `{"file_name":"smallfile.jpg", "folder_path":"/examplefolder/innerfolder", "calculated_id":"smallfile.db-1564", "split": false, "soft-deleted": true}`).
+- Each file (or fragment) serves as a container for metadata. The caption must contain a JSON object reflecting the `replicas` and `replica_fragments` database schema:
+  ```json
+  {
+    "replica": {
+      "id": 1024,
+      "file_id": "uuid-...",
+      "calculated_id": "file.ext-12345",
+      "path": "/folder/file.ext",
+      "name": "file.ext",
+      "size": 12345,
+      "provider": "telegram",
+      "account_id": "+15550109999",
+      "native_id": "msg_id_...",
+      "native_hash": null,
+      "mod_time": 1704067200,
+      "status": "active",
+      "fragmented": true
+    },
+    "replica_fragment": {
+      "id": 501,
+      "replica_id": 1024,
+      "fragment_number": 1,
+      "fragments_total": 2,
+      "size": 6000,
+      "native_fragment_id": "tg_unique_id_..."
+    }
+  }
+  ```
+  *Note:* The `replica_fragment` key is omitted if `fragmented` is false.
+- **Two-Step Creation:** Since `native_id` and `native_fragment_id` are unknown before upload, the tool must:
+    1. Upload the file/message with a placeholder or partial JSON.
+    2. Obtain the message ID (`native_id`) and file unique ID (`native_fragment_id`) from the upload result.
+    3. Update the message caption with the complete JSON containing these IDs.
 - If more than one active channel with this name are found, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
 - Files larger than Telegram's limits (2 GB) are split into multiple parts, each tracked in the local metadata database.
 - System messages such as "channel created", "user joined", etc., must be ignored.

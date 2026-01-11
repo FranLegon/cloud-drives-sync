@@ -91,6 +91,7 @@ func (r *Runner) RunPreFlightChecks() error {
 // GetMetadata scans all providers and updates the database
 func (r *Runner) GetMetadata() error {
 	logger.Info("Gathering metadata from all providers...")
+	startTime := time.Now()
 
 	fileChan := make(chan *model.File, 1000)
 	folderChan := make(chan *model.Folder, 1000)
@@ -139,6 +140,27 @@ func (r *Runner) GetMetadata() error {
 	close(fileChan)
 	close(folderChan)
 	dbWg.Wait()
+
+	// Post-processing: Link replicas to files
+	logger.Info("Updating logical files from latest replicas...")
+	if err := r.db.UpdateLogicalFilesFromReplicas(); err != nil {
+		return fmt.Errorf("failed to update logical files: %w", err)
+	}
+
+	logger.Info("Linking replicas to logical files...")
+	if err := r.db.LinkOrphanedReplicas(); err != nil {
+		return fmt.Errorf("failed to link orphaned replicas: %w", err)
+	}
+
+	logger.Info("Creating new logical files for unmatched replicas...")
+	if err := r.db.PromoteOrphanedReplicasToFiles(); err != nil {
+		return fmt.Errorf("failed to promote orphaned replicas: %w", err)
+	}
+
+	logger.Info("Marking missing replicas as deleted...")
+	if err := r.db.MarkDeletedReplicas(startTime); err != nil {
+		return fmt.Errorf("failed to mark deleted replicas: %w", err)
+	}
 
 	logger.Info("Metadata gathering complete")
 	return nil
@@ -216,6 +238,9 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 
 	for _, file := range files {
 		file.Path = pathPrefix + "/" + file.Name
+		for _, replica := range file.Replicas {
+			replica.Path = file.Path
+		}
 		fileChan <- file
 	}
 

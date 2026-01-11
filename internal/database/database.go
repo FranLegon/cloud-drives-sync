@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
+	"github.com/google/uuid"
 	_ "github.com/mutecomm/go-sqlcipher/v4"
 )
 
@@ -102,6 +103,7 @@ func (db *DB) Initialize() error {
 		mod_time INTEGER NOT NULL,
 		status TEXT NOT NULL,
 		fragmented BOOLEAN NOT NULL DEFAULT 0,
+		last_seen_at INTEGER NOT NULL DEFAULT 0,
 		FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 	);
 
@@ -111,6 +113,7 @@ func (db *DB) Initialize() error {
 	CREATE INDEX IF NOT EXISTS idx_replicas_account_id ON replicas(account_id);
 	CREATE INDEX IF NOT EXISTS idx_replicas_native_id ON replicas(native_id);
 	CREATE INDEX IF NOT EXISTS idx_replicas_status ON replicas(status);
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_replicas_unique ON replicas(provider, account_id, native_id);
 
 	CREATE TABLE IF NOT EXISTS replica_fragments (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -137,6 +140,9 @@ func (db *DB) Initialize() error {
 
 	CREATE INDEX IF NOT EXISTS idx_folders_provider ON folders(provider);
 	CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
+
+	// Migrations
+	_, _ = db.conn.Exec("ALTER TABLE replicas ADD COLUMN last_seen_at INTEGER DEFAULT 0")
 	`
 
 	_, err := db.conn.Exec(schema)
@@ -185,7 +191,7 @@ func (db *DB) InsertFile(file *model.File) error {
 	return tx.Commit()
 }
 
-// BatchInsertFiles inserts multiple files in a single transaction
+// BatchInsertFiles inserts multiple files (replicas and fragments) in a single transaction
 func (db *DB) BatchInsertFiles(files []*model.File) error {
 	if len(files) == 0 {
 		return nil
@@ -197,40 +203,75 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 	}
 	defer tx.Rollback()
 
-	fileStmt, err := tx.Prepare(`
-		INSERT OR REPLACE INTO files (
-			id, path, name, size, calculated_id, mod_time, status
-		) VALUES (?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return err
-	}
-	defer fileStmt.Close()
-
-	replicaStmt, err := tx.Prepare(`
-		INSERT OR REPLACE INTO replicas (
-			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
+	// Upsert replicas using ON CONFLICT logic to preserve file_id if it exists.
+	// We rely on the unique index (provider, account_id, native_id).
+	// usage of RETURNING id requires SQLite 3.35+
+	now := time.Now().Unix()
+	replicaQuery := `
+		INSERT INTO replicas (
+			calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, file_id, last_seen_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+		ON CONFLICT(provider, account_id, native_id) DO UPDATE SET
+			calculated_id=excluded.calculated_id,
+			path=excluded.path,
+			name=excluded.name,
+			size=excluded.size,
+			native_hash=excluded.native_hash,
+			mod_time=excluded.mod_time,
+			status=excluded.status,
+			fragmented=excluded.fragmented,
+			last_seen_at=excluded.last_seen_at
+		RETURNING id
+	`
+	replicaStmt, err := tx.Prepare(replicaQuery)
 	if err != nil {
 		return err
 	}
 	defer replicaStmt.Close()
 
-	for _, file := range files {
-		_, err = fileStmt.Exec(
-			file.ID, file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status)
-		if err != nil {
-			return fmt.Errorf("failed to insert file: %w", err)
-		}
+	// Prepare fragment statements
+	deleteFragmentsStmt, err := tx.Prepare(`DELETE FROM replica_fragments WHERE replica_id = ?`)
+	if err != nil {
+		return err
+	}
+	defer deleteFragmentsStmt.Close()
 
+	fragmentStmt, err := tx.Prepare(`
+		INSERT INTO replica_fragments (
+			replica_id, fragment_number, fragments_total, size, native_fragment_id
+		) VALUES (?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer fragmentStmt.Close()
+
+	for _, file := range files {
 		for _, replica := range file.Replicas {
-			_, err = replicaStmt.Exec(
-				file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+			var replicaID int64
+			err := replicaStmt.QueryRow(
+				replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 				string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-				replica.ModTime.Unix(), replica.Status, replica.Fragmented)
+				replica.ModTime.Unix(), replica.Status, replica.Fragmented, now).Scan(&replicaID)
+
 			if err != nil {
-				return fmt.Errorf("failed to insert replica: %w", err)
+				return fmt.Errorf("failed to upsert replica: %w", err)
+			}
+
+			if len(replica.Fragments) > 0 {
+				// Clear old fragments
+				if _, err := deleteFragmentsStmt.Exec(replicaID); err != nil {
+					return fmt.Errorf("failed to clear fragments: %w", err)
+				}
+
+				// Insert new fragments
+				for _, frag := range replica.Fragments {
+					_, err = fragmentStmt.Exec(
+						replicaID, frag.FragmentNumber, frag.FragmentsTotal, frag.Size, frag.NativeFragmentID)
+					if err != nil {
+						return fmt.Errorf("failed to insert fragment: %w", err)
+					}
+				}
 			}
 		}
 	}
@@ -295,7 +336,6 @@ func (db *DB) InsertReplicaFragment(fragment *model.ReplicaFragment) error {
 	fragment.ID = id
 	return nil
 }
-
 
 // InsertFolder inserts a folder record into the database
 func (db *DB) InsertFolder(folder *model.Folder) error {
@@ -369,14 +409,14 @@ func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error)
 			return nil, err
 		}
 		file.ModTime = time.Unix(modTime, 0)
-		
+
 		// Load Replicas
 		replicas, err := db.GetReplicas(file.ID)
 		if err != nil {
 			return nil, err
 		}
 		file.Replicas = replicas
-		
+
 		files = append(files, file)
 	}
 
@@ -591,7 +631,7 @@ func CreateDB(masterPassword string) error {
 	if _, err := conn.Exec("CREATE TABLE IF NOT EXISTS _init (id INTEGER PRIMARY KEY)"); err != nil {
 		return fmt.Errorf("failed to initialize encrypted database: %w", err)
 	}
-	
+
 	// Insert a test row to ensure the database is properly written to disk
 	if _, err := conn.Exec("INSERT INTO _init (id) VALUES (1);"); err != nil {
 		return fmt.Errorf("failed to write to encrypted database: %w", err)
@@ -709,4 +749,133 @@ func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
 		replicas = append(replicas, r)
 	}
 	return replicas, nil
+}
+
+// LinkOrphanedReplicas links orphaned replicas to existing files based on calculated_id
+func (db *DB) LinkOrphanedReplicas() error {
+	// Update replicas that match an existing file by calculated_id
+	// We use the first matching file if duplicates exist (though ideally calculated_id should be unique-ish)
+	query := `
+	UPDATE replicas
+	SET file_id = (
+		SELECT id FROM files 
+		WHERE files.calculated_id = replicas.calculated_id 
+		LIMIT 1
+	)
+	WHERE file_id IS NULL OR file_id = ''
+	AND EXISTS (
+		SELECT 1 FROM files 
+		WHERE files.calculated_id = replicas.calculated_id
+	)
+	`
+	_, err := db.conn.Exec(query)
+	return err
+}
+
+// PromoteOrphanedReplicasToFiles creates new file records for replicas that don't match any existing file
+func (db *DB) PromoteOrphanedReplicasToFiles() error {
+	// Find replicas still without file_id
+	query := `
+	SELECT id, calculated_id, path, name, size, mod_time, status
+	FROM replicas
+	WHERE file_id IS NULL OR file_id = ''
+	`
+	rows, err := db.conn.Query(query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	// Need to collect data first to avoid locking issues if we modify inside loop with same connection
+	type Orphan struct {
+		ReplicaID    int64
+		CalculatedID string
+		Path         string
+		Name         string
+		Size         int64
+		ModTime      int64
+		Status       string
+	}
+
+	var orphans []Orphan
+	for rows.Next() {
+		var o Orphan
+		if err := rows.Scan(&o.ReplicaID, &o.CalculatedID, &o.Path, &o.Name, &o.Size, &o.ModTime, &o.Status); err != nil {
+			return err
+		}
+		orphans = append(orphans, o)
+	}
+	rows.Close()
+
+	if len(orphans) == 0 {
+		return nil
+	}
+
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	for _, o := range orphans {
+		// Generate UUID
+		newFileID := uuid.New().String()
+
+		// Insert File
+		_, err := tx.Exec(`
+			INSERT OR IGNORE INTO files (id, path, name, size, calculated_id, mod_time, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`, newFileID, o.Path, o.Name, o.Size, o.CalculatedID, o.ModTime, o.Status)
+		if err != nil {
+			return fmt.Errorf("failed to promote replica %d: %w", o.ReplicaID, err)
+		}
+
+		// Update Replica
+		_, err = tx.Exec(`
+			UPDATE replicas SET file_id = ? WHERE id = ?
+		`, newFileID, o.ReplicaID)
+		if err != nil {
+			return fmt.Errorf("failed to update replica %d: %w", o.ReplicaID, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// UpdateLogicalFilesFromReplicas updates file metadata from the latest active replica
+func (db *DB) UpdateLogicalFilesFromReplicas() error {
+	// SQLite 3.33+ supported UPDATE FROM.
+	// We want to pick the latest active replica for each file.
+	query := `
+	WITH LatestReplicas AS (
+		SELECT file_id, MAX(mod_time) as max_mod
+		FROM replicas
+		WHERE status = 'active' AND file_id IS NOT NULL
+		GROUP BY file_id
+	)
+	UPDATE files
+	SET 
+		size = r.size,
+		mod_time = r.mod_time,
+		calculated_id = r.calculated_id,
+		name = r.name,
+		path = r.path
+	FROM replicas r
+	JOIN LatestReplicas lr ON r.file_id = lr.file_id AND r.mod_time = lr.max_mod
+	WHERE files.id = r.file_id
+	AND r.mod_time > files.mod_time
+	`
+	_, err := db.conn.Exec(query)
+	return err
+}
+
+// MarkDeletedReplicas marks replicas as deleted if they weren't seen since the given time
+func (db *DB) MarkDeletedReplicas(startTime time.Time) error {
+	query := `
+	UPDATE replicas
+	SET status = 'deleted'
+	WHERE last_seen_at < ? AND status != 'deleted'
+	`
+	_, err := db.conn.Exec(query, startTime.Unix())
+	return err
 }

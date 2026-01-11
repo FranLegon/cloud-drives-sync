@@ -59,41 +59,42 @@ type ProviderQuota struct {
 
 // File represents a logical file
 type File struct {
-	ID           string             // Internal UUID
-	Path         string             // Logical relative path
-	Name         string             // Filename
-	Size         int64              // File size in bytes
-	CalculatedID string             // CONCAT(name, '-', size) for deduplication
-	ModTime      time.Time          // Modification timestamp
-	Status       string             // active, softdeleted, deleted
-	Replicas     []*Replica         // Physical copies
+	ID           string     // Internal UUID
+	Path         string     // Logical relative path
+	Name         string     // Filename
+	Size         int64      // File size in bytes
+	CalculatedID string     // CONCAT(name, '-', size) for deduplication
+	ModTime      time.Time  // Modification timestamp
+	Status       string     // active, softdeleted, deleted
+	Replicas     []*Replica // Physical copies
 }
 
 // Replica represents a physical copy of a file on a cloud provider
 type Replica struct {
-	ID           int64
-	FileID       string    // References File.ID (nullable initially)
-	CalculatedID string    // CONCAT(name, '-', size) for matching
-	Path         string    // Logical relative path
-	Name         string    // Filename
-	Size         int64     // File size in bytes
-	Provider     Provider  // google, onedrive, telegram
-	AccountID    string    // Email or Phone
-	NativeID     string    // Cloud Provider's stable ID
-	NativeHash   string    // Cloud Provider Hash (MD5, SHA1, or null)
-	ModTime      time.Time // Modification timestamp
-	Status       string    // active, softdeleted, deleted
-	Fragmented   bool      // true for Telegram files split into parts
+	ID           int64              `json:"id"`
+	FileID       string             `json:"file_id"`
+	CalculatedID string             `json:"calculated_id"`
+	Path         string             `json:"path"`
+	Name         string             `json:"name"`
+	Size         int64              `json:"size"`
+	Provider     Provider           `json:"provider"`
+	AccountID    string             `json:"account_id"`
+	NativeID     string             `json:"native_id"`
+	NativeHash   string             `json:"native_hash"`
+	ModTime      time.Time          `json:"mod_time"`
+	Status       string             `json:"status"`
+	Fragmented   bool               `json:"fragmented"`
+	Fragments    []*ReplicaFragment `json:"-"`
 }
 
 // ReplicaFragment represents a part of a split file (Telegram)
 type ReplicaFragment struct {
-	ID               int64
-	ReplicaID        int64
-	FragmentNumber   int    // 1-based index
-	FragmentsTotal   int    // Total number of fragments
-	Size             int64  // Fragment size in bytes
-	NativeFragmentID string // Telegram file_unique_id for the part
+	ID               int64  `json:"id"`
+	ReplicaID        int64  `json:"replica_id"`
+	FragmentNumber   int    `json:"fragment_number"`
+	FragmentsTotal   int    `json:"fragments_total"`
+	Size             int64  `json:"size"`
+	NativeFragmentID string `json:"native_fragment_id"`
 }
 
 // Folder represents a folder in cloud storage
