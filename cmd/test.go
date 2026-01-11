@@ -115,8 +115,37 @@ func runTest(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no main account found")
 	}
 
-	shouldRun := func(i int) bool {
-		return testCase == 0 || testCase == i
+	shouldRun := func(step int) bool {
+		if testCase == 0 {
+			return true
+		}
+		if testCase == step {
+			return true
+		}
+		// Dependencies
+		// 9 -> 7
+		if testCase == 9 && step == 7 {
+			return true
+		}
+		// 8 -> 5 -> 4 -> 2
+		//        -> 3
+		if testCase == 8 {
+			if step == 5 || step == 4 || step == 3 || step == 2 {
+				return true
+			}
+		}
+		// 5 -> 4 -> 2
+		//   -> 3
+		if testCase == 5 {
+			if step == 4 || step == 3 || step == 2 {
+				return true
+			}
+		}
+		// 4 -> 2
+		if testCase == 4 && step == 2 {
+			return true
+		}
+		return false
 	}
 
 	// Dependency execution
@@ -152,6 +181,7 @@ func runTest(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+
 	if shouldRun(5) {
 		if err := runTestCase5(runner, mainUser, backups); err != nil {
 			return err
@@ -160,8 +190,32 @@ func runTest(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	if shouldRun(6) {
-		if err := runTestCase6(runner, mainUser, backups); err != nil {
+	if shouldRun(7) {
+		if err := runTestCase7(runner, mainUser); err != nil {
+			return err
+		}
+		if err := testMetadata(runner); err != nil {
+			return err
+		}
+	}
+	if shouldRun(8) {
+		if err := runTestCase8(runner, mainUser, backups); err != nil {
+			return err
+		}
+		if err := testMetadata(runner); err != nil {
+			return err
+		}
+	}
+	if shouldRun(9) {
+		if err := runTestCase9(runner, mainUser, backups); err != nil {
+			return err
+		}
+		if err := testMetadata(runner); err != nil {
+			return err
+		}
+	}
+	if shouldRun(10) {
+		if err := runTestCase10(runner, mainUser, backups); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
@@ -834,8 +888,202 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	return nil
 }
 
-func runTestCase6(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
-	logger.Info("\n--- Test Case 6: Hard Deletion ---")
+func runTestCase7(runner *task.Runner, mainUser *model.User) error {
+	logger.Info("\n--- Test Case 7: Very Big File (3GB) ---")
+	test6Name := "test_6.txt"
+	test6Size := int64(3) * 1024 * 1024 * 1024
+
+	mainClient, err := runner.GetOrCreateClient(mainUser)
+	if err != nil {
+		return err
+	}
+	mainSyncID, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+
+	logger.Info("Uploading %s to Main Account (Streamed)...", test6Name)
+	// Using io.LimitReader(rand.Reader, ...) might be slow for 3GB.
+	// We'll trust the user advice "exactly like Test Case 3" but note the speed implications.
+	if _, err := mainClient.UploadFile(mainSyncID, test6Name, io.LimitReader(rand.Reader, test6Size), test6Size); err != nil {
+		logger.Error("Upload failed: %v", err)
+		return fmt.Errorf("upload very big file failed: %w", err)
+	}
+
+	logger.Info("Updating Metadata...")
+	if err := runner.GetMetadata(); err != nil {
+		return fmt.Errorf("metadata update failed: %w", err)
+	}
+
+	logger.Info("Running SyncProviders (Very Big File)...")
+	if err := runner.SyncProviders(); err != nil {
+		logger.Warning("SyncProviders (Very Big File) had error: %v. Continuing...", err)
+	}
+
+	logger.Info("Verifying very big file...")
+	return verifyFile(db, "/"+test6Name, test6Size)
+}
+
+func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
+	logger.Info("\n--- Test Case 8: Restoring from Soft-Deleted ---")
+
+	// Pre-requisite: Move test_5.txt back from soft-deleted to root on Main (Google)
+	mainClient, err := runner.GetOrCreateClient(mainUser)
+	if err != nil {
+		return err
+	}
+	mainSyncID, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+
+	// Helper to find folder ID by name (shallow)
+	findFolderID := func(c api.CloudClient, parentID, name string) (string, error) {
+		folders, err := c.ListFolders(parentID)
+		if err != nil {
+			return "", err
+		}
+		for _, f := range folders {
+			if f.Name == name {
+				return f.ID, nil
+			}
+		}
+		return "", fmt.Errorf("folder %s not found in %s", name, parentID)
+	}
+
+	// Locate current test_5.txt in sync-cloud-drives-aux/soft-deleted
+	auxID, err := findFolderID(mainClient, "root", "sync-cloud-drives-aux")
+	if err != nil {
+		return err
+	}
+	softID, err := findFolderID(mainClient, auxID, "soft-deleted")
+	if err != nil {
+		return err
+	}
+
+	// List files in soft-deleted to find test_5.txt native ID
+	files, err := mainClient.ListFiles(softID)
+	if err != nil {
+		return err
+	}
+	var test5NativeID string
+	for _, f := range files {
+		if f.Name == "test_5.txt" {
+			test5NativeID = f.ID
+			break
+		}
+	}
+	if test5NativeID == "" {
+		return fmt.Errorf("test_5.txt not found in soft-deleted folder")
+	}
+
+	logger.Info("Restoring test_5.txt on Main (Google): Moving from soft-deleted to root...")
+	if err := mainClient.MoveFile(test5NativeID, mainSyncID); err != nil {
+		return fmt.Errorf("failed to move test_5.txt back to root: %w", err)
+	}
+
+	logger.Info("Updating Metadata...")
+	if err := runner.GetMetadata(); err != nil {
+		return err
+	}
+
+	// At this point, the system should detect the move (restore)
+	logger.Info("Running SyncProviders to propagate restore...")
+	if err := runner.SyncProviders(); err != nil {
+		return err
+	}
+
+	// Verify test_5.txt is active in DB
+	if err := verifyFile(db, "/test_5.txt", 0); err != nil {
+		return fmt.Errorf("verification of restored file in DB failed: %w", err)
+	}
+	// Verify it's considered Active (not stuck in trash)
+	f, _ := db.GetFileByPath("/test_5.txt")
+	if f.Status != "active" {
+		return fmt.Errorf("test_5.txt status is %s, expected active", f.Status)
+	}
+
+	return nil
+}
+
+func runTestCase9(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
+	logger.Info("\n--- Test Case 9: Restoring Fragmented File ---")
+	// Scenario: test_6.txt (3GB) was uploaded in TC7.
+	// It should exist on Google (Main), Microsoft (Backup), and fragmented on Telegram.
+	// We will delete it from Google and Microsoft, then Sync to see if it heals from Telegram.
+
+	// 1. Delete from Google (Main)
+	mainClient, err := runner.GetOrCreateClient(mainUser)
+	if err != nil {
+		return err
+	}
+
+	f6, err := db.GetFileByPath("/test_6.txt")
+	if err != nil {
+		return err
+	}
+	if f6 == nil {
+		return fmt.Errorf("test_6.txt missing from DB before test case 9")
+	}
+
+	googleNativeID := getNativeID(f6, mainUser)
+	if googleNativeID != "" {
+		logger.Info("Deleting test_6.txt from Google Main directly...")
+		if err := mainClient.DeleteFile(googleNativeID); err != nil {
+			return fmt.Errorf("failed to delete from google: %w", err)
+		}
+	}
+
+	// 2. Delete from Microsoft (Backup)
+	microsoftBackups := filterUsers(backups, model.ProviderMicrosoft)
+	for _, u := range microsoftBackups {
+		msClient, err := runner.GetOrCreateClient(u)
+		if err != nil {
+			continue
+		}
+		msNativeID := getNativeID(f6, u)
+		if msNativeID != "" {
+			logger.Info("Deleting test_6.txt from Microsoft Backup (%s) directly...", u.Email)
+			if err := msClient.DeleteFile(msNativeID); err != nil {
+				return fmt.Errorf("failed to delete from microsoft: %w", err)
+			}
+		}
+	}
+
+	// 3. Sync
+	logger.Info("Running SyncProviders (Attempting Restore from Fragments)...")
+	if err := runner.SyncProviders(); err != nil {
+		return err
+	}
+
+	// 4. Verify
+	// Check if file is back active on Google/MS
+
+	// Reload file from DB to see replica status
+	f6, err = db.GetFileByPath("/test_6.txt")
+	if err != nil {
+		return err
+	}
+
+	// Check Google Replica
+	googleReplicaActive := false
+	for _, r := range f6.Replicas {
+		if r.Provider == model.ProviderGoogle && r.Status == "active" {
+			googleReplicaActive = true
+			break
+		}
+	}
+	if !googleReplicaActive {
+		return fmt.Errorf("test_6.txt was not restored to Google Main")
+	} else {
+		logger.Info("Verified: test_6.txt is active on Google.")
+	}
+
+	return nil
+}
+
+func runTestCase10(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
+	logger.Info("\n--- Test Case 10: Hard Deletion ---")
 
 	getSoftID := func(c api.CloudClient, rootID string) (string, error) {
 		aux, err := getOrCreateFolder(c, "root", "sync-cloud-drives-aux")
