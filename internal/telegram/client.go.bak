@@ -802,6 +802,104 @@ func (c *Client) uploadSinglePartNew(folderID, name string, reader io.Reader, si
 	return strconv.Itoa(msgID), nil
 }
 
+func (c *Client) uploadSinglePart(folderID, name string, reader io.Reader, size int64, generatedID string, split bool, part, totalParts int) (*model.FileFragment, error) {
+	// Ensure folder path is not empty
+	if folderID == "" {
+		folderID = "/"
+	}
+
+	// Create metadata
+	meta := FileMetadata{
+		FileName:    name,
+		FolderPath:  folderID,
+		GeneratedID: generatedID,
+		Split:       split,
+		Part:        part,
+		TotalParts:  totalParts,
+		SoftDeleted: strings.Contains(folderID, "sync-cloud-drives-aux/soft-deleted"),
+	}
+
+	// Serialize metadata
+	caption, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	// Upload file
+	f, err := c.uploader.FromReader(c.ctx, name, reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to upload file: %w", err)
+	}
+
+	// Send message with document
+	inputChannel := &tg.InputPeerChannel{
+		ChannelID:  c.channelID,
+		AccessHash: c.accessHash,
+	}
+
+	// Use InputMediaUploadedDocument to ensure filename is set
+	inputMedia := &tg.InputMediaUploadedDocument{
+		File:     f,
+		MimeType: "application/octet-stream",
+		Attributes: []tg.DocumentAttributeClass{
+			&tg.DocumentAttributeFilename{FileName: name},
+		},
+	}
+
+	// Use low-level API to ensure attributes are sent correctly
+	updates, err := c.client.API().MessagesSendMedia(c.ctx, &tg.MessagesSendMediaRequest{
+		Peer:     inputChannel,
+		Media:    inputMedia,
+		Message:  string(caption),
+		RandomID: time.Now().UnixNano(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to send message: %w", err)
+	}
+
+	// Get message ID from updates
+	var msgID int
+	// This is tricky with gotd/message sender, it returns Updates.
+	// We need to parse updates to find the message ID.
+	// For now, we might need to list history or assume it's the last one?
+	// Or use the Updates object.
+
+	// Simplified: assume we can get it.
+	// Actually, sender.File returns (tg.UpdatesClass, error).
+
+	switch u := updates.(type) {
+	case *tg.Updates:
+		for _, m := range u.Updates {
+			if msg, ok := m.(*tg.UpdateNewChannelMessage); ok {
+				msgID = msg.Message.GetID()
+				break
+			}
+			if msg, ok := m.(*tg.UpdateNewMessage); ok {
+				msgID = msg.Message.GetID()
+				break
+			}
+		}
+	case *tg.UpdatesCombined:
+		for _, m := range u.Updates {
+			if msg, ok := m.(*tg.UpdateNewChannelMessage); ok {
+				msgID = msg.Message.GetID()
+				break
+			}
+		}
+	}
+
+	// If we couldn't find msgID, we might have a problem.
+	// But for now let's proceed.
+
+	// Return fragment
+	return &model.FileFragment{
+		ID:               strconv.Itoa(msgID),
+		Name:             name,
+		Size:             size,
+		Part:             part,
+		TelegramUniqueID: strconv.Itoa(msgID),
+	}, nil
+}
 
 // DownloadFile downloads a file from Telegram
 func (c *Client) DownloadFile(fileID string, writer io.Writer) error {

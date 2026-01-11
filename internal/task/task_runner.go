@@ -1088,12 +1088,27 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 				targetFolder := filepath.Dir(targetSoftPath)
 
 				if !r.safeMode {
-					// Find correct user/client
+					// Find correct user/client using replicas
 					var client api.CloudClient
 					var err error
 
+					// Find the replica for this provider
+					var targetReplica *model.Replica
+					for _, replica := range file.Replicas {
+						if replica.Provider == provider {
+							targetReplica = replica
+							break
+						}
+					}
+
+					if targetReplica == nil {
+						logger.Error("Could not find replica for provider %s for file %s", provider, file.Path)
+						continue
+					}
+
+					// Find the user for this replica
 					for i := range r.config.Users {
-						if r.config.Users[i].Provider == provider && (r.config.Users[i].Email == file.UserEmail || r.config.Users[i].Phone == file.UserPhone) {
+						if r.config.Users[i].Provider == provider && (r.config.Users[i].Email == targetReplica.AccountID || r.config.Users[i].Phone == targetReplica.AccountID) {
 							client, err = r.GetOrCreateClient(&r.config.Users[i])
 							break
 						}

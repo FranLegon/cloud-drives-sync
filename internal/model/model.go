@@ -1,7 +1,6 @@
 package model
 
 import (
-	"fmt"
 	"time"
 )
 
@@ -68,35 +67,6 @@ type File struct {
 	ModTime      time.Time          // Modification timestamp
 	Status       string             // active, softdeleted, deleted
 	Replicas     []*Replica         // Physical copies
-	
-	// DEPRECATED: Legacy fields kept temporarily for backwards compatibility during migration
-	// These should be removed after all client code is refactored to use Replicas
-	Fragments      []*FileFragment // DEPRECATED: Use ReplicaFragment via Replicas instead
-	Provider       Provider        // DEPRECATED: Use Replica.Provider instead
-	UserEmail      string          // DEPRECATED: Use Replica.AccountID instead
-	UserPhone      string          // DEPRECATED: Use Replica.AccountID instead
-	CreatedTime    time.Time       // DEPRECATED: Not in normalized schema
-	ModifiedTime   time.Time       // DEPRECATED: Use ModTime instead
-	ParentFolderID string          // DEPRECATED: Use Folder hierarchy instead
-	OwnerEmail     string          // DEPRECATED: Owner info moved to Folder
-	Split          bool            // DEPRECATED: Check Replica.Fragmented instead
-	TotalParts     int             // DEPRECATED: Count ReplicaFragments instead
-
-	// DEPRECATED: Provider-specific IDs and hashes moved to Replica
-	GoogleDriveHash     string // DEPRECATED: Use Replica.NativeHash for Google provider
-	GoogleDriveID       string // DEPRECATED: Use Replica.NativeID for Google provider
-	OneDriveHash        string // DEPRECATED: Use Replica.NativeHash for OneDrive provider
-	OneDriveID          string // DEPRECATED: Use Replica.NativeID for OneDrive provider
-	TelegramUniqueID    string // DEPRECATED: Use Replica.NativeID for Telegram provider
-	CalculatedSHA256Hash string // DEPRECATED: Not in normalized schema
-}
-
-// UpdateCalculatedID is a deprecated helper method
-// In the normalized schema, CalculatedID should be set directly as fmt.Sprintf("%s-%d", name, size)
-func (f *File) UpdateCalculatedID() {
-	if f.CalculatedID == "" {
-		f.CalculatedID = fmt.Sprintf("%s-%d", f.Name, f.Size)
-	}
 }
 
 // Replica represents a physical copy of a file on a cloud provider
@@ -124,17 +94,6 @@ type ReplicaFragment struct {
 	FragmentsTotal   int    // Total number of fragments
 	Size             int64  // Fragment size in bytes
 	NativeFragmentID string // Telegram file_unique_id for the part
-}
-
-// DEPRECATED: FileFragment is a legacy type that should be removed after telegram client refactoring
-// It is temporarily kept for backwards compatibility during the migration to normalized schema
-type FileFragment struct {
-	ID               string
-	FileID           string
-	Name             string
-	Size             int64
-	Part             int
-	TelegramUniqueID string
 }
 
 // Folder represents a folder in cloud storage

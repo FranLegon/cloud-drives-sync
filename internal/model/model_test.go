@@ -65,12 +65,10 @@ func TestConfigModel(t *testing.T) {
 
 func TestFileModel(t *testing.T) {
 	file := File{
-		ID:                   "file-123",
-		Name:                 "test.txt",
-		Size:                 1024,
-		CalculatedSHA256Hash: "abc123",
-		Provider:             ProviderGoogle,
-		UserEmail:            "test@example.com",
+		ID:           "file-123",
+		Name:         "test.txt",
+		Size:         1024,
+		CalculatedID: "test.txt-1024",
 	}
 
 	if file.ID != "file-123" {
@@ -79,8 +77,8 @@ func TestFileModel(t *testing.T) {
 	if file.Size != 1024 {
 		t.Error("File size not set correctly")
 	}
-	if file.Provider != ProviderGoogle {
-		t.Error("File provider not set correctly")
+	if file.CalculatedID != "test.txt-1024" {
+		t.Error("File CalculatedID not set correctly")
 	}
 }
 
