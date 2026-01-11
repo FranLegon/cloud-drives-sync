@@ -999,24 +999,30 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 func (db *DB) UpdateLogicalFilesFromReplicas() error {
 	// SQLite 3.33+ supported UPDATE FROM.
 	// We want to pick the latest active replica for each file.
+	// We prioritize replicas that indicate a change (path difference) if timestamps are equal.
 	query := `
-	WITH LatestReplicas AS (
-		SELECT file_id, MAX(mod_time) as max_mod
-		FROM replicas
-		WHERE status = 'active' AND file_id IS NOT NULL
-		GROUP BY file_id
+	WITH RankedReplicas AS (
+		SELECT r.file_id, r.size, r.mod_time, r.calculated_id, r.name, r.path,
+			ROW_NUMBER() OVER (
+				PARTITION BY r.file_id 
+				ORDER BY r.mod_time DESC, 
+				         CASE WHEN r.path != f.path THEN 1 ELSE 0 END DESC
+			) as rn
+		FROM replicas r
+		JOIN files f ON f.id = r.file_id
+		WHERE r.status = 'active'
 	)
 	UPDATE files
 	SET 
-		size = r.size,
-		mod_time = r.mod_time,
-		calculated_id = r.calculated_id,
-		name = r.name,
-		path = r.path
-	FROM replicas r
-	JOIN LatestReplicas lr ON r.file_id = lr.file_id AND r.mod_time = lr.max_mod
-	WHERE files.id = r.file_id
-	AND r.mod_time >= files.mod_time
+		size = rr.size,
+		mod_time = rr.mod_time,
+		calculated_id = rr.calculated_id,
+		name = rr.name,
+		path = rr.path
+	FROM RankedReplicas rr
+	WHERE files.id = rr.file_id
+	AND rr.rn = 1
+	AND rr.mod_time >= files.mod_time
 	`
 	_, err := db.conn.Exec(query)
 	return err

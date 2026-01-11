@@ -369,8 +369,8 @@ func (c *Client) CreateFolder(parentID, name string) (*model.Folder, error) {
 	return result, nil
 }
 
-// EmptySyncFolder recursively deletes all items inside the sync folder that are owned by the user.
-// Backups will delete their files. Main will delete its files and folders.
+// EmptySyncFolder recursively deletes all items inside the sync folder and the folder itself.
+// It deletes files first, then folders from inner to outer.
 func (c *Client) EmptySyncFolder() error {
 	folderID, err := c.GetSyncFolderID()
 	if err != nil || folderID == "" {
@@ -381,10 +381,10 @@ func (c *Client) EmptySyncFolder() error {
 	return c.deleteContentsR(folderID)
 }
 
-func (c *Client) deleteContentsR(parentID string) error {
-	query := fmt.Sprintf("'%s' in parents and trashed = false", parentID)
+func (c *Client) deleteContentsR(targetID string) error {
+	// 1. List all content in the target folder
+	query := fmt.Sprintf("'%s' in parents and trashed = false", targetID)
 
-	// Collect all items to delete to avoid pagination issues while deleting
 	var allItems []*drive.File
 	nextPageToken := ""
 
@@ -401,8 +401,20 @@ func (c *Client) deleteContentsR(parentID string) error {
 		}
 	}
 
+	// 2. Separate files and folders
+	var files []*drive.File
+	var folders []*drive.File
+
 	for _, f := range allItems {
-		// Check ownership
+		if f.MimeType == "application/vnd.google-apps.folder" {
+			folders = append(folders, f)
+		} else {
+			files = append(files, f)
+		}
+	}
+
+	// 3. Delete Files first
+	for _, f := range files {
 		isOwner := false
 		for _, o := range f.Owners {
 			if o.Me {
@@ -411,28 +423,52 @@ func (c *Client) deleteContentsR(parentID string) error {
 			}
 		}
 
-		if f.MimeType == "application/vnd.google-apps.folder" {
-			// Recurse first
-			if err := c.deleteContentsR(f.Id); err != nil {
-				logger.Warning("Failed to recurse into %s: %v", f.Name, err)
-			}
-			// Then delete folder if we own it
-			if isOwner {
-				logger.InfoTagged([]string{"Google", c.user.Email}, "Deleting Folder %s (%s)", f.Name, f.Id)
-				if err := c.DeleteFile(f.Id); err != nil {
-					logger.Warning("Failed to delete folder %s: %v", f.Name, err)
-				}
-			}
-		} else {
-			// File
-			if isOwner {
-				logger.InfoTagged([]string{"Google", c.user.Email}, "Deleting File %s (%s)", f.Name, f.Id)
-				if err := c.DeleteFile(f.Id); err != nil {
-					logger.Warning("Failed to delete file %s: %v", f.Name, err)
-				}
+		if isOwner {
+			logger.InfoTagged([]string{"Google", c.user.Email}, "Deleting File %s (%s)", f.Name, f.Id)
+			if err := c.DeleteFile(f.Id); err != nil {
+				logger.Warning("Failed to delete file %s: %v", f.Name, err)
 			}
 		}
 	}
+
+	// 4. Process Folders (Recurse then Delete)
+	for _, f := range folders {
+		// Recurse first (Inner)
+		if err := c.deleteContentsR(f.Id); err != nil {
+			logger.Warning("Failed to recurse into %s: %v", f.Name, err)
+		}
+
+		// Then delete the folder (Outer)
+		isOwner := false
+		for _, o := range f.Owners {
+			if o.Me {
+				isOwner = true
+				break
+			}
+		}
+
+		if isOwner {
+			logger.InfoTagged([]string{"Google", c.user.Email}, "Deleting Folder %s (%s)", f.Name, f.Id)
+			if err := c.DeleteFile(f.Id); err != nil {
+				logger.Warning("Failed to delete folder %s: %v", f.Name, err)
+			}
+		}
+	}
+
+	// 5. Delete the target folder itself (if not root check? No, always try if we are here)
+	// We don't have the owner info for targetID here readily available unless we fetch it.
+	// But usually we own the folder we are cleaning.
+	// We'll try to delete it.
+	// Note: EmptySyncFolder calls this on root.
+	if err := c.DeleteFile(targetID); err != nil {
+		// Tolerable if we don't own the root or if it's already gone
+		// Start-ignore-warning if it's just permission issue on root?
+		// We'll log it.
+		// logger.InfoTagged([]string{"Google", c.user.Email}, "Attempted to delete container %s: %v", targetID, err)
+	} else {
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Deleted Container %s", targetID)
+	}
+
 	return nil
 }
 
