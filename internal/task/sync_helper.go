@@ -230,6 +230,12 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		accountID = destUser.Phone
 	}
 
+	// Determine NativeID from uploaded result
+	nativeID := uploadedFile.ID
+	if len(uploadedFile.Replicas) > 0 && uploadedFile.Replicas[0].NativeID != "" {
+		nativeID = uploadedFile.Replicas[0].NativeID
+	}
+
 	newReplica := &model.Replica{
 		FileID:       masterFile.ID,
 		CalculatedID: masterFile.CalculatedID,
@@ -238,9 +244,16 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		Size:         uploadedFile.Size,
 		Provider:     targetProvider,
 		AccountID:    accountID,
-		NativeID:     uploadedFile.ID,
+		NativeID:     nativeID,
 		ModTime:      time.Now(),
 		Status:       "active",
+		Fragmented:   false, // Default safely, check below
+	}
+
+	// Copy fragmentation info if present in uploaded result
+	if len(uploadedFile.Replicas) > 0 {
+		newReplica.Fragmented = uploadedFile.Replicas[0].Fragmented
+		newReplica.Fragments = uploadedFile.Replicas[0].Fragments
 	}
 
 	if err := r.db.InsertReplica(newReplica); err != nil {
@@ -248,6 +261,17 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		// Don't fail the operation, but consistency is compromised
 	} else {
 		logger.Info("Replica recorded in DB for %s on %s", masterFile.Path, targetProvider)
+
+		// Insert fragments if any
+		if newReplica.Fragmented && len(newReplica.Fragments) > 0 {
+			// Update Replica ID for fragments (assigned by DB)
+			for _, frag := range newReplica.Fragments {
+				frag.ReplicaID = newReplica.ID
+				if err := r.db.InsertReplicaFragment(frag); err != nil {
+					logger.Error("Failed to insert fragment into DB: %v", err)
+				}
+			}
+		}
 	}
 
 	logger.InfoTagged([]string{string(targetProvider), destUser.Email}, "File copied successfully")

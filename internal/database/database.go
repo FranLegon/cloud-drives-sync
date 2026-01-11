@@ -622,6 +622,58 @@ func (db *DB) GetReplicasByAccount(provider model.Provider, accountID string) ([
 	return replicas, nil
 }
 
+// GetReplicaByNativeID returns a replica by its native ID and provider
+func (db *DB) GetReplicaByNativeID(provider model.Provider, nativeID string) (*model.Replica, error) {
+	query := `
+	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
+	FROM replicas
+	WHERE provider = ? AND native_id = ?
+	`
+	r := &model.Replica{}
+	var providerStr string
+	var modTime int64
+	err := db.conn.QueryRow(query, string(provider), nativeID).Scan(
+		&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
+		&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.Provider = model.Provider(providerStr)
+	r.ModTime = time.Unix(modTime, 0)
+	return r, nil
+}
+
+// GetReplicaByNativeFragmentID returns the parent replica of a fragment by the fragment's native ID
+func (db *DB) GetReplicaByNativeFragmentID(nativeFragmentID string) (*model.Replica, error) {
+	// Join with fragments
+	query := `
+	SELECT r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented
+	FROM replicas r
+	JOIN replica_fragments f ON r.id = f.replica_id
+	WHERE f.native_fragment_id = ?
+	`
+	r := &model.Replica{}
+	var providerStr string
+	var modTime int64
+	err := db.conn.QueryRow(query, nativeFragmentID).Scan(
+		&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
+		&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.Provider = model.Provider(providerStr)
+	r.ModTime = time.Unix(modTime, 0)
+	return r, nil
+}
+
 // DeleteFile deletes a file from the database
 func (db *DB) DeleteFile(id string) error {
 	query := "DELETE FROM files WHERE id = ?"
@@ -964,7 +1016,7 @@ func (db *DB) UpdateLogicalFilesFromReplicas() error {
 	FROM replicas r
 	JOIN LatestReplicas lr ON r.file_id = lr.file_id AND r.mod_time = lr.max_mod
 	WHERE files.id = r.file_id
-	AND r.mod_time > files.mod_time
+	AND r.mod_time >= files.mod_time
 	`
 	_, err := db.conn.Exec(query)
 	return err

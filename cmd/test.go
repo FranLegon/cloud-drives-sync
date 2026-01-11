@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/big"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
@@ -117,40 +118,56 @@ func runTest(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no main account found")
 	}
 
-	// Determine max test case
-	maxCase := 6
-	if testCase > 0 {
-		maxCase = testCase
+	shouldRun := func(i int) bool {
+		return testCase == 0 || testCase == i
 	}
 
 	// Dependency execution
-	if maxCase >= 1 {
+	if shouldRun(1) {
 		if err := runTestCase1(runner, mainUser); err != nil {
 			return err
 		}
+		if err := testMetadata(runner); err != nil {
+			return err
+		}
 	}
-	if maxCase >= 2 {
+	if shouldRun(2) {
 		if err := runTestCase2(runner, backups); err != nil {
 			return err
 		}
+		if err := testMetadata(runner); err != nil {
+			return err
+		}
 	}
-	if maxCase >= 3 {
+	if shouldRun(3) {
 		if err := runTestCase3(runner, mainUser); err != nil {
 			return err
 		}
+		if err := testMetadata(runner); err != nil {
+			return err
+		}
 	}
-	if maxCase >= 4 {
+	if shouldRun(4) {
 		if err := runTestCase4(runner, mainUser, backups); err != nil {
 			return err
 		}
-	}
-	if maxCase >= 5 {
-		if err := runTestCase5(runner, mainUser, backups); err != nil {
+		if err := testMetadata(runner); err != nil {
 			return err
 		}
 	}
-	if maxCase >= 6 {
+	if shouldRun(5) {
+		if err := runTestCase5(runner, mainUser, backups); err != nil {
+			return err
+		}
+		if err := testMetadata(runner); err != nil {
+			return err
+		}
+	}
+	if shouldRun(6) {
 		if err := runTestCase6(runner, mainUser, backups); err != nil {
+			return err
+		}
+		if err := testMetadata(runner); err != nil {
 			return err
 		}
 	}
@@ -897,4 +914,155 @@ func runTestCase6(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	}
 	logger.Info("Running SyncProviders...")
 	return runner.SyncProviders()
+}
+
+func testMetadata(runner *task.Runner) error {
+	logger.Info("Running testMetadata verification...")
+
+	// 1. Verify DB consistency (FileID not null)
+	orphans, err := db.GetReplicasWithNullFileID()
+	if err != nil {
+		return fmt.Errorf("failed to get orphans: %w", err)
+	}
+	if len(orphans) > 0 {
+		logger.Error("Found %d replicas with null FileID in DB", len(orphans))
+		for _, r := range orphans {
+			logger.Error("Orphan Replica: ID=%d, Path=%s, Provider=%s", r.ID, r.Path, r.Provider)
+		}
+		return fmt.Errorf("found %d replicas with null FileID", len(orphans))
+	}
+
+	var errCount int
+
+	for _, user := range cfg.Users {
+		client, err := runner.GetOrCreateClient(&user)
+		if err != nil {
+			logger.Error("Failed to get client for %s: %v", user.Email, err)
+			errCount++
+			continue
+		}
+
+		// Get DB replicas for this account
+		accountID := user.Email
+		if accountID == "" {
+			accountID = user.Phone
+		}
+
+		dbReplicas, err := db.GetReplicasByAccount(user.Provider, accountID)
+		if err != nil {
+			return fmt.Errorf("failed to get replicas for %s: %w", accountID, err)
+		}
+
+		// Scan Cloud Files
+		cloudFiles := make(map[string]*model.File) // Map NativeID -> File
+
+		rootID, err := client.GetSyncFolderID()
+		if err != nil {
+			logger.Error("Failed to get sync folder for %s: %v", accountID, err)
+			errCount++
+			continue
+		}
+
+		// Recursive List
+		logger.Info("Listing files for %s (%s)...", accountID, user.Provider)
+		err = listFilesRecursive(client, rootID, "", cloudFiles)
+		if err != nil {
+			logger.Error("Failed to list cloud files for %s: %v", accountID, err)
+			errCount++
+			continue
+		}
+
+		// Compare DB -> Cloud
+		for _, r := range dbReplicas {
+			if r.Status != "active" {
+				continue
+			}
+
+			// Special handling for Telegram which aggregates fragments in ListFiles
+			// Ideally we should check if ListFiles returns fragments or files.
+			// Currently Telegram ListFiles returns aggregated Files, so we match against Reference NativeID (Part 1).
+
+			// We check if the Main NativeID exists in the cloud listing
+			if _, ok := cloudFiles[r.NativeID]; !ok {
+				logger.Error("Missing file on cloud: %s (Replica %s, NativeID %s)", r.Path, r.Path, r.NativeID)
+				errCount++
+			} else {
+				delete(cloudFiles, r.NativeID)
+			}
+
+			// If it's fragmented and NOT Telegram (or if we change Telegram to list parts), check fragments.
+			// But for now, since Telegram aggregates, we've already consumed the "File" entry above.
+			// Checking fragments individually requires ListFiles to return them individually, which it doesn't for Telegram.
+			if r.Fragmented && r.Provider != model.ProviderTelegram {
+				fragments, err := db.GetReplicaFragments(r.ID)
+				if err != nil {
+					logger.Error("Failed to get fragments for replica %d: %v", r.ID, err)
+					errCount++
+					continue
+				}
+				for _, frag := range fragments {
+					if _, ok := cloudFiles[frag.NativeFragmentID]; !ok {
+						logger.Error("Missing fragment on cloud: %s (Replica %s, Frag %d)", frag.NativeFragmentID, r.Path, frag.FragmentNumber)
+						errCount++
+					} else {
+						delete(cloudFiles, frag.NativeFragmentID)
+					}
+				}
+			}
+		}
+
+		// Compare Cloud -> DB (Remaining files are unexpected)
+		for nativeID, f := range cloudFiles {
+			// Check if this file is a replica for ANY account on this provider (Shared folder case)
+			anyReplica, err := db.GetReplicaByNativeID(user.Provider, nativeID)
+			if err == nil && anyReplica != nil && anyReplica.Status == "active" {
+				continue
+			}
+
+			// Check if it's a fragment (for Telegram mainly, but good to be generic)
+			anyFragReplica, err := db.GetReplicaByNativeFragmentID(nativeID)
+			if err == nil && anyFragReplica != nil && anyFragReplica.Status == "active" && anyFragReplica.Provider == user.Provider {
+				continue
+			}
+
+			logger.Error("Unexpected file on cloud: %s (ID: %s, Name: %s)", f.Path, nativeID, f.Name)
+			errCount++
+		}
+	}
+
+	if errCount > 0 {
+		return fmt.Errorf("metadata verification failed with %d errors", errCount)
+	}
+	logger.Info("Metadata verification passed.")
+	return nil
+}
+
+func listFilesRecursive(client api.CloudClient, folderID string, currentPath string, results map[string]*model.File) error {
+	files, err := client.ListFiles(folderID)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		f.Path = filepath.Join(currentPath, f.Name)
+		// Use NativeID (Replica ID) as key for consistency checking
+		if len(f.Replicas) > 0 {
+			results[f.Replicas[0].NativeID] = f
+		} else {
+			// Fallback (shouldn't happen usually)
+			results[f.ID] = f
+		}
+	}
+
+	folders, err := client.ListFolders(folderID)
+	if err != nil {
+		return err
+	}
+	for _, folder := range folders {
+		// Recurse
+		err := listFilesRecursive(client, folder.ID, filepath.Join(currentPath, folder.Name), results)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
