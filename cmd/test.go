@@ -425,7 +425,7 @@ func runTest(cmd *cobra.Command, args []string) error {
 	logger.Info("Verifying movements...")
 	// Debug: print DB state
 	printAllFiles(db)
-	
+
 	if err := verifyFile(db, "/Folder_Main/test_1.txt", 0); err != nil {
 		return err
 	}
