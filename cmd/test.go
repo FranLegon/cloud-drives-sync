@@ -148,6 +148,12 @@ func runTest(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("upload test_1 failed: %w", err)
 	}
 
+	// Update DB to reflect the new file
+	logger.Info("Updating Metadata to find uploaded file...")
+	if err := runner.GetMetadata(); err != nil {
+		return fmt.Errorf("metadata update failed: %w", err)
+	}
+
 	logger.Info("Running FreeMain...")
 	if err := runner.FreeMain(); err != nil {
 		return fmt.Errorf("FreeMain failed: %w", err)
@@ -205,6 +211,11 @@ func runTest(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	logger.Info("Updating Metadata to find uploaded files (Test Case 2)...")
+	if err := runner.GetMetadata(); err != nil {
+		return fmt.Errorf("metadata update failed: %w", err)
+	}
+
 	logger.Info("Running SyncProviders...")
 	if err := runner.SyncProviders(); err != nil {
 		return fmt.Errorf("SyncProviders failed: %w", err)
@@ -230,6 +241,11 @@ func runTest(cmd *cobra.Command, args []string) error {
 	logger.Info("Uploading %s to Main Account (Streamed)...", test5Name)
 	if _, err := mainClient.UploadFile(mainSyncID, test5Name, io.LimitReader(rand.Reader, test5Size), test5Size); err != nil {
 		return fmt.Errorf("upload large file failed: %w", err)
+	}
+
+	logger.Info("Updating Metadata to find large file...")
+	if err := runner.GetMetadata(); err != nil {
+		return fmt.Errorf("metadata update failed: %w", err)
 	}
 
 	logger.Info("Running SyncProviders (Large File)...")
@@ -303,6 +319,11 @@ func runTest(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	logger.Info("Updating Metadata to detect movements...")
+	if err := runner.GetMetadata(); err != nil {
+		return fmt.Errorf("metadata update failed: %w", err)
+	}
+
 	logger.Info("Running SyncProviders (Movements)...")
 	if err := runner.SyncProviders(); err != nil {
 		return fmt.Errorf("SyncProviders failed: %w", err)
@@ -370,6 +391,11 @@ func runTest(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	logger.Info("Updating Metadata to detect soft deletions...")
+	if err := runner.GetMetadata(); err != nil {
+		return fmt.Errorf("metadata update failed: %w", err)
+	}
+
 	logger.Info("Running SyncProviders (Soft Delete)...")
 	if err := runner.SyncProviders(); err != nil {
 		return err
@@ -435,6 +461,11 @@ func runTest(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	logger.Info("Updating Metadata to detect hard deletions...")
+	if err := runner.GetMetadata(); err != nil {
+		return fmt.Errorf("metadata update failed: %w", err)
+	}
+
 	logger.Info("Running SyncProviders (Hard Delete)...")
 	if err := runner.SyncProviders(); err != nil {
 		return err
@@ -486,6 +517,15 @@ func recreateSyncFolders(r *task.Runner, cfg *model.Config) error {
 			return err
 		}
 
+		if u.Provider == model.ProviderTelegram {
+			// Telegram requires PreFlightCheck to initialize the channel (sets channelID)
+			// GetSyncFolderID returns success ("/") even if channel is missing/uninit in struct,
+			// so we must force check here.
+			if err := client.PreFlightCheck(); err != nil {
+				return fmt.Errorf("telegram preflight failed for %s: %w", u.Phone, err)
+			}
+		}
+
 		id, err := client.GetSyncFolderID()
 		if err == nil && id != "" {
 			continue // Already exists
@@ -526,6 +566,9 @@ func recreateSyncFolders(r *task.Runner, cfg *model.Config) error {
 			}
 
 		case model.ProviderTelegram:
+			if err := client.PreFlightCheck(); err != nil {
+				return fmt.Errorf("telegram preflight check failed: %w", err)
+			}
 			if _, err := client.CreateFolder("", "sync-cloud-drives"); err != nil {
 				logger.Warning("Telegram create folder/channel warning: %v", err)
 			}
