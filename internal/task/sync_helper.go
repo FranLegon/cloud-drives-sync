@@ -5,6 +5,7 @@ import (
 	"io"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
 	"github.com/FranLegon/cloud-drives-sync/internal/config"
@@ -142,10 +143,10 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 	if len(masterFile.Replicas) == 0 {
 		return fmt.Errorf("file has no replicas")
 	}
-	
+
 	// Use the first replica as the source
 	sourceReplica := masterFile.Replicas[0]
-	
+
 	// Get source client
 	var email, phone string
 	if sourceReplica.Provider == model.ProviderTelegram {
@@ -153,7 +154,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 	} else {
 		email = sourceReplica.AccountID
 	}
-	
+
 	sourceClient, err := r.GetOrCreateClient(&model.User{
 		Provider: sourceReplica.Provider,
 		Email:    email,
@@ -191,17 +192,26 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 	errChan := make(chan error, 1)
 
 	go func() {
-		defer pw.Close()
-		if err := sourceClient.DownloadFile(masterFile.ID, pw); err != nil {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("Panic in download goroutine: %v", r)
+				pw.CloseWithError(fmt.Errorf("panic: %v", r))
+			} else {
+				pw.Close()
+			}
+		}()
+
+		if err := sourceClient.DownloadFile(sourceReplica.NativeID, pw); err != nil {
 			// Ignore closed pipe error (happens if upload is skipped or finishes early)
 			if err != io.ErrClosedPipe && !strings.Contains(err.Error(), "closed pipe") {
+				logger.Warning("Download error in pipe: %v", err)
 				errChan <- err
 			}
 		}
 		close(errChan)
 	}()
 
-	_, err = destClient.UploadFile(parentID, finalName, pr, masterFile.Size)
+	uploadedFile, err := destClient.UploadFile(parentID, finalName, pr, masterFile.Size)
 	// Close the reader to ensure the writer stops if it's still writing
 	_ = pr.Close()
 
@@ -214,20 +224,58 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		return fmt.Errorf("download failed: %w", err)
 	}
 
+	// Update Database with new replica
+	accountID := destUser.Email
+	if targetProvider == model.ProviderTelegram {
+		accountID = destUser.Phone
+	}
+
+	newReplica := &model.Replica{
+		FileID:       masterFile.ID,
+		CalculatedID: masterFile.CalculatedID,
+		Path:         masterFile.Path,
+		Name:         uploadedFile.Name,
+		Size:         uploadedFile.Size,
+		Provider:     targetProvider,
+		AccountID:    accountID,
+		NativeID:     uploadedFile.ID,
+		ModTime:      time.Now(),
+		Status:       "active",
+	}
+
+	if err := r.db.InsertReplica(newReplica); err != nil {
+		logger.Error("Failed to insert new replica into DB: %v", err)
+		// Don't fail the operation, but consistency is compromised
+	} else {
+		logger.Info("Replica recorded in DB for %s on %s", masterFile.Path, targetProvider)
+	}
+
 	logger.InfoTagged([]string{string(targetProvider), destUser.Email}, "File copied successfully")
 	return nil
 }
 
 // createShortcut shares the source file and creates a shortcut in the target account
 func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) error {
-	// 1. Get source replica to determine which client to use
+	// 1. Find a compatible source replica
 	if len(sourceFile.Replicas) == 0 {
 		return fmt.Errorf("file has no replicas")
 	}
-	
-	// Use the first replica as the source
-	sourceReplica := sourceFile.Replicas[0]
-	
+
+	var sourceReplica *model.Replica
+	for _, replica := range sourceFile.Replicas {
+		if replica.Provider == targetUser.Provider {
+			sourceReplica = replica
+			break
+		}
+	}
+
+	if sourceReplica == nil {
+		// Fallback: Use first replica (might work for some providers or if cross-linking supported later)
+		// But for now, warn and return error if strictly required.
+		// Actually, logging a warning and returning error is better than using wrong provider.
+		return fmt.Errorf("no source replica found for provider %s", targetUser.Provider)
+	}
+
 	// Get Source Client
 	var email, phone string
 	if sourceReplica.Provider == model.ProviderTelegram {
@@ -235,7 +283,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 	} else {
 		email = sourceReplica.AccountID
 	}
-	
+
 	sourceClient, err := r.GetOrCreateClient(&model.User{
 		Provider: sourceReplica.Provider,
 		Email:    email,
@@ -257,6 +305,17 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 		return fmt.Errorf("failed to get target client: %w", err)
 	}
 
+	// Fetch source Drive ID (needed for MS OneDrive shortcuts)
+	sourceDriveID, err := sourceClient.GetDriveID()
+	if err != nil {
+		logger.Warning("Failed to get source drive ID: %v", err)
+	}
+	if sourceDriveID == "" && targetUser.Provider == model.ProviderMicrosoft {
+		logger.Warning("Source Drive ID is empty, but required for Microsoft shortcut creation. Source Provider: %s", sourceReplica.Provider)
+	}
+
+	logger.InfoTagged([]string{string(targetUser.Provider), targetUser.Email}, "Creating shortcut for %s (TargetID: %s, DriveID: %s)...", sourceFile.Name, sourceReplica.NativeID, sourceDriveID)
+
 	// 4. Ensure Folder Structure in Target
 	dir := filepath.Dir(sourceFile.Path)
 	dir = strings.ReplaceAll(dir, "\\", "/")
@@ -268,9 +327,40 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 
 	// 5. Create Shortcut
 	logger.InfoTagged([]string{string(targetUser.Provider), targetUser.Email}, "Creating shortcut for %s...", sourceFile.Name)
-	_, err = targetClient.CreateShortcut(parentID, sourceFile.Name, sourceReplica.NativeID)
+	shortcut, err := targetClient.CreateShortcut(parentID, sourceFile.Name, sourceReplica.NativeID, sourceDriveID)
 	if err != nil {
+		if targetUser.Provider == model.ProviderMicrosoft && (strings.Contains(err.Error(), "Invalid request") || strings.Contains(err.Error(), "invalidRequest")) {
+			logger.Warning("Shortcut creation failed for %s (likely unsupported cross-account operation): %v. Skipping.", sourceFile.Name, err)
+			return nil
+		}
 		return fmt.Errorf("failed to create shortcut: %w", err)
+	}
+
+	// 6. Update Database with new replica (Shortcut)
+	accountID := targetUser.Email
+	if targetUser.Provider == model.ProviderTelegram {
+		accountID = targetUser.Phone
+	}
+	// For shortcuts, we might treat size as 0 or the original size.
+	// Microsoft shortcut usually has size 0 in our model unless we fetched it.
+
+	newReplica := &model.Replica{
+		FileID:       sourceFile.ID,
+		CalculatedID: sourceFile.CalculatedID,
+		Path:         sourceFile.Path,
+		Name:         shortcut.Name,
+		Size:         shortcut.Size,
+		Provider:     targetUser.Provider,
+		AccountID:    accountID,
+		NativeID:     shortcut.ID,
+		ModTime:      time.Now(),
+		Status:       "active",
+	}
+
+	if err := r.db.InsertReplica(newReplica); err != nil {
+		logger.Error("Failed to insert shortcut replica into DB: %v", err)
+	} else {
+		logger.Info("Shortcut replica recorded in DB for %s on %s", sourceFile.Path, targetUser.Provider)
 	}
 
 	return nil

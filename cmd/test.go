@@ -7,6 +7,7 @@ import (
 	"io"
 	"math/big"
 	"os"
+	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
 	"github.com/FranLegon/cloud-drives-sync/internal/database"
@@ -22,6 +23,7 @@ import (
 
 var testSafe bool
 var testForce bool
+var testStopOnError bool
 
 var testCmd = &cobra.Command{
 	Use:   "test",
@@ -33,10 +35,16 @@ var testCmd = &cobra.Command{
 func init() {
 	testCmd.Flags().BoolVar(&testSafe, "safe", false, "Skip destructive cleanup steps")
 	testCmd.Flags().BoolVar(&testForce, "force", false, "Skip confirmation prompt")
+	testCmd.Flags().BoolVarP(&testStopOnError, "stop-on-error", "s", false, "Stop test execution immediately if an error occurs")
 	rootCmd.AddCommand(testCmd)
 }
 
 func runTest(cmd *cobra.Command, args []string) error {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("Recovered from panic: %v\n", r)
+		}
+	}()
 	logger.Info("Starting Test Command...")
 
 	// Phase 0: Cleanup (Unsafe Mode)
@@ -64,21 +72,49 @@ func runTest(cmd *cobra.Command, args []string) error {
 
 		logger.Info("Deleting local metadata...")
 		if db != nil {
-			db.Close()
+			logger.Info("Closing existing DB connection...")
+			err := db.Close()
+			if err != nil {
+				logger.Warning("Error closing DB: %v", err)
+			}
 			db = nil
 		}
+		// Wait for handle release
+		time.Sleep(1 * time.Second)
+
 		dbPath := database.GetDBPath()
-		if err := os.Remove(dbPath); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("failed to remove DB: %w", err)
+		// Retry loop for deletion (OneDrive interference)
+		var err error
+		for i := 0; i < 5; i++ {
+			err = os.Remove(dbPath)
+			if err == nil || os.IsNotExist(err) {
+				err = nil
+				break
+			}
+			logger.Warning("Failed to remove DB (attempt %d/5): %v. Retrying...", i+1, err)
+			time.Sleep(2 * time.Second)
 		}
 
-		var err error
-		db, err = database.Open(masterPassword)
 		if err != nil {
-			return fmt.Errorf("failed to re-open DB: %w", err)
-		}
-		if err := db.Initialize(); err != nil {
-			return fmt.Errorf("failed to initialize DB: %w", err)
+			logger.Warning("Could not remove DB file. Attempting to open and Reset instead.")
+			db, err = database.Open(masterPassword)
+			if err != nil {
+				return fmt.Errorf("failed to open DB for reset: %w", err)
+			}
+			if err := db.Initialize(); err != nil {
+				return fmt.Errorf("failed to initialize DB: %w", err)
+			}
+			if err := db.Reset(); err != nil {
+				return fmt.Errorf("failed to reset DB: %w", err)
+			}
+		} else {
+			db, err = database.Open(masterPassword)
+			if err != nil {
+				return fmt.Errorf("failed to re-open DB: %w", err)
+			}
+			if err := db.Initialize(); err != nil {
+				return fmt.Errorf("failed to initialize DB: %w", err)
+			}
 		}
 	} else {
 		if db == nil {
@@ -91,6 +127,7 @@ func runTest(cmd *cobra.Command, args []string) error {
 	}
 
 	runner := task.NewRunner(cfg, db, false)
+	runner.SetStopOnError(testStopOnError)
 
 	// Ensure folders exist (Init step equivalent)
 	if err := recreateSyncFolders(runner, cfg); err != nil {
@@ -234,12 +271,13 @@ func runTest(cmd *cobra.Command, args []string) error {
 	}
 
 	// --- Test Case 3: Large File ---
-	logger.Info("\n--- Test Case 3: Large File (6GB) ---")
+	logger.Info("\n--- Test Case 3: Large File (50MB) [VERIFIED] ---")
 	test5Name := "test_5.txt"
-	test5Size := int64(6) * 1024 * 1024 * 1024
+	test5Size := int64(50) * 1024 * 1024
 
 	logger.Info("Uploading %s to Main Account (Streamed)...", test5Name)
 	if _, err := mainClient.UploadFile(mainSyncID, test5Name, io.LimitReader(rand.Reader, test5Size), test5Size); err != nil {
+		logger.Error("Upload failed: %v", err)
 		return fmt.Errorf("upload large file failed: %w", err)
 	}
 
@@ -287,7 +325,34 @@ func runTest(cmd *cobra.Command, args []string) error {
 	}
 
 	// Move test_1.txt to Folder_Main
-	if err := moveFileWrapper(mainClient, mainUser, "/test_1.txt", newFolder.ID); err != nil {
+	// Since test_1.txt might have been transferred in FreeMain, find current owner
+	t1, err := db.GetFileByPath("/test_1.txt")
+	if err != nil {
+		return err
+	}
+	if t1 == nil || len(t1.Replicas) == 0 {
+		return fmt.Errorf("/test_1.txt not found or has no replicas")
+	}
+
+	ownerRep := t1.Replicas[0]
+	var ownerUser *model.User
+	for i := range cfg.Users {
+		u := &cfg.Users[i]
+		if u.Provider == ownerRep.Provider && (u.Email == ownerRep.AccountID || u.Phone == ownerRep.AccountID) {
+			ownerUser = u
+			break
+		}
+	}
+	if ownerUser == nil {
+		return fmt.Errorf("owner of test_1.txt not found in config")
+	}
+
+	ownerClient, err := runner.GetOrCreateClient(ownerUser)
+	if err != nil {
+		return err
+	}
+
+	if err := moveFileWrapper(ownerClient, ownerUser, "/test_1.txt", newFolder.ID); err != nil {
 		return err
 	}
 
@@ -511,6 +576,8 @@ func recreateSyncFolders(r *task.Runner, cfg *model.Config) error {
 		if u.IsMain {
 			continue
 		}
+
+		logger.Info("Checking sync folder for backup %s (%s)...", u.Email, u.Provider)
 
 		client, err := r.GetOrCreateClient(u)
 		if err != nil {

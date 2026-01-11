@@ -18,6 +18,7 @@ import (
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
 	"github.com/microsoftgraph/msgraph-sdk-go/drives"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
+	"github.com/microsoftgraph/msgraph-sdk-go/models/odataerrors"
 	"golang.org/x/oauth2"
 )
 
@@ -86,6 +87,7 @@ func (c *Client) initializeDrive() error {
 	}
 
 	c.driveID = *drive.GetId()
+	logger.Info("Initialized OneDrive DriveID: '%s' for %s", c.driveID, c.user.Email)
 	return nil
 }
 
@@ -733,8 +735,13 @@ func (c *Client) GetUserIdentifier() string {
 	return c.user.Email
 }
 
+// GetDriveID returns the Drive ID
+func (c *Client) GetDriveID() (string, error) {
+	return c.driveID, nil
+}
+
 // CreateShortcut creates a shortcut (link) to a target item
-func (c *Client) CreateShortcut(parentID, name, targetID string) (*model.File, error) {
+func (c *Client) CreateShortcut(parentID, name, targetID, targetDriveID string) (*model.File, error) {
 	ctx := context.Background()
 
 	newItem := models.NewDriveItem()
@@ -742,12 +749,25 @@ func (c *Client) CreateShortcut(parentID, name, targetID string) (*model.File, e
 
 	remoteItem := models.NewRemoteItem()
 	remoteItem.SetId(&targetID)
+
+	if targetDriveID != "" {
+		parentRef := models.NewItemReference()
+		parentRef.SetDriveId(&targetDriveID)
+		remoteItem.SetParentReference(parentRef)
+	}
+
 	// We assume permissions are already handled so simply pointing to ID works if accessible
 	newItem.SetRemoteItem(remoteItem)
 
 	// Post to children of parentID
 	item, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(parentID).Children().Post(ctx, newItem, nil)
 	if err != nil {
+		var oDataError *odataerrors.ODataError
+		if errors.As(err, &oDataError) {
+			if terr := oDataError.GetErrorEscaped(); terr != nil {
+				return nil, fmt.Errorf("failed to create shortcut: %s (Code: %s)", *terr.GetMessage(), *terr.GetCode())
+			}
+		}
 		return nil, fmt.Errorf("failed to create shortcut: %w", err)
 	}
 

@@ -64,6 +64,19 @@ func Open(masterPassword string) (*DB, error) {
 	return db, nil
 }
 
+// Reset clears all data from the database
+func (db *DB) Reset() error {
+	tables := []string{"replica_fragments", "replicas", "files", "folders"}
+	for _, table := range tables {
+		_, err := db.conn.Exec(fmt.Sprintf("DELETE FROM %s", table))
+		if err != nil {
+			// Ignore if table doesn't exist
+			continue
+		}
+	}
+	return nil
+}
+
 // Close closes the database connection
 func (db *DB) Close() error {
 	if db.conn != nil {
@@ -291,6 +304,47 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 	}
 
 	return tx.Commit()
+}
+
+// UpdateReplicaOwner updates the owner (account_id) of a replica.
+// This is used during FreeMain when ownership is transferred.
+func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAccountID string) error {
+	// Check if target replica already exists to avoid UNIQUE constraint violation
+	var exists int
+	checkQuery := `SELECT 1 FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`
+	err := db.conn.QueryRow(checkQuery, provider, newAccountID, nativeID).Scan(&exists)
+	if err != nil && err != sql.ErrNoRows {
+		return fmt.Errorf("failed to check existing replica: %w", err)
+	}
+
+	if exists == 1 {
+		// Target already exists, so we just remove the old one to reflect the move/change
+		// (The new owner is already tracked, so we don't need to update the old record to it)
+		delQuery := `DELETE FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`
+		if _, err := db.conn.Exec(delQuery, provider, oldAccountID, nativeID); err != nil {
+			return fmt.Errorf("failed to delete old replica: %w", err)
+		}
+		return nil
+	}
+
+	query := `
+		UPDATE replicas
+		SET account_id = ?
+		WHERE provider = ? AND account_id = ? AND native_id = ?
+	`
+	res, err := db.conn.Exec(query, newAccountID, provider, oldAccountID, nativeID)
+	if err != nil {
+		return fmt.Errorf("failed to update replica owner: %w", err)
+	}
+
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("no replica found to update (prov=%s, acc=%s, id=%s)", provider, oldAccountID, nativeID)
+	}
+	return nil
 }
 
 // InsertReplica inserts a replica record into the database

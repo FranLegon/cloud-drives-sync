@@ -20,10 +20,11 @@ import (
 
 // Runner handles task orchestration
 type Runner struct {
-	config   *model.Config
-	db       *database.DB
-	safeMode bool
-	clients  map[string]api.CloudClient
+	config      *model.Config
+	db          *database.DB
+	safeMode    bool
+	stopOnError bool
+	clients     map[string]api.CloudClient
 }
 
 // NewRunner creates a new task runner
@@ -34,6 +35,10 @@ func NewRunner(config *model.Config, db *database.DB, safeMode bool) *Runner {
 		safeMode: safeMode,
 		clients:  make(map[string]api.CloudClient),
 	}
+}
+
+func (r *Runner) SetStopOnError(stop bool) {
+	r.stopOnError = stop
 }
 
 // GetOrCreateClient gets or creates a client for a user
@@ -713,18 +718,28 @@ func (r *Runner) FreeMain() error {
 		if !r.safeMode {
 			logger.InfoTagged([]string{"Google", mainUser.Email}, "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
 			err := mainClient.TransferOwnership(file.ID, target.User.Email)
-			if err != nil {
-				if err == api.ErrOwnershipTransferPending {
-					logger.InfoTagged([]string{"Google", mainUser.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
-					if err := target.Client.AcceptOwnership(file.ID); err != nil {
-						logger.Error("Failed to accept ownership: %v", err)
-						continue
-					}
-				} else {
-					logger.Error("Failed to transfer ownership: %v", err)
+
+			// Handle pending transfer flow
+			if err == api.ErrOwnershipTransferPending {
+				logger.InfoTagged([]string{"Google", mainUser.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
+				if acceptErr := target.Client.AcceptOwnership(file.ID); acceptErr != nil {
+					logger.Error("Failed to accept ownership: %v", acceptErr)
 					continue
 				}
+				err = nil // Clear error as acceptance succeeded
 			}
+
+			if err != nil {
+				logger.Error("Failed to transfer ownership: %v", err)
+				continue
+			}
+
+			// Update database to reflect ownership change
+			if err := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainUser.Email, file.ID, target.User.Email); err != nil {
+				logger.Warning("Failed to update local DB for %s: %v", file.Name, err)
+				// Don't stop process, but log warning
+			}
+
 		} else {
 			logger.DryRunTagged([]string{"Google", mainUser.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
 		}
@@ -747,6 +762,13 @@ func (r *Runner) getAllFilesRecursive(client api.CloudClient, folderID string) (
 		return nil, err
 	}
 	allFiles = append(allFiles, files...)
+	if len(files) > 0 {
+		names := make([]string, 0, len(files))
+		for _, f := range files {
+			names = append(names, f.Name)
+		}
+		logger.Info("Found files in folder %s: %s", folderID, strings.Join(names, ", "))
+	}
 
 	// List subfolders
 	folders, err := client.ListFolders(folderID)
@@ -848,6 +870,9 @@ func (r *Runner) SyncProviders() error {
 				if !r.safeMode {
 					if err := r.copyFile(masterFile, provider, ""); err != nil {
 						logger.Error("Failed to copy file: %v", err)
+						if r.stopOnError {
+							return fmt.Errorf("failed to copy file %s to %s: %w", path, provider, err)
+						}
 					}
 				} else {
 					// Get the source provider from first replica
@@ -873,6 +898,9 @@ func (r *Runner) SyncProviders() error {
 						logger.Info("Resolving conflict by uploading as %s", conflictName)
 						if err := r.copyFile(masterFile, provider, conflictName); err != nil {
 							logger.Error("Failed to resolve conflict: %v", err)
+							if r.stopOnError {
+								return fmt.Errorf("failed to resolve conflict for %s in %s: %w", path, provider, err)
+							}
 						}
 					} else {
 						logger.DryRun("Would resolve conflict by uploading %s as %s to %s", path, conflictName, provider)
@@ -890,6 +918,9 @@ func (r *Runner) SyncProviders() error {
 	// Phase 2: Distribute Shortcuts for Microsoft OneDrive
 	if err := r.distributeShortcuts(); err != nil {
 		logger.Error("Failed to distribute shortcuts: %v", err)
+		if r.stopOnError {
+			return fmt.Errorf("distribute shortcuts failed: %w", err)
+		}
 	}
 
 	return nil
@@ -964,6 +995,9 @@ func (r *Runner) distributeShortcuts() error {
 				if !r.safeMode {
 					if err := r.createShortcut(sourceFile, &user); err != nil {
 						logger.Error("Failed to create shortcut for %s in %s: %v", path, user.Email, err)
+						if r.stopOnError {
+							return fmt.Errorf("failed to create shortcut for %s: %w", path, err)
+						}
 					}
 				} else {
 					// Get source account from first replica

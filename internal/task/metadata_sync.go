@@ -297,8 +297,6 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 		}
 
 		return nil
-
-		return nil
 	}
 
 	// Standardize path separators for logs

@@ -147,6 +147,8 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			return nil, fmt.Errorf("failed to list files: %w", err)
 		}
 
+		logger.Info("Google ListFiles page: found %d files", len(fileList.Files)) // ADDED LOG
+
 		for _, f := range fileList.Files {
 			modTime := parseTime(f.ModifiedTime)
 			calculatedID := fmt.Sprintf("%s-%d", f.Name, f.Size)
@@ -685,8 +687,13 @@ func mustReadAll(r io.Reader) []byte {
 	return data
 }
 
+// GetDriveID returns the Drive ID (not used for Google)
+func (c *Client) GetDriveID() (string, error) {
+	return "", nil
+}
+
 // CreateShortcut creates a shortcut to a file
-func (c *Client) CreateShortcut(parentID, name, targetID string) (*model.File, error) {
+func (c *Client) CreateShortcut(parentID, name, targetID, targetDriveID string) (*model.File, error) {
 	shortcut := &drive.File{
 		Name:     name,
 		MimeType: "application/vnd.google-apps.shortcut",

@@ -129,10 +129,21 @@ func NewClient(user *model.User, apiIDStr string, apiHash string) (*Client, erro
 		cancel:  cancel,
 	}
 
+	ready := make(chan struct{})
+
 	// Start the client in a background goroutine
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
+		// Ensure ready is closed if Run exits early
+		defer func() {
+			select {
+			case <-ready:
+			default:
+				close(ready)
+			}
+		}()
+
 		err := client.Run(ctx, func(ctx context.Context) error {
 			// Initialize helpers
 			c.uploader = uploader.NewUploader(client.API())
@@ -146,6 +157,13 @@ func NewClient(user *model.User, apiIDStr string, apiHash string) (*Client, erro
 			}
 			c.authenticated = status.Authorized
 
+			// Signal ready
+			select {
+			case <-ready:
+			default:
+				close(ready)
+			}
+
 			// Keep running until context is canceled
 			<-ctx.Done()
 			return ctx.Err()
@@ -155,8 +173,12 @@ func NewClient(user *model.User, apiIDStr string, apiHash string) (*Client, erro
 		}
 	}()
 
-	// Wait a bit for the client to initialize
-	time.Sleep(1 * time.Second)
+	// Wait for the client to initialize
+	select {
+	case <-ready:
+	case <-time.After(15 * time.Second):
+		logger.WarningTagged([]string{"Telegram", user.Phone}, "Client initialization timed out")
+	}
 
 	return c, nil
 }
@@ -1019,7 +1041,12 @@ func (c *Client) GetUserIdentifier() string {
 	return c.user.Phone
 }
 
+// GetDriveID returns the Drive ID (not used for Telegram)
+func (c *Client) GetDriveID() (string, error) {
+	return "", nil
+}
+
 // CreateShortcut creates a shortcut (not supported in Telegram)
-func (c *Client) CreateShortcut(parentID, name, targetID string) (*model.File, error) {
+func (c *Client) CreateShortcut(parentID, name, targetID, targetDriveID string) (*model.File, error) {
 	return nil, fmt.Errorf("not supported - Telegram does not support shortcuts")
 }
