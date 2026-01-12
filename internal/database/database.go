@@ -964,31 +964,40 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 		return nil
 	}
 
+	// Group orphans by calculated_id to merge replicas of the same file
+	orphanGroups := make(map[string][]Orphan)
+	for _, o := range orphans {
+		orphanGroups[o.CalculatedID] = append(orphanGroups[o.CalculatedID], o)
+	}
+
 	tx, err := db.conn.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	for _, o := range orphans {
-		// Generate UUID
+	for _, group := range orphanGroups {
+		// Use the first orphan's metadata for the new logical file
+		first := group[0]
 		newFileID := uuid.New().String()
 
 		// Insert File
 		_, err := tx.Exec(`
 			INSERT OR IGNORE INTO files (id, path, name, size, calculated_id, mod_time, status)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, newFileID, o.Path, o.Name, o.Size, o.CalculatedID, o.ModTime, o.Status)
+		`, newFileID, first.Path, first.Name, first.Size, first.CalculatedID, first.ModTime, first.Status)
 		if err != nil {
-			return fmt.Errorf("failed to promote replica %d: %w", o.ReplicaID, err)
+			return fmt.Errorf("failed to promote replica group %s: %w", first.CalculatedID, err)
 		}
 
-		// Update Replica
-		_, err = tx.Exec(`
-			UPDATE replicas SET file_id = ? WHERE id = ?
-		`, newFileID, o.ReplicaID)
-		if err != nil {
-			return fmt.Errorf("failed to update replica %d: %w", o.ReplicaID, err)
+		// Update all replicas in the group
+		for _, o := range group {
+			_, err = tx.Exec(`
+				UPDATE replicas SET file_id = ? WHERE id = ?
+			`, newFileID, o.ReplicaID)
+			if err != nil {
+				return fmt.Errorf("failed to update replica %d: %w", o.ReplicaID, err)
+			}
 		}
 	}
 

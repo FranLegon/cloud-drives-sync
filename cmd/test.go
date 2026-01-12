@@ -440,6 +440,31 @@ func cleanupCloudFiles(r *task.Runner) error {
 			continue
 		}
 
+		deleteAuxFolder := func(c api.CloudClient, u *model.User) {
+			folders, err := c.ListFolders("root")
+			if err == nil {
+				for _, f := range folders {
+					if f.Name == "sync-cloud-drives-aux" {
+						logger.InfoTagged([]string{string(u.Provider), u.Email}, "Deleting aux folder %s...", f.ID)
+						// Try to empty it first
+						subs, _ := c.ListFolders(f.ID)
+						for _, sub := range subs {
+							// Empty subfolder (soft-deleted)
+							files, _ := c.ListFiles(sub.ID)
+							for _, file := range files {
+								c.DeleteFile(file.ID)
+							}
+							c.DeleteFolder(sub.ID)
+						}
+
+						if err := c.DeleteFolder(f.ID); err != nil {
+							logger.Warning("Failed to delete aux folder: %v", err)
+						}
+					}
+				}
+			}
+		}
+
 		if u.Provider == model.ProviderTelegram {
 			if tgClient, ok := client.(*telegram.Client); ok {
 				logger.Info("Cleaning Telegram messages for %s...", u.Email)
@@ -455,12 +480,14 @@ func cleanupCloudFiles(r *task.Runner) error {
 				if err := gClient.EmptySyncFolder(); err != nil {
 					logger.Warning("Failed to empty Google folder for %s: %v", u.Email, err)
 				}
+				deleteAuxFolder(client, u)
 			}
 		} else if u.Provider == model.ProviderMicrosoft {
 			if mClient, ok := client.(*microsoft.Client); ok {
 				if err := mClient.EmptySyncFolder(); err != nil {
 					logger.Warning("Failed to empty Microsoft folder for %s: %v", u.Email, err)
 				}
+				deleteAuxFolder(client, u)
 			}
 		}
 	}
@@ -525,6 +552,10 @@ func getNativeID(f *model.File, u *model.User) string {
 		if r.Provider == u.Provider && (r.AccountID == u.Email || r.AccountID == u.Phone) {
 			return r.NativeID
 		}
+	}
+	logger.Warning("NativeID not found for file %s. User: %s (%s). Replicas: %d", f.Path, u.Email, u.Provider, len(f.Replicas))
+	for i, r := range f.Replicas {
+		logger.Warning(" - Replica %d: Provider=%s, Account=%s, NativeID=%s", i, r.Provider, r.AccountID, r.NativeID)
 	}
 	return ""
 }

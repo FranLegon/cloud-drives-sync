@@ -354,8 +354,8 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 	shortcut, err := targetClient.CreateShortcut(parentID, sourceFile.Name, sourceReplica.NativeID, sourceDriveID)
 	if err != nil {
 		if targetUser.Provider == model.ProviderMicrosoft && (strings.Contains(err.Error(), "Invalid request") || strings.Contains(err.Error(), "invalidRequest")) {
-			logger.Warning("Shortcut creation failed for %s (likely unsupported cross-account operation): %v. Skipping.", sourceFile.Name, err)
-			return nil
+			logger.Warning("Shortcut creation failed for %s (likely unsupported cross-account operation): %v. Falling back to simple copy.", sourceFile.Name, err)
+			return r.copyFile(sourceFile, targetUser.Provider, sourceFile.Name)
 		}
 		return fmt.Errorf("failed to create shortcut: %w", err)
 	}

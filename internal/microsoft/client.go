@@ -236,7 +236,11 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	createRequestBody.SetName(&name)
 	fileFacet := models.NewFile()
 	createRequestBody.SetFile(fileFacet)
-	// We can't easily set conflict behavior here without config, but default is usually fail if exists.
+	// Set conflict behavior to replace existing file
+	additionalData := map[string]interface{}{
+		"@microsoft.graph.conflictBehavior": "replace",
+	}
+	createRequestBody.SetAdditionalData(additionalData)
 
 	createdItem, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(folderID).Children().Post(ctx, createRequestBody, nil)
 	if err != nil {

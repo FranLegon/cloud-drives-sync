@@ -242,6 +242,9 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 	}
 
 	for _, file := range files {
+		if file.Name == "metadata.db" {
+			continue
+		}
 		file.Path = pathPrefix + "/" + file.Name
 		for _, replica := range file.Replicas {
 			replica.Path = file.Path
@@ -258,11 +261,6 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 	}
 
 	for _, folder := range folders {
-		// Skip sync-cloud-drives-aux folder
-		if folder.Name == "sync-cloud-drives-aux" {
-			continue
-		}
-
 		folder.Path = pathPrefix + "/" + folder.Name
 		folderChan <- folder
 
@@ -814,6 +812,62 @@ func (r *Runner) SyncProviders() error {
 	providers := []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram}
 	softDeletedPath := "sync-cloud-drives-aux/soft-deleted"
 
+	// Index soft deleted files by CalculatedID to detect moves to trash
+	softDeletedHashes := make(map[string]bool)
+	checkedAccounts := make(map[string]bool)
+
+	for _, user := range r.config.Users {
+		accountKey := string(user.Provider) + ":" + user.Email
+		if checkedAccounts[accountKey] {
+			continue
+		}
+		checkedAccounts[accountKey] = true
+
+		if user.Provider == model.ProviderTelegram {
+			continue
+		}
+
+		client, err := r.GetOrCreateClient(&user)
+		if err != nil {
+			logger.Warning("Failed to get client for %s: %v", user.Email, err)
+			continue
+		}
+
+		// Find aux folder (root -> sync-cloud-drives-aux)
+		findFolder := func(parentID, name string) (string, error) {
+			folders, err := client.ListFolders(parentID)
+			if err != nil {
+				return "", err
+			}
+			for _, f := range folders {
+				if f.Name == name {
+					return f.ID, nil
+				}
+			}
+			return "", fmt.Errorf("not found")
+		}
+
+		auxID, err := findFolder("root", "sync-cloud-drives-aux")
+		if err != nil {
+			continue
+		}
+		softID, err := findFolder(auxID, "soft-deleted")
+		if err != nil {
+			continue
+		}
+
+		files, err := client.ListFiles(softID)
+		if err != nil {
+			logger.Warning("Failed to list soft-deleted files for %s: %v", user.Email, err)
+			continue
+		}
+
+		for _, f := range files {
+			softDeletedHashes[f.CalculatedID] = true
+			logger.Info("Found soft-deleted file: %s (Hash: %s) on %s", f.Name, f.CalculatedID, user.Email)
+		}
+	}
+
 	for path, fileMap := range filesByPath {
 		// Determine master file (prioritize Google, then Microsoft, then Telegram)
 		var masterFile *model.File
@@ -824,25 +878,112 @@ func (r *Runner) SyncProviders() error {
 			isSoftDeleted = true
 		}
 
-		// Logic for "If a file is found in this special folder for one provider and in another folder for another provider,
-		// it must be moved to sync-cloud-drives-aux/soft-deleted for all providers."
-		// However, r.db.GetAllFilesAcrossProviders grouped by Path. So if it is in a different folder,
-		// it will be treated as a different entry in filesByPath.
-		// We need to inspect file content identity (CalculatedID) to catch moves, but that is complex across providers.
-		// For now, based strictly on requirements: "sync-providers should not sync this folder, just ignore it."
-		// But "If a file is found in this special folder for one provider and in another folder for another provider"
-		// This implies we need to look for duplicates across the map or iterate.
-		// Since CalculatedIDs might differ if not hashed, we rely on file name + size or weak hash if strong hash absent.
+		// Pick any file to check calculated ID
+		var anyFile *model.File
+		for _, f := range fileMap {
+			anyFile = f
+			break
+		}
 
-		if isSoftDeleted {
-			// Ignore syncing creating files in this folder for other providers if missing?
-			// Requirement: "sync-providers should not sync this folder, just ignore it."
-			// BUT "If a file is found in this special folder for one provider and in another folder for another provider, it must be moved to sync-cloud-drives-aux/soft-deleted for all providers."
+		// If this file matches a soft-deleted file by content, and is NOT in soft-deleted folder, move it there
+		if anyFile != nil && !isSoftDeleted && softDeletedHashes[anyFile.CalculatedID] {
+			logger.Info("File %s matches a soft-deleted file. Moving to soft-deleted...", path)
 
-			// Let's implement the move logic first. find identical files in other locations.
-			// We iterate through all OTHER entries in filesByPath to find matching files.
-			// This is O(N^2) which is bad, but N is number of unique files.
-			// Better: map {CalculatedID -> []paths}
+			for provider, f := range fileMap {
+				// Find replica for this provider
+				var replica *model.Replica
+				for _, r := range f.Replicas {
+					if r.Provider == provider {
+						replica = r
+						break
+					}
+				}
+				if replica == nil {
+					continue
+				}
+
+				if replica.Status != "active" {
+					continue
+				}
+
+				// Get Client
+				var email, phone string
+				if replica.Provider == model.ProviderTelegram {
+					phone = replica.AccountID
+				} else {
+					email = replica.AccountID
+				}
+				client, err := r.GetOrCreateClient(&model.User{
+					Provider: replica.Provider,
+					Email:    email,
+					Phone:    phone,
+				})
+				if err != nil {
+					logger.Error("Failed to get client for %s: %v", replica.AccountID, err)
+					continue
+				}
+
+				// Telegram doesn't support folders, so we delete the file instead of moving to soft-deleted
+				if replica.Provider == model.ProviderTelegram {
+					logger.Info("Deleting soft-deleted file on Telegram: %s", f.Name)
+					if err := client.DeleteFile(replica.NativeID); err != nil {
+						logger.Error("Failed to delete file on Telegram: %v", err)
+					} else {
+						// Update replica to reflect deletion
+						replica.Status = "deleted"
+						// We keep the path as is for history, or clear it?
+						// "deleted" status is enough to treat it as gone.
+						if err := r.db.UpdateReplica(replica); err != nil {
+							logger.Warning("Failed to update replica status in DB: %v", err)
+						}
+						// Note: We do NOT update the logical file path here because the file is gone, not moved.
+						// However, other replicas might be moved.
+						// If logical file 'f' is updated by other providers iterations, that's fine.
+					}
+					continue
+				}
+
+				// Ensure soft-deleted folder exists
+				destID, err := r.ensureFolderStructure(client, softDeletedPath, provider)
+				if err != nil {
+					logger.Error("Failed to ensure soft-deleted folder: %v", err)
+					continue
+				}
+
+				// Move file
+				logger.Info("Moving %s to soft-deleted on %s...", f.Name, provider)
+				if err := client.MoveFile(replica.NativeID, destID); err != nil {
+					logger.Error("Failed to move file to soft-deleted: %v", err)
+				} else {
+					// Update DB (rudimentary, ideally we re-scan or update replica path)
+					// Verify logic relies on DB. We should update the replica status or path in DB.
+					// For now, let's mark it as 'deleted' or update path to soft-deleted in DB?
+					// Updating path to soft-deleted is better.
+					// But we don't have easy DB update method here for "Update Replica Path".
+					// We can assume next metadata scan fixes it. But test might verify immediately?
+					// Test calls verifyGone -> GetFileByPath(originalPath).
+					// If we moved it, GetFileByPath(originalPath) should assume it's gone?
+					// No, DB still has old path.
+					// We must update DB.
+
+					// Let's delete the file/replica from DB to match "Soft Deleted = Gone from View".
+					// Or change its path to the new path.
+					newPath := "/" + softDeletedPath + "/" + f.Name
+					// Update replica path
+					replica.Path = newPath
+					if err := r.db.UpdateReplica(replica); err != nil {
+						logger.Warning("Failed to update replica path in DB: %v", err)
+					}
+
+					// Update logical file path so verifying by old path fails/returns nil
+					f.Path = newPath
+					if err := r.db.UpdateFile(f); err != nil {
+						logger.Warning("Failed to update file path in DB: %v", err)
+					}
+				}
+			}
+			// Don't process this file further (don't sync it back)
+			continue
 		}
 
 		if f, ok := fileMap[model.ProviderGoogle]; ok {
