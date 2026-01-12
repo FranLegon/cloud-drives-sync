@@ -799,11 +799,18 @@ func (r *Runner) SyncProviders() error {
 	// Group by normalized path - now tracking which providers have replicas for each file
 	filesByPath := make(map[string]map[model.Provider]*model.File)
 	for _, f := range files {
+		if f.Status != "active" {
+			continue
+		}
+
 		if _, ok := filesByPath[f.Path]; !ok {
 			filesByPath[f.Path] = make(map[model.Provider]*model.File)
 		}
 		// Add entry for each provider that has a replica of this file
 		for _, replica := range f.Replicas {
+			if replica.Status != "active" {
+				continue
+			}
 			filesByPath[f.Path][replica.Provider] = f
 		}
 	}

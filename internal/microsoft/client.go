@@ -477,6 +477,10 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 			continue
 		}
 
+		if item.GetId() == nil || item.GetName() == nil {
+			continue
+		}
+
 		folder := &model.Folder{
 			ID:             *item.GetId(),
 			Name:           *item.GetName(),
@@ -567,6 +571,10 @@ func (c *Client) deleteItemRecursive(ctx context.Context, itemID string) error {
 
 	// 3. Delete Files
 	for _, f := range files {
+		if f.GetId() == nil {
+			logger.Warning("Skipping file deletion: ID is nil")
+			continue
+		}
 		id := *f.GetId()
 		name := "unknown"
 		if f.GetName() != nil {
@@ -580,10 +588,18 @@ func (c *Client) deleteItemRecursive(ctx context.Context, itemID string) error {
 
 	// 4. Recurse into Folders
 	for _, d := range folders {
+		if d.GetId() == nil {
+			logger.Warning("Skipping folder deletion: ID is nil")
+			continue
+		}
 		id := *d.GetId()
 		// Recurse
+		name := "unknown"
+		if d.GetName() != nil {
+			name = *d.GetName()
+		}
 		if err := c.deleteItemRecursive(ctx, id); err != nil {
-			logger.Warning("Failed to recurse delete folder %s: %v", *d.GetName(), err)
+			logger.Warning("Failed to recurse delete folder %s: %v", name, err)
 		}
 	}
 

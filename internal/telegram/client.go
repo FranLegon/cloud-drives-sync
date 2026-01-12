@@ -657,6 +657,28 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	return file, nil
 }
 
+// progressReader wraps an io.Reader to log progress
+type progressReader struct {
+	r        io.Reader
+	uploaded int64
+	total    int64
+	lastLog  time.Time
+	name     string
+	partNum  int
+}
+
+func (pr *progressReader) Read(p []byte) (int, error) {
+	n, err := pr.r.Read(p)
+	pr.uploaded += int64(n)
+
+	if time.Since(pr.lastLog) > 30*time.Second {
+		percentage := float64(pr.uploaded) / float64(pr.total) * 100
+		logger.Info("Uploading %s (Part %d): %.2f%% (%d/%d bytes)", pr.name, pr.partNum, percentage, pr.uploaded, pr.total)
+		pr.lastLog = time.Now()
+	}
+	return n, err
+}
+
 // uploadPart uploads a single part and updates metadata
 func (c *Client) uploadPart(folderID, name string, reader io.Reader, replica *model.Replica, fragment *model.ReplicaFragment) (string, error) {
 	// Construct initial metadata (NativeIDs might be empty/partial)
@@ -670,8 +692,28 @@ func (c *Client) uploadPart(folderID, name string, reader io.Reader, replica *mo
 		return "", fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
+	// Wrap reader with progress logger
+	partNum := 1
+	totalSize := int64(0)
+	if fragment != nil {
+		partNum = fragment.FragmentNumber
+		totalSize = fragment.Size
+	} else {
+		totalSize = replica.Size
+	}
+
+	pr := &progressReader{
+		r:       reader,
+		total:   totalSize,
+		lastLog: time.Now(),
+		name:    name,
+		partNum: partNum,
+	}
+
+	logger.Info("Starting upload of %s (Part %d, Size: %d)", name, partNum, totalSize)
+
 	// Upload file
-	f, err := c.uploader.FromReader(c.ctx, name, reader)
+	f, err := c.uploader.FromReader(c.ctx, name, pr)
 	if err != nil {
 		return "", fmt.Errorf("failed to upload file: %w", err)
 	}

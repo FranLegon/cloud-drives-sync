@@ -251,7 +251,11 @@ func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
 	}
 	defer resp.Body.Close()
 
+	logger.InfoTagged([]string{"Google", c.user.Email}, "Download stream started for %s", fileID)
+
 	_, err = io.Copy(writer, resp.Body)
+
+	logger.InfoTagged([]string{"Google", c.user.Email}, "Download stream completed for %s", fileID)
 	return err
 }
 

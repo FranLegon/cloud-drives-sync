@@ -726,6 +726,12 @@ func (db *DB) DeleteReplicasForProvider(provider model.Provider) error {
 	return err
 }
 
+// DeleteReplica removes a specific replica by ID
+func (db *DB) DeleteReplica(id int64) error {
+	_, err := db.conn.Exec("DELETE FROM replicas WHERE id = ?", id)
+	return err
+}
+
 // DBExists checks if the database file exists
 func DBExists() bool {
 	dbPath := GetDBPath()

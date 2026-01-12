@@ -484,6 +484,7 @@ func cleanupCloudFiles(r *task.Runner) error {
 			}
 		} else if u.Provider == model.ProviderMicrosoft {
 			if mClient, ok := client.(*microsoft.Client); ok {
+				logger.Info("Cleaning Microsoft folder for %s...", u.Email)
 				if err := mClient.EmptySyncFolder(); err != nil {
 					logger.Warning("Failed to empty Microsoft folder for %s: %v", u.Email, err)
 				}
@@ -1063,6 +1064,15 @@ func runTestCase9(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		if err := mainClient.DeleteFile(googleNativeID); err != nil {
 			return fmt.Errorf("failed to delete from google: %w", err)
 		}
+		// Manually delete ALL Google replicas from DB because Google uses a shared folder model.
+		// Deleting the file from Main (Owner) removes it for everyone.
+		for _, r := range f6.Replicas {
+			if r.Provider == model.ProviderGoogle {
+				if err := db.DeleteReplica(r.ID); err != nil {
+					return fmt.Errorf("failed to delete Google replica from DB: %w", err)
+				}
+			}
+		}
 	}
 
 	// 2. Delete from Microsoft (Backup)
@@ -1077,6 +1087,15 @@ func runTestCase9(runner *task.Runner, mainUser *model.User, backups []*model.Us
 			logger.Info("Deleting test_6.txt from Microsoft Backup (%s) directly...", u.Email)
 			if err := msClient.DeleteFile(msNativeID); err != nil {
 				return fmt.Errorf("failed to delete from microsoft: %w", err)
+			}
+			// Manually delete replica from DB
+			for _, r := range f6.Replicas {
+				if r.Provider == u.Provider && (r.AccountID == u.Email || r.AccountID == u.Phone) {
+					if err := db.DeleteReplica(r.ID); err != nil {
+						return fmt.Errorf("failed to delete Microsoft replica from DB: %w", err)
+					}
+					break
+				}
 			}
 		}
 	}

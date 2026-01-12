@@ -354,35 +354,48 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
     *   **Process:**
         1.  **Cleanup (Unsafe Mode):** If `--safe` is not provided:
             *   Deletes `sync-cloud-drives`, all subfolders, and files from all accounts (main and backups, all providers).
-            *   Deletes local `metadata.db`.
+            *   Deletes local `metadata.db` and resets internal state to clean.
             *   Prompts user for confirmation before execution (unless `--force` is used).
         2.  **Metadata Initialization:** Re-initializes the database and runs `get-metadata`.
         3.  **Test Case 1 (Single File Main):**
-            *   Generates a small local file with random data (`test_1.txt`) and uploads it to the main account.
+            *   Generates `test_1.txt` locally and uploads it to the main account.
             *   Runs `free-main` to move it to backups.
             *   Runs `sync-providers` to ensure consistency.
-            *   Runs `get` requests and compares with `metadata.db` to verify updates.
+            *   Verifies file status in DB.
         4.  **Test Case 2 (Multi-Provider Backups):**
-            *   Generates `test_2.txt`, `test_3.txt`, and `test_4.txt` locally.
-            *   Uploads one to a random Google backup account, one to a random Telegram backup account, and one to a random Microsoft account.
-            *   Runs `sync-providers`.
-            *   Compares `get` request results with `metadata.db`.
-        5.  **Test Case 3 (Large File):**
-            *   Generates `test_5.txt` (6 GB random data) locally and uploads it.
-            *   Runs `sync-providers`.
-            *   Compares results.
+            *   Generates `test_2.txt` (Google), `test_3.txt` (Telegram), and `test_4.txt` (Microsoft) directly on backups.
+            *   Runs `sync-providers` to synchronize contents to all providers.
+            *   Verifies consistency.
+        5.  **Test Case 3 (Large File - 50MB):**
+            *   Generates `test_5.txt` (50 MB) locally and uploads it to main.
+            *   Runs `sync-providers` (streaming upload).
+            *   Verifies consistency.
         6.  **Test Case 4 (Folder & File Movements):**
-            *   Creates folders and moves `test_n.txt` files around in all providers.
+            *   Creates folders (`Folder_Main`, `Folder_MS`, `test-Folder_Google`).
+            *   Moves files (`test_move.txt`, `test_2.txt`, `test_3.txt`) into these folders.
             *   Runs `sync-providers`.
-            *   Compares results.
+            *   Verifies move propagation.
         7.  **Test Case 5 (Soft Deletion):**
-            *   Moves a different file in each provider to `sync-cloud-drives-aux/soft-deleted`.
+            *   Moves `test_5.txt` and others to `sync-cloud-drives-aux/soft-deleted`.
             *   Runs `sync-providers`.
-            *   Compares with expected results.
-        8.  **Test Case 6 (Hard Deletion):**
-            *   Deletes a file from `sync-cloud-drives-aux/soft-deleted`.
+            *   Verifies files are marked as soft-deleted everywhere (gone from active sync).
+        8.  **Test Case 7 (Very Large File - 3GB):**
+            *   Generates/streams `test_6.txt` (3 GB) to main (simulated via LimitReader).
+            *   Runs `sync-providers` to test fragmentation logic (Telegram) and large file handling (OneDrive/Google).
+            *   Verifies consistency.
+        9.  **Test Case 8 (Restore from Soft-Deleted):**
+            *   Moves `test_5.txt` from `soft-deleted` back to root folder on Main account.
             *   Runs `sync-providers`.
-            *   Compares with expected results (full deletes).
+            *   Verifies file is restored and active on all providers.
+        10. **Test Case 9 (Restore Fragmented File):**
+            *   Hard deletes `test_6.txt` (3GB) from Google (Main) and Microsoft (Backup) directly.
+             *  Deletes corresponding replicas from local DB to simulate data loss detection.
+            *   Runs `sync-providers`.
+            *   Verifies that the file is restored to Google and Microsoft using the fragments stored in Telegram.
+        11. **Test Case 10 (Hard Deletion):**
+            *   Deletes all files from `sync-cloud-drives-aux/soft-deleted`.
+            *   Runs `sync-providers`.
+            *   Verifies files are permanently removed from DB and Cloud.
 
 *   **`help`**
     *   Lists all available commands, their purpose, and example usage.
