@@ -10,6 +10,7 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
 	"github.com/FranLegon/cloud-drives-sync/internal/config"
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
+	"github.com/FranLegon/cloud-drives-sync/internal/microsoft"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
 )
 
@@ -353,11 +354,42 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 	logger.InfoTagged([]string{string(targetUser.Provider), targetUser.Email}, "Creating shortcut for %s...", sourceFile.Name)
 	shortcut, err := targetClient.CreateShortcut(parentID, sourceFile.Name, sourceReplica.NativeID, sourceDriveID)
 	if err != nil {
+		// Attempt to resolve cross-tenant/shared item reference issues for Microsoft
+		resolved := false
 		if targetUser.Provider == model.ProviderMicrosoft && (strings.Contains(err.Error(), "Invalid request") || strings.Contains(err.Error(), "invalidRequest")) {
-			logger.Warning("Shortcut creation failed for %s (likely unsupported cross-account operation): %v. Falling back to simple copy.", sourceFile.Name, err)
-			return r.copyFile(sourceFile, targetUser.Provider, sourceFile.Name)
+			if msClient, ok := targetClient.(*microsoft.Client); ok {
+				logger.Info("Shortcut failed. Searching for item in 'Shared with me' to retry (waiting for propagation)...")
+
+				var foundID, foundDriveID string
+				// Retry loop for propagation (max 10 seconds)
+				for i := 0; i < 5; i++ {
+					// Use NativeID or Name to find
+					fID, fDID, errSearch := msClient.FindSharedItem(sourceFile.Name, sourceReplica.NativeID)
+					if errSearch == nil && fID != "" {
+						foundID = fID
+						foundDriveID = fDID
+						break
+					}
+					time.Sleep(2 * time.Second)
+				}
+
+				if foundID != "" {
+					logger.Info("Found shared item! Retrying shortcut creation with ID: %s, DriveID: %s", foundID, foundDriveID)
+					shortcut, err = targetClient.CreateShortcut(parentID, sourceFile.Name, foundID, foundDriveID)
+					if err == nil {
+						resolved = true
+					}
+				}
+			}
 		}
-		return fmt.Errorf("failed to create shortcut: %w", err)
+
+		if !resolved {
+			if targetUser.Provider == model.ProviderMicrosoft && (strings.Contains(err.Error(), "Invalid request") || strings.Contains(err.Error(), "invalidRequest")) {
+				logger.Warning("Shortcut creation failed for %s (likely unsupported cross-account operation): %v. Falling back to simple copy.", sourceFile.Name, err)
+				return r.copyFile(sourceFile, targetUser.Provider, sourceFile.Name)
+			}
+			return fmt.Errorf("failed to create shortcut: %w", err)
+		}
 	}
 
 	// 6. Update Database with new replica (Shortcut)

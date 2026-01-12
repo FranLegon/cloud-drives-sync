@@ -275,26 +275,48 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 			break
 		}
 
-		req, err := http.NewRequest("PUT", uploadUrl, bytes.NewReader(buf[:n]))
-		if err != nil {
-			return nil, fmt.Errorf("failed to create request: %w", err)
-		}
-		req.ContentLength = int64(n)
-		start := offset
-		end := offset + int64(n) - 1
-		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+		var uploadErr error
+		maxRetries := 3
+		for i := 0; i < maxRetries; i++ {
+			if i > 0 {
+				logger.Info("Retrying chunk upload... (Attempt %d/%d)", i+1, maxRetries)
+				time.Sleep(2 * time.Second)
+			}
 
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("failed to upload chunk: %w", err)
-		}
+			req, err := http.NewRequest("PUT", uploadUrl, bytes.NewReader(buf[:n]))
+			if err != nil {
+				uploadErr = fmt.Errorf("failed to create request: %w", err)
+				break
+			}
+			req.ContentLength = int64(n)
+			start := offset
+			end := offset + int64(n) - 1
+			req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			body, _ := io.ReadAll(resp.Body)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				uploadErr = fmt.Errorf("failed to upload chunk: %w", err)
+				continue
+			}
+
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				uploadErr = fmt.Errorf("chunk upload failed status %s: %s", resp.Status, string(body))
+				// Retry on server errors
+				if resp.StatusCode >= 500 {
+					continue
+				}
+				break
+			}
 			resp.Body.Close()
-			return nil, fmt.Errorf("chunk upload failed status %s: %s", resp.Status, string(body))
+			uploadErr = nil
+			break
 		}
-		resp.Body.Close()
+
+		if uploadErr != nil {
+			return nil, uploadErr
+		}
 
 		offset += int64(n)
 	}
@@ -735,6 +757,59 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 // AcceptOwnership accepts ownership
 func (c *Client) AcceptOwnership(fileID string) error {
 	return errors.New("not implemented - OneDrive doesn't support ownership acceptance")
+}
+
+// FindSharedItem searches for a shared item in "Shared with me"
+func (c *Client) FindSharedItem(name string, originalID string) (string, string, error) {
+	ctx := context.Background()
+
+	// List items in Shared with me
+	// Note: This only retrieves the first page. For production, apply pagination.
+	// Using Drives().ByDriveId().SharedWithMe() instead of Me().Drive().SharedWithMe()
+	// because Me().Drive() builder might not expose it directly in this SDK version.
+	result, err := c.graphClient.Drives().ByDriveId(c.driveID).SharedWithMe().Get(ctx, nil)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to list shared items: %w", err)
+	}
+
+	for _, item := range result.GetValue() {
+		remote := item.GetRemoteItem()
+		if remote == nil {
+			continue
+		}
+
+		// Check by ID
+		if originalID != "" && remote.GetId() != nil && *remote.GetId() == originalID {
+			if remote.GetParentReference() != nil && remote.GetParentReference().GetDriveId() != nil {
+				return *remote.GetId(), *remote.GetParentReference().GetDriveId(), nil
+			}
+			return *remote.GetId(), "", nil
+		}
+
+		// Check by Name (fallback)
+		itemName := ""
+		if item.GetName() != nil {
+			itemName = *item.GetName()
+		}
+		remoteName := ""
+		if remote.GetName() != nil {
+			remoteName = *remote.GetName()
+		}
+
+		if name != "" && (itemName == name || remoteName == name) {
+			targetID := ""
+			if remote.GetId() != nil {
+				targetID = *remote.GetId()
+			}
+			targetDriveID := ""
+			if remote.GetParentReference() != nil && remote.GetParentReference().GetDriveId() != nil {
+				targetDriveID = *remote.GetParentReference().GetDriveId()
+			}
+			return targetID, targetDriveID, nil
+		}
+	}
+
+	return "", "", nil
 }
 
 // GetUserEmail returns the user's email
