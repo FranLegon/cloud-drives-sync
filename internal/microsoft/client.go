@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strconv"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -23,8 +25,11 @@ import (
 )
 
 const (
-	syncFolderPrefix = "sync-cloud-drives"
+	syncFolderPrefix      = "sync-cloud-drives"
+	FakeShortcutExtension = ".shortcut"
 )
+
+var fakeShortcutRegex = regexp.MustCompile(`^(.*)\.sz-(\d+)\.shortcut$`)
 
 // Client represents a Microsoft OneDrive client
 type Client struct {
@@ -161,45 +166,57 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			continue // It's a regular folder
 		}
 
+		itemName := *item.GetName()
+		itemSize := *item.GetSize()
 		modTime := time.Now()
 		if item.GetLastModifiedDateTime() != nil {
 			modTime = *item.GetLastModifiedDateTime()
 		}
 
-		calculatedID := fmt.Sprintf("%s-%d", *item.GetName(), *item.GetSize())
+		var nativeHash string
+
+		// Check for custom placeholder shortcut
+		if matches := fakeShortcutRegex.FindStringSubmatch(itemName); len(matches) == 3 {
+			itemName = matches[1]
+			if parsedSize, err := strconv.ParseInt(matches[2], 10, 64); err == nil {
+				itemSize = parsedSize
+			}
+			nativeHash = model.NativeHashShortcut
+		} else {
+			// Get hashes for regular files/shortcuts
+			var fileFacet models.Fileable
+			if isShortcut {
+				fileFacet = item.GetRemoteItem().GetFile()
+			} else {
+				fileFacet = item.GetFile()
+			}
+
+			if fileFacet != nil && fileFacet.GetHashes() != nil {
+				hashes := fileFacet.GetHashes()
+				if hashes.GetSha1Hash() != nil {
+					nativeHash = *hashes.GetSha1Hash()
+				}
+			}
+		}
+
+		calculatedID := fmt.Sprintf("%s-%d", itemName, itemSize)
 
 		file := &model.File{
 			ID:           *item.GetId(), // Will be replaced with UUID in database layer
-			Name:         *item.GetName(),
-			Size:         *item.GetSize(),
+			Name:         itemName,
+			Size:         itemSize,
 			Path:         "", // Path will be set by caller
 			CalculatedID: calculatedID,
 			ModTime:      modTime,
 			Status:       "active",
 		}
 
-		// Get hashes
-		var nativeHash string
-		var fileFacet models.Fileable
-		if isShortcut {
-			fileFacet = item.GetRemoteItem().GetFile()
-		} else {
-			fileFacet = item.GetFile()
-		}
-
-		if fileFacet != nil && fileFacet.GetHashes() != nil {
-			hashes := fileFacet.GetHashes()
-			if hashes.GetSha1Hash() != nil {
-				nativeHash = *hashes.GetSha1Hash()
-			}
-		}
-
 		replica := &model.Replica{
 			FileID:       "", // Will be set when linking to logical file
 			CalculatedID: calculatedID,
 			Path:         "", // Path will be set by caller
-			Name:         *item.GetName(),
-			Size:         *item.GetSize(),
+			Name:         itemName,
+			Size:         itemSize,
 			Provider:     model.ProviderMicrosoft,
 			AccountID:    c.user.Email,
 			NativeID:     *item.GetId(),
@@ -883,4 +900,30 @@ func (c *Client) CreateShortcut(parentID, name, targetID, targetDriveID string) 
 	}
 
 	return file, nil
+}
+
+// CreateFakeShortcut creates a placeholder file to act as a shortcut
+func (c *Client) CreateFakeShortcut(parentID, name string, size int64) (*model.File, error) {
+	placeholderName := fmt.Sprintf("%s.sz-%d%s", name, size, FakeShortcutExtension)
+
+	// Create an empty file
+	uploadedFile, err := c.UploadFile(parentID, placeholderName, bytes.NewBufferString(""), 0)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to "Fake" mode for DB consistency with ListFiles logic
+	uploadedFile.Name = name
+	uploadedFile.Size = size
+	uploadedFile.CalculatedID = fmt.Sprintf("%s-%d", name, size)
+
+	// Make sure Replicas are also updated
+	if len(uploadedFile.Replicas) > 0 {
+		uploadedFile.Replicas[0].Name = name
+		uploadedFile.Replicas[0].Size = size
+		uploadedFile.Replicas[0].CalculatedID = uploadedFile.CalculatedID
+		uploadedFile.Replicas[0].NativeHash = model.NativeHashShortcut
+	}
+
+	return uploadedFile, nil
 }

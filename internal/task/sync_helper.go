@@ -145,8 +145,20 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		return fmt.Errorf("file has no replicas")
 	}
 
-	// Use the first replica as the source
-	sourceReplica := masterFile.Replicas[0]
+	// Filter viable replicas (ignore shortcuts)
+	var viableReplicas []*model.Replica
+	for _, rep := range masterFile.Replicas {
+		if rep.NativeHash != model.NativeHashShortcut {
+			viableReplicas = append(viableReplicas, rep)
+		}
+	}
+
+	if len(viableReplicas) == 0 {
+		return fmt.Errorf("file has no viable replicas (only shortcuts found)")
+	}
+
+	// Use first viable replica
+	sourceReplica := viableReplicas[0]
 
 	// Get source client
 	var email, phone string
@@ -385,10 +397,19 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 
 		if !resolved {
 			if targetUser.Provider == model.ProviderMicrosoft && (strings.Contains(err.Error(), "Invalid request") || strings.Contains(err.Error(), "invalidRequest")) {
-				logger.Warning("Shortcut creation failed for %s (likely unsupported cross-account operation): %v. Falling back to simple copy.", sourceFile.Name, err)
-				return r.copyFile(sourceFile, targetUser.Provider, sourceFile.Name)
+				logger.Warning("Shortcut creation failed for %s (likely unsupported cross-account operation): %v. Falling back to placeholder creation.", sourceFile.Name, err)
+				if msClient, ok := targetClient.(*microsoft.Client); ok {
+					shortcut, err = msClient.CreateFakeShortcut(parentID, sourceFile.Name, sourceFile.Size)
+					if err != nil {
+						return fmt.Errorf("failed to create fake shortcut: %w", err)
+					}
+					// Successfully created fake shortcut, proceed to DB update
+				} else {
+					return fmt.Errorf("failed to cast to Microsoft client for fake shortcut creation")
+				}
+			} else {
+				return fmt.Errorf("failed to create shortcut: %w", err)
 			}
-			return fmt.Errorf("failed to create shortcut: %w", err)
 		}
 	}
 

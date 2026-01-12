@@ -11,6 +11,8 @@ const (
 	ProviderGoogle    Provider = "Google"
 	ProviderMicrosoft Provider = "Microsoft"
 	ProviderTelegram  Provider = "Telegram"
+
+	NativeHashShortcut = "SHORTCUT"
 )
 
 // GoogleClient represents Google API client credentials
