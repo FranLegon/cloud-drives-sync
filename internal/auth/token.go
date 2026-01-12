@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"golang.org/x/oauth2"
 )
@@ -12,6 +13,7 @@ type TokenSource struct {
 	config       *oauth2.Config
 	refreshToken string
 	currentToken *oauth2.Token
+	mu           sync.Mutex
 }
 
 // NewTokenSource creates a new TokenSource
@@ -24,6 +26,9 @@ func NewTokenSource(config *oauth2.Config, refreshToken string) *TokenSource {
 
 // Token returns a valid token, refreshing if necessary
 func (ts *TokenSource) Token() (*oauth2.Token, error) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+
 	if ts.currentToken != nil && ts.currentToken.Valid() {
 		return ts.currentToken, nil
 	}
@@ -45,6 +50,8 @@ func (ts *TokenSource) Token() (*oauth2.Token, error) {
 
 // GetRefreshToken returns the current refresh token
 func (ts *TokenSource) GetRefreshToken() string {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
 	if ts.currentToken != nil && ts.currentToken.RefreshToken != "" {
 		return ts.currentToken.RefreshToken
 	}

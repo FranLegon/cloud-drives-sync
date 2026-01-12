@@ -37,13 +37,13 @@ type Client struct {
 // NewClient creates a new Google Drive client
 func NewClient(user *model.User, config *oauth2.Config) (*Client, error) {
 	tokenSource := auth.NewTokenSource(config, user.RefreshToken)
-	token, err := tokenSource.Token()
-	if err != nil {
+	// Ensure token is valid and refreshed if needed
+	if _, err := tokenSource.Token(); err != nil {
 		return nil, fmt.Errorf("failed to get token: %w", err)
 	}
 
 	ctx := context.Background()
-	service, err := drive.NewService(ctx, option.WithTokenSource(oauth2.StaticTokenSource(token)))
+	service, err := drive.NewService(ctx, option.WithTokenSource(tokenSource))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create drive service: %w", err)
 	}
@@ -455,19 +455,10 @@ func (c *Client) deleteContentsR(targetID string) error {
 		}
 	}
 
-	// 5. Delete the target folder itself (if not root check? No, always try if we are here)
-	// We don't have the owner info for targetID here readily available unless we fetch it.
-	// But usually we own the folder we are cleaning.
-	// We'll try to delete it.
-	// Note: EmptySyncFolder calls this on root.
-	if err := c.DeleteFile(targetID); err != nil {
-		// Tolerable if we don't own the root or if it's already gone
-		// Start-ignore-warning if it's just permission issue on root?
-		// We'll log it.
-		// logger.InfoTagged([]string{"Google", c.user.Email}, "Attempted to delete container %s: %v", targetID, err)
-	} else {
-		logger.InfoTagged([]string{"Google", c.user.Email}, "Deleted Container %s", targetID)
-	}
+	// 5. Delete the target folder itself - UPDATED: We don't delete the target folder here.
+	// This function is "delete contents of".
+	// The caller is responsible for deleting the target folder if desired.
+	// This prevents the sync folder root from being deleted/trashed, and fixes the double-delete 404 error in recursion.
 
 	return nil
 }

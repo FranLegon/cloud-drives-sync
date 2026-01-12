@@ -39,12 +39,12 @@ type Client struct {
 // NewClient creates a new Microsoft OneDrive client
 func NewClient(user *model.User, config *oauth2.Config) (*Client, error) {
 	tokenSource := auth.NewTokenSource(config, user.RefreshToken)
-	token, err := tokenSource.Token()
-	if err != nil {
+	// Ensure token is valid and refreshed if needed
+	if _, err := tokenSource.Token(); err != nil {
 		return nil, fmt.Errorf("failed to get token: %w", err)
 	}
 
-	cred := &staticTokenCredential{token: token}
+	cred := &oauthTokenCredential{tokenSource: tokenSource}
 	graphClient, err := msgraphsdk.NewGraphServiceClientWithCredentials(cred, []string{})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create graph client: %w", err)
@@ -64,14 +64,19 @@ func NewClient(user *model.User, config *oauth2.Config) (*Client, error) {
 	return client, nil
 }
 
-type staticTokenCredential struct {
-	token *oauth2.Token
+type oauthTokenCredential struct {
+	tokenSource *auth.TokenSource
 }
 
-func (s *staticTokenCredential) GetToken(ctx context.Context, opts policy.TokenRequestOptions) (azcore.AccessToken, error) {
+func (s *oauthTokenCredential) GetToken(ctx context.Context, opts policy.TokenRequestOptions) (azcore.AccessToken, error) {
+	token, err := s.tokenSource.Token()
+	if err != nil {
+		return azcore.AccessToken{}, fmt.Errorf("failed to get token: %w", err)
+	}
+
 	return azcore.AccessToken{
-		Token:     s.token.AccessToken,
-		ExpiresOn: s.token.Expiry,
+		Token:     token.AccessToken,
+		ExpiresOn: token.Expiry,
 	}, nil
 }
 
