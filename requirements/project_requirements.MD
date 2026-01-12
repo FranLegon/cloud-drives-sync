@@ -22,6 +22,7 @@ The application must only interact with files and folders contained within speci
 - A single folder named `sync-cloud-drives` resides in each backup account.
 - Each backup account owns its own `sync-cloud-drives` folder and all subfolders within it.
 - Files are distributed across backup accounts. To maintain a consistent directory structure across all accounts, if a file is owned by Account A, Account B will contain a shortcut to that file in the corresponding location within its own `sync-cloud-drives` structure.
+- **Fallback for Shortcuts:** If creating a native OneDrive shortcut fails (e.g. due to cross-tenant permission issues or API limitations), the system creates a "Fake Shortcut" (placeholder file) named with the pattern `filename.ext.sz-<size>.shortcut`. This 0-byte placeholder carries existence and metadata info and is treated as a valid shortcut by the system to prevent data duplication.
 - Folder owner is always the file owner in OneDrive.
 
 **Telegram:**
@@ -345,13 +346,16 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
     *   **Goal:** Validate system functionality and builds after code changes.
     *   **Flags:**
         *   `--safe`: If present, skips the initial deletion of cloud files and local metadata database.
+        *   `--force`: Skips confirmation prompt.
+        *   `--stop-on-error`, `-s`: Stop test execution immediately if an error occurs.
+        *   `--test-case`, `-t`: Run specific test case and its dependencies (0 = all).
         *   `--password`: Master password.
         *   `--help`: Help information.
     *   **Process:**
         1.  **Cleanup (Unsafe Mode):** If `--safe` is not provided:
             *   Deletes `sync-cloud-drives`, all subfolders, and files from all accounts (main and backups, all providers).
             *   Deletes local `metadata.db`.
-            *   Prompts user for confirmation before execution.
+            *   Prompts user for confirmation before execution (unless `--force` is used).
         2.  **Metadata Initialization:** Re-initializes the database and runs `get-metadata`.
         3.  **Test Case 1 (Single File Main):**
             *   Generates a small local file with random data (`test_1.txt`) and uploads it to the main account.
@@ -413,7 +417,8 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 - Each backup account owns its own `sync-cloud-drives` folder.
 - Folder owner is always the file owner.
 - Consistency is maintained via shortcuts. If Account A owns a file, Account B holds a shortcut to it.
-- Each backup account effectively has a full view of the directory structure via a mix of owned files and shortcuts.
+- **Placeholder Mechanism:** If the system cannot create a native shortcut (common in cross-tenant scenarios), it falls back to creating a 0-byte placeholder file with a specific extension (`.shortcut`) that encodes the original file's size in its name (`.sz-<size>.shortcut`). The system reads these placeholders as valid replicas/shortcuts within the metadata.
+- Each backup account effectively has a full view of the directory structure via a mix of owned files, native shortcuts and placeholder shortcuts.
 
 **Telegram:**
 - Subject to Telegram API file size limits and rate limits.
