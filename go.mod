@@ -8,8 +8,8 @@ require (
 	github.com/gotd/td v0.136.0
 	github.com/manifoldco/promptui v0.9.0
 	github.com/microsoftgraph/msgraph-sdk-go v1.92.0
+	github.com/mutecomm/go-sqlcipher/v4 v4.4.2
 	github.com/spf13/cobra v1.8.1
-	github.com/tursodatabase/go-libsql v0.0.0-20251219133454-43644db490ff
 	golang.org/x/crypto v0.45.0
 	golang.org/x/oauth2 v0.21.0
 	google.golang.org/api v0.187.0
@@ -20,7 +20,6 @@ require (
 	cloud.google.com/go/auth/oauth2adapt v0.2.2 // indirect
 	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.11.2 // indirect
-	github.com/antlr4-go/antlr/v4 v4.13.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e // indirect
 	github.com/coder/websocket v1.8.14 // indirect
@@ -43,7 +42,6 @@ require (
 	github.com/gotd/neo v0.1.5 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/klauspost/compress v1.18.2 // indirect
-	github.com/libsql/sqlite-antlr4-parser v0.0.0-20240327125255-dbf53b6cbf06 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/microsoft/kiota-abstractions-go v1.9.3 // indirect

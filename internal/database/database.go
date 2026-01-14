@@ -3,13 +3,14 @@ package database
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
 	"github.com/google/uuid"
-	"github.com/tursodatabase/go-libsql"
+	_ "github.com/mutecomm/go-sqlcipher/v4"
 )
 
 const (
@@ -31,21 +32,19 @@ func GetDBPath() string {
 	return filepath.Join(filepath.Dir(execPath), DBFileName)
 }
 
-// Open opens a connection to the encrypted libSQL database
+// Open opens a connection to the encrypted SQLite database
 func Open(masterPassword string) (*DB, error) {
 	dbPath := GetDBPath()
 
-	// Create libSQL connector with encryption
-	connector, err := libsql.NewEmbeddedReplicaConnector(
-		dbPath,
-		"", // primaryUrl is empty for local-only database
-		libsql.WithEncryption(masterPassword),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create libSQL connector: %w", err)
-	}
+	// SQLCipher connection string with _pragma_key parameter
+	// This is the proper way to set the encryption key for go-sqlcipher
+	// _pragma_key is used instead of _key to ensure the key is set via PRAGMA before any DB access
+	connStr := fmt.Sprintf("file:%s?_pragma_key=%s", dbPath, url.QueryEscape(masterPassword))
 
-	conn := sql.OpenDB(connector)
+	conn, err := sql.Open("sqlite3", connStr)
+	if err != nil {
+		return nil, err
+	}
 
 	// Verify access by querying sqlite_master
 	// This will fail if the key is wrong or the database is corrupted
@@ -744,21 +743,17 @@ func DBExists() bool {
 func CreateDB(masterPassword string) error {
 	dbPath := GetDBPath()
 
-	// Create libSQL connector with encryption
-	connector, err := libsql.NewEmbeddedReplicaConnector(
-		dbPath,
-		"", // primaryUrl is empty for local-only database
-		libsql.WithEncryption(masterPassword),
-	)
+	// Create database file with SQLCipher encryption using _pragma_key parameter
+	// This ensures the key is set via PRAGMA key before any DB operations
+	connStr := fmt.Sprintf("file:%s?_pragma_key=%s", dbPath, url.QueryEscape(masterPassword))
+	conn, err := sql.Open("sqlite3", connStr)
 	if err != nil {
-		return fmt.Errorf("failed to create libSQL connector: %w", err)
+		return err
 	}
-
-	conn := sql.OpenDB(connector)
 	defer conn.Close()
 
 	// Create a test table to initialize the encrypted database
-	// This forces libSQL to write the encrypted header
+	// This forces SQLCipher to write the encrypted header
 	if _, err := conn.Exec("CREATE TABLE IF NOT EXISTS _init (id INTEGER PRIMARY KEY)"); err != nil {
 		return fmt.Errorf("failed to initialize encrypted database: %w", err)
 	}
