@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
-	"github.com/FranLegon/cloud-drives-sync/internal/config"
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/FranLegon/cloud-drives-sync/internal/microsoft"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
@@ -16,21 +15,7 @@ import (
 
 // getDestinationClient returns the best client for a provider to upload a file
 func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.CloudClient, *model.User, error) {
-	// For Google, always try Main account first
-	if provider == model.ProviderGoogle {
-		mainUser := config.GetMainAccount(r.config, model.ProviderGoogle)
-		if mainUser != nil {
-			client, err := r.GetOrCreateClient(mainUser)
-			if err == nil {
-				quota, err := client.GetQuota()
-				if err == nil && (quota.Total-quota.Used) > size {
-					return client, mainUser, nil
-				}
-			}
-		}
-	}
-
-	// For others (or if Google Main is full), find a backup account with space
+	// Find a backup account with space. Start with maxFree = -1.
 	var bestUser *model.User
 	var bestClient api.CloudClient
 	var maxFree int64 = -1
@@ -41,8 +26,8 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 			continue
 		}
 
-		// Skip main if we already tried it (for Google)
-		if provider == model.ProviderGoogle && user.IsMain {
+		// Never upload to Main account
+		if user.IsMain {
 			continue
 		}
 

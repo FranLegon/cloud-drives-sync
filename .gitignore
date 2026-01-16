@@ -6,10 +6,13 @@ cloud-drives-sync
 *.so
 *.dylib
 
-# Test binary
+# Test logs
 *.test
 test.log
 *.log
+logs/*
+logs/**
+logs
 
 # Output of the go coverage tool
 *.out

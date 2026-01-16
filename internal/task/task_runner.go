@@ -840,7 +840,13 @@ func (r *Runner) SyncProviders() error {
 			continue
 		}
 
-		// Find aux folder (root -> sync-cloud-drives-aux)
+		// Find aux folder (syncFolderID -> sync-cloud-drives-aux)
+		syncFolderID, err := client.GetSyncFolderID()
+		if err != nil {
+			logger.Warning("Failed to get sync folder for %s: %v", user.Email, err)
+			continue
+		}
+
 		findFolder := func(parentID, name string) (string, error) {
 			folders, err := client.ListFolders(parentID)
 			if err != nil {
@@ -854,7 +860,7 @@ func (r *Runner) SyncProviders() error {
 			return "", fmt.Errorf("not found")
 		}
 
-		auxID, err := findFolder("root", "sync-cloud-drives-aux")
+		auxID, err := findFolder(syncFolderID, "sync-cloud-drives-aux")
 		if err != nil {
 			continue
 		}

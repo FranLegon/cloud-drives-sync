@@ -837,7 +837,7 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	logger.Info("\n--- Test Case 5: Soft Deletion ---")
 
 	getSoftID := func(c api.CloudClient, rootID string) (string, error) {
-		aux, err := getOrCreateFolder(c, "root", "sync-cloud-drives-aux")
+		aux, err := getOrCreateFolder(c, rootID, "sync-cloud-drives-aux")
 		if err != nil {
 			return "", err
 		}
@@ -992,7 +992,7 @@ func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	}
 
 	// Locate current test_5.txt in sync-cloud-drives-aux/soft-deleted
-	auxID, err := findFolderID(mainClient, "root", "sync-cloud-drives-aux")
+	auxID, err := findFolderID(mainClient, mainSyncID, "sync-cloud-drives-aux")
 	if err != nil {
 		return err
 	}
@@ -1175,7 +1175,7 @@ func runTestCase10(runner *task.Runner, mainUser *model.User, backups []*model.U
 	logger.Info("\n--- Test Case 10: Hard Deletion ---")
 
 	getSoftID := func(c api.CloudClient, rootID string) (string, error) {
-		aux, err := getOrCreateFolder(c, "root", "sync-cloud-drives-aux")
+		aux, err := getOrCreateFolder(c, rootID, "sync-cloud-drives-aux")
 		if err != nil {
 			return "", err
 		}
