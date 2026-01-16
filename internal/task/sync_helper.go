@@ -214,11 +214,29 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 			}
 		}()
 
-		if err := sourceClient.DownloadFile(sourceReplica.NativeID, pw); err != nil {
-			// Ignore closed pipe error (happens if upload is skipped or finishes early)
-			if err != io.ErrClosedPipe && !strings.Contains(err.Error(), "closed pipe") {
-				logger.Warning("Download error in pipe: %v", err)
-				errChan <- err
+		if sourceReplica.Fragmented {
+			if len(sourceReplica.Fragments) == 0 {
+				errChan <- fmt.Errorf("replica is fragmented but has no fragments")
+				return
+			}
+			// Fragments are ordered by the DB query (ORDER BY fragment_number ASC)
+			for _, frag := range sourceReplica.Fragments {
+				if err := sourceClient.DownloadFile(frag.NativeFragmentID, pw); err != nil {
+					// Ignore closed pipe error (happens if upload is skipped or finishes early)
+					if err != io.ErrClosedPipe && !strings.Contains(err.Error(), "closed pipe") {
+						logger.Warning("Download error in pipe (fragment %d): %v", frag.FragmentNumber, err)
+						errChan <- err
+					}
+					return
+				}
+			}
+		} else {
+			if err := sourceClient.DownloadFile(sourceReplica.NativeID, pw); err != nil {
+				// Ignore closed pipe error (happens if upload is skipped or finishes early)
+				if err != io.ErrClosedPipe && !strings.Contains(err.Error(), "closed pipe") {
+					logger.Warning("Download error in pipe: %v", err)
+					errChan <- err
+				}
 			}
 		}
 		close(errChan)

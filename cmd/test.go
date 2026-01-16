@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"math/big"
@@ -26,6 +28,7 @@ var testSafe bool
 var testForce bool
 var testStopOnError bool
 var testCase int
+var test6Hash string
 
 var testCmd = &cobra.Command{
 	Use:   "test",
@@ -935,12 +938,17 @@ func runTestCase7(runner *task.Runner, mainUser *model.User) error {
 	}
 
 	logger.Info("Uploading %s to Main Account (Streamed)...", test6Name)
-	// Using io.LimitReader(rand.Reader, ...) might be slow for 3GB.
-	// We'll trust the user advice "exactly like Test Case 3" but note the speed implications.
-	if _, err := mainClient.UploadFile(mainSyncID, test6Name, io.LimitReader(rand.Reader, test6Size), test6Size); err != nil {
+	// Calculate hash while uploading
+	hasher := sha256.New()
+	reader := io.LimitReader(rand.Reader, test6Size)
+	teeReader := io.TeeReader(reader, hasher)
+
+	if _, err := mainClient.UploadFile(mainSyncID, test6Name, teeReader, test6Size); err != nil {
 		logger.Error("Upload failed: %v", err)
 		return fmt.Errorf("upload very big file failed: %w", err)
 	}
+	test6Hash = hex.EncodeToString(hasher.Sum(nil))
+	logger.Info("Test file hash calculated: %s", test6Hash)
 
 	logger.Info("Updating Metadata...")
 	if err := runner.GetMetadata(); err != nil {
@@ -1127,6 +1135,37 @@ func runTestCase9(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		return fmt.Errorf("test_6.txt was not restored to Google Main")
 	} else {
 		logger.Info("Verified: test_6.txt is active on Google.")
+	}
+
+	// Verify Hash
+	if test6Hash != "" {
+		logger.Info("Verifying restored file integrity...")
+
+		// Find the new Google replica
+		var googleReplica *model.Replica
+		for _, r := range f6.Replicas {
+			if r.Provider == model.ProviderGoogle && r.Status == "active" {
+				googleReplica = r
+				break
+			}
+		}
+
+		if googleReplica == nil {
+			return fmt.Errorf("active Google replica not found for verification")
+		}
+
+		hasher := sha256.New()
+		if err := mainClient.DownloadFile(googleReplica.NativeID, hasher); err != nil {
+			return fmt.Errorf("failed to download restored file for verification: %w", err)
+		}
+
+		restoredHash := hex.EncodeToString(hasher.Sum(nil))
+		if restoredHash != test6Hash {
+			return fmt.Errorf("hash mismatch! Original: %s, Restored: %s", test6Hash, restoredHash)
+		}
+		logger.Info("File integrity verified: Hashes match.")
+	} else {
+		logger.Warning("Skipping hash verification because original hash is missing (Test Case 7 not run in this session?)")
 	}
 
 	return nil

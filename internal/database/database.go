@@ -563,6 +563,18 @@ func (db *DB) GetReplicas(fileID string) ([]*model.Replica, error) {
 		r.ModTime = time.Unix(modTime, 0)
 		replicas = append(replicas, r)
 	}
+
+	// Load fragments for fragmented replicas
+	for _, r := range replicas {
+		if r.Fragmented {
+			fragments, err := db.GetReplicaFragments(r.ID)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get fragments for replica %d: %w", r.ID, err)
+			}
+			r.Fragments = fragments
+		}
+	}
+
 	return replicas, nil
 }
 
