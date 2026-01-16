@@ -869,6 +869,18 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	softMain, _ := getSoftID(mainClient, mainSyncID)
 	moveFileWrapper(mainClient, mainUser, "/test_5.txt", softMain)
 
+	// Move test_4.txt to soft-deleted in Google (Backup or Main)
+	u4, err := getUserForReplica(db, "/test_4.txt", model.ProviderGoogle, cfg.Users)
+	if err == nil {
+		c4, _ := runner.GetOrCreateClient(u4)
+		sid4, _ := c4.GetSyncFolderID()
+		softG4, _ := getSoftID(c4, sid4)
+		logger.Info("Moving /test_4.txt to soft-deleted on Google (%s)...", u4.Email)
+		moveFileWrapper(c4, u4, "/test_4.txt", softG4)
+	} else {
+		logger.Warning("Could not find Google replica for /test_4.txt for soft-deletion test")
+	}
+
 	// MS
 	microsoftBackups := filterUsers(backups, model.ProviderMicrosoft)
 	if len(microsoftBackups) > 0 {
@@ -912,6 +924,9 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		return nil
 	}
 	if err := verifyGone("/test_5.txt"); err != nil {
+		return err
+	}
+	if err := verifyGone("/test_4.txt"); err != nil {
 		return err
 	}
 	if err := verifyGone("/Folder_MS/test_2.txt"); err != nil {
@@ -1041,6 +1056,69 @@ func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	f, _ := db.GetFileByPath("/test_5.txt")
 	if f.Status != "active" {
 		return fmt.Errorf("test_5.txt status is %s, expected active", f.Status)
+	}
+
+	// Verify test_4.txt is NOT restored (still soft-deleted/deleted)
+	f4, _ := db.GetFileByPath("/test_4.txt")
+	if f4 != nil && f4.Status == "active" {
+		return fmt.Errorf("test_4.txt should still be soft-deleted/inactive but is %s", f4.Status)
+	}
+
+	// Verify test_4.txt is physically in soft-deleted for all providers (cloud check)
+	logger.Info("Verifying test_4.txt persisted in soft-deleted on all providers...")
+	allUsers := append([]*model.User{mainUser}, backups...)
+	for _, u := range allUsers {
+		if u.Provider == model.ProviderTelegram {
+			continue // Telegram handles soft-delete by deleting msg
+		}
+
+		client, err := runner.GetOrCreateClient(u)
+		if err != nil {
+			return err
+		}
+
+		sid, err := client.GetSyncFolderID()
+		if err != nil {
+			return err
+		}
+
+		// 1. Verify NOT in root
+		rootFiles, err := client.ListFiles(sid)
+		if err != nil {
+			return err
+		}
+		for _, f := range rootFiles {
+			if f.Name == "test_4.txt" {
+				return fmt.Errorf("test_4.txt found in root of %s (should be soft-deleted)", u.Email)
+			}
+		}
+
+		// 2. Verify IN soft-deleted
+		auxID, err := findFolderID(client, sid, "sync-cloud-drives-aux")
+		if err != nil {
+			// If aux doesn't exist, that's definitely a fail for test_4.txt specific check
+			return fmt.Errorf("aux folder missing for %s: %w", u.Email, err)
+		}
+
+		softID, err := findFolderID(client, auxID, "soft-deleted")
+		if err != nil {
+			return fmt.Errorf("soft-deleted folder missing for %s: %w", u.Email, err)
+		}
+
+		softFiles, err := client.ListFiles(softID)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, f := range softFiles {
+			if f.Name == "test_4.txt" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("test_4.txt missing from soft-deleted in %s", u.Email)
+		}
 	}
 
 	return nil
