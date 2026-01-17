@@ -10,12 +10,11 @@ var syncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Run full synchronization workflow",
 	Long: `Runs a complete synchronization sequence:
-1. quota: Check storage quotas
-2. get-metadata: Update local metadata
-3. free-main: Transfer files from main account to backup
-4. remove-duplicates-unsafe (or remove-duplicates if --safe): Clean up duplicates
-5. verbose sync-providers: Synchronize files across providers
-6. balance-storage: Re-distribute files to balance usage across backup accounts`,
+1. quota: Check storage quotas (and update metadata)
+2. free-main: Transfer files from main account to backup
+3. remove-duplicates-unsafe (or remove-duplicates if --safe): Clean up duplicates
+4. verbose sync-providers: Synchronize files across providers
+5. balance-storage: Re-distribute files to balance usage across backup accounts`,
 	RunE: runSync,
 }
 
@@ -38,25 +37,19 @@ func runSync(cmd *cobra.Command, args []string) error {
 // SyncAction runs the full synchronization pipeline
 func SyncAction(runner *task.Runner, isSafeMode bool) error {
 	// 1. Quota
-	logger.Info("[Step 1/6] Checking Quota...")
+	logger.Info("[Step 1/5] Checking Quota...")
 	if err := QuotaAction(runner); err != nil {
 		return err
 	}
 
-	// 2. Get Metadata (The ONLY time we need to run full sync)
-	logger.Info("[Step 2/6] Updating Metadata...")
-	if err := runner.GetMetadata(); err != nil {
-		return err
-	}
-
-	// 3. Free Main
-	logger.Info("[Step 3/6] Freeing Main Account...")
+	// 2. Free Main
+	logger.Info("[Step 2/5] Freeing Main Account...")
 	if err := runner.FreeMain(); err != nil {
 		return err
 	}
 
-	// 4. Remove Duplicates
-	logger.Info("[Step 4/6] Removing Duplicates...")
+	// 3. Remove Duplicates
+	logger.Info("[Step 3/5] Removing Duplicates...")
 	if isSafeMode {
 		// If safe mode, run interactive remove-duplicates (with false for metadata update)
 		if err := RemoveDuplicatesAction(runner, false); err != nil {
@@ -69,15 +62,15 @@ func SyncAction(runner *task.Runner, isSafeMode bool) error {
 		}
 	}
 
-	// 5. Sync Providers
-	logger.Info("[Step 5/6] Syncing Providers...")
+	// 4. Sync Providers
+	logger.Info("[Step 4/5] Syncing Providers...")
 	// Pass false to skip redundant metadata updates
 	if err := SyncProvidersAction(runner, false); err != nil {
 		return err
 	}
 
-	// 6. Balance Storage
-	logger.Info("[Step 6/6] Balancing Storage...")
+	// 5. Balance Storage
+	logger.Info("[Step 5/5] Balancing Storage...")
 	if err := runner.BalanceStorage(); err != nil {
 		return err
 	}
