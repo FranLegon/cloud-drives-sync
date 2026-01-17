@@ -23,6 +23,7 @@ The application must only interact with files and folders contained within speci
 - Each backup account owns its own `sync-cloud-drives` folder and all subfolders within it.
 - Files are distributed across backup accounts. To maintain a consistent directory structure across all accounts, if a file is owned by Account A, Account B will contain a shortcut to that file in the corresponding location within its own `sync-cloud-drives` structure.
 - **Fallback for Shortcuts:** If creating a native OneDrive shortcut fails (e.g. due to cross-tenant permission issues or API limitations), the system creates a "Fake Shortcut" (placeholder file) named with the pattern `filename.ext.sz-<size>.shortcut`. This 0-byte placeholder carries existence and metadata info and is treated as a valid shortcut by the system to prevent data duplication.
+- **Folder Synchronization:** The system ensures that the complete directory structure is mirrored across all backup accounts (except Telegram). This includes empty folders or folders used only for hierarchy. If a folder exists in the Main account (Google) or in the Database `folders` table, it will be created in the corresponding path in Microsoft backup accounts.
 - Folder owner is always the file owner in OneDrive.
 
 **Telegram:**

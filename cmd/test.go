@@ -193,6 +193,14 @@ func runTest(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	if shouldRun(6) {
+		if err := runTestCase6(runner, mainUser, backups); err != nil {
+			return err
+		}
+		if err := testMetadata(runner); err != nil {
+			return err
+		}
+	}
 	if shouldRun(7) {
 		if err := runTestCase7(runner, mainUser); err != nil {
 			return err
@@ -935,6 +943,179 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	if err := verifyGone("/Folder_Google/test_3.txt"); err != nil {
 		return err
 	}
+	return nil
+}
+
+func runTestCase6(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
+	logger.Info("\n--- Test Case 6: Nested Folders ---")
+
+	mainClient, err := runner.GetOrCreateClient(mainUser)
+	if err != nil {
+		return err
+	}
+	mainSyncID, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+
+	// Create structure
+	// A: Level_1_A/Level_2_A/Level_3_A
+	l1a, err := getOrCreateFolder(mainClient, mainSyncID, "Level_1_A")
+	if err != nil {
+		return err
+	}
+	l2a, err := getOrCreateFolder(mainClient, l1a.ID, "Level_2_A")
+	if err != nil {
+		return err
+	}
+	l3a, err := getOrCreateFolder(mainClient, l2a.ID, "Level_3_A")
+	if err != nil {
+		return err
+	}
+	_ = l3a
+
+	// B: Level_1_B/Level_2_B
+	l1b, err := getOrCreateFolder(mainClient, mainSyncID, "Level_1_B")
+	if err != nil {
+		return err
+	}
+	l2b, err := getOrCreateFolder(mainClient, l1b.ID, "Level_2_B")
+	if err != nil {
+		return err
+	}
+
+	// C: Level_1_C/Level_2_C/Level_3_C/Level_4_C
+	l1c, err := getOrCreateFolder(mainClient, mainSyncID, "Level_1_C")
+	if err != nil {
+		return err
+	}
+	l2c, err := getOrCreateFolder(mainClient, l1c.ID, "Level_2_C")
+	if err != nil {
+		return err
+	}
+	l3c, err := getOrCreateFolder(mainClient, l2c.ID, "Level_3_C")
+	if err != nil {
+		return err
+	}
+	l4c, err := getOrCreateFolder(mainClient, l3c.ID, "Level_4_C")
+	if err != nil {
+		return err
+	}
+	_ = l4c
+
+	// Move/Upload files
+	// Move a file to Level_2_B
+	fBName := "test_6_B.txt"
+	fBData := []byte("Content for Level 2 B")
+	logger.Info("Uploading %s to Level_2_B...", fBName)
+	if _, err := mainClient.UploadFile(l2b.ID, fBName, bytes.NewReader(fBData), int64(len(fBData))); err != nil {
+		return fmt.Errorf("failed to upload %s: %w", fBName, err)
+	}
+
+	// Move another to Level_3_C
+	fCName := "test_6_C.txt" // Fixed typo in thought
+	fCData := []byte("Content for Level 3 C")
+	logger.Info("Uploading %s to Level_3_C...", fCName)
+	if _, err := mainClient.UploadFile(l3c.ID, fCName, bytes.NewReader(fCData), int64(len(fCData))); err != nil {
+		return fmt.Errorf("failed to upload %s: %w", fCName, err)
+	}
+
+	logger.Info("Updating Metadata...")
+	if err := runner.GetMetadata(); err != nil {
+		return err
+	}
+	logger.Info("Running SyncProviders...")
+	if err := runner.SyncProviders(); err != nil {
+		return err
+	}
+
+	// Assertions
+	logger.Info("Validating Microsoft folder structure...")
+	msBackups := filterUsers(backups, model.ProviderMicrosoft)
+	for _, u := range msBackups {
+		c, err := runner.GetOrCreateClient(u)
+		if err != nil {
+			return err
+		}
+		sid, err := c.GetSyncFolderID()
+		if err != nil {
+			return err
+		}
+
+		checkFolder := func(parentID, name string) (string, error) {
+			folders, err := c.ListFolders(parentID)
+			if err != nil {
+				return "", err
+			}
+			for _, f := range folders {
+				if f.Name == name {
+					return f.ID, nil
+				}
+			}
+			return "", fmt.Errorf("folder %s not found in parent %s (User: %s)", name, parentID, u.Email)
+		}
+
+		// Check A
+		lid1a, err := checkFolder(sid, "Level_1_A")
+		if err != nil {
+			return err
+		}
+		lid2a, err := checkFolder(lid1a, "Level_2_A")
+		if err != nil {
+			return err
+		}
+		if _, err := checkFolder(lid2a, "Level_3_A"); err != nil {
+			return err
+		}
+
+		// Check B
+		lid1b, err := checkFolder(sid, "Level_1_B")
+		if err != nil {
+			return err
+		}
+		if _, err := checkFolder(lid1b, "Level_2_B"); err != nil {
+			return err
+		}
+
+		// Check C
+		lid1c, err := checkFolder(sid, "Level_1_C")
+		if err != nil {
+			return err
+		}
+		lid2c, err := checkFolder(lid1c, "Level_2_C")
+		if err != nil {
+			return err
+		}
+		lid3c, err := checkFolder(lid2c, "Level_3_C")
+		if err != nil {
+			return err
+		}
+		if _, err := checkFolder(lid3c, "Level_4_C"); err != nil {
+			return err
+		}
+	}
+
+	logger.Info("Validating Paths in DB/Telegram...")
+	verifyPath := func(expectedPath string) error {
+		f, err := db.GetFileByPath(expectedPath)
+		if err != nil {
+			return err
+		}
+		if f == nil {
+			return fmt.Errorf("file %s not found in DB", expectedPath)
+		}
+		return nil
+	}
+
+	if err := verifyPath("/Level_1_B/Level_2_B/test_6_B.txt"); err != nil {
+		return err
+	}
+	if err := verifyPath("/Level_1_C/Level_2_C/Level_3_C/test_6_C.txt"); err != nil {
+		// Note from requirement: "Level_3_C" in requirement "move another to Level_3_C"
+		// Path: Level_1_C/Level_2_C/Level_3_C/test_6_C.txt
+		return err
+	}
+
 	return nil
 }
 

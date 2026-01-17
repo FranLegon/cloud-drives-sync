@@ -11,16 +11,13 @@ go get google.golang.org/api@v0.187.0
 go get golang.org/x/oauth2@v0.21.0
 
 # The official Microsoft Graph SDK for Go (used for OneDrive for Business)
-go get github.com/microsoftgraph/msgraph-sdk-go@v1.41.0
+go get github.com/microsoftgraph/msgraph-sdk-go@v1.92.0
 
-# Provides Microsoft Entra ID (Azure AD) token authentication credentials
-go get github.com/Azure/azure-sdk-for-go/sdk/azidentity@v1.7.0
+# Telegram API client for Go (Native Go implementation)
+go get github.com/gotd/td@v0.136.0
 
-# Telegram API client for Go (TDLib bindings or similar)
-go get github.com/zelenin/go-tdlib@v0.7.2
-
-# The SQLite driver for Go (with SQLCipher support via build tags)
-go get github.com/mattn/go-sqlite3@v1.14.22
+# The SQLite driver for Go with SQLCipher support
+go get github.com/mutecomm/go-sqlcipher/v4@v4.4.2
 
 # Provides cryptographic functions, including Argon2id for key derivation
-go get golang.org/x/crypto@v0.24.0
+go get golang.org/x/crypto@v0.45.0

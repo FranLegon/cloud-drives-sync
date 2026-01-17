@@ -451,6 +451,27 @@ func (db *DB) BatchInsertFolders(folders []*model.Folder) error {
 	return tx.Commit()
 }
 
+// GetAllFolders returns all folders from DB
+func (db *DB) GetAllFolders() ([]*model.Folder, error) {
+	rows, err := db.conn.Query("SELECT id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email FROM folders")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var folders []*model.Folder
+	for rows.Next() {
+		var f model.Folder
+		var provider string
+		if err := rows.Scan(&f.ID, &f.Name, &f.Path, &provider, &f.UserEmail, &f.UserPhone, &f.ParentFolderID, &f.OwnerEmail); err != nil {
+			return nil, err
+		}
+		f.Provider = model.Provider(provider)
+		folders = append(folders, &f)
+	}
+	return folders, nil
+}
+
 // GetFilesByCalculatedID returns all files with a specific calculated_id
 func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error) {
 	query := `

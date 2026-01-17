@@ -1164,6 +1164,113 @@ func (r *Runner) distributeShortcuts() error {
 			}
 		}
 	}
+
+	// Distribute Folders (for empty folders)
+	logger.Info("Syncing folder structures...")
+	allFolders, err := r.db.GetAllFolders()
+	if err == nil {
+		paths := make([]string, 0)
+		seen := make(map[string]bool)
+		for _, f := range allFolders {
+			if f.Name == "metadata.db" || f.Name == "sync-cloud-drives-aux" || f.Name == "soft-deleted" || strings.Contains(f.Path, "sync-cloud-drives-aux") {
+				continue
+			}
+			if !seen[f.Path] {
+				paths = append(paths, f.Path)
+				seen[f.Path] = true
+			}
+		}
+
+		for i := range r.config.Users {
+			u := &r.config.Users[i]
+			if u.Provider == model.ProviderTelegram {
+				continue
+			}
+
+			logger.InfoTagged([]string{string(u.Provider), u.Email}, "Verifying folder structure...")
+			client, err := r.GetOrCreateClient(u)
+			if err != nil {
+				continue
+			}
+			rootID, err := client.GetSyncFolderID()
+			if err != nil {
+				continue
+			}
+
+			// Cache for this user: parentID -> map[name]id
+			cache := make(map[string]map[string]string)
+
+			var getFolderID func(string, string) (string, error)
+			getFolderID = func(parentID, name string) (string, error) {
+				if m, ok := cache[parentID]; ok {
+					if id, ok := m[name]; ok {
+						return id, nil
+					}
+				}
+
+				// List
+				items, err := client.ListFolders(parentID)
+				if err != nil {
+					return "", err
+				}
+
+				m := make(map[string]string)
+				for _, item := range items {
+					m[item.Name] = item.ID
+				}
+				cache[parentID] = m
+
+				if id, ok := m[name]; ok {
+					return id, nil
+				}
+				return "", nil // Not found
+			}
+
+			for _, path := range paths {
+				relPath := strings.TrimPrefix(path, "/")
+				if relPath == "" {
+					continue
+				}
+				parts := strings.Split(relPath, "/")
+
+				currentID := rootID
+				for _, part := range parts {
+					if part == "" {
+						continue
+					}
+
+					id, err := getFolderID(currentID, part)
+					if err != nil {
+						break
+					} // Error listing
+
+					if id == "" {
+						// Create
+						if !r.safeMode {
+							newF, err := client.CreateFolder(currentID, part)
+							if err != nil {
+								logger.Warning("Failed to create folder %s: %v", part, err)
+								break
+							}
+							id = newF.ID
+							// Update cache
+							if cache[currentID] == nil {
+								cache[currentID] = make(map[string]string)
+							}
+							cache[currentID][part] = id
+						} else {
+							logger.DryRun("Would create folder %s in %s", part, currentID)
+							break // Can't proceed safely
+						}
+					}
+					currentID = id
+				}
+			}
+		}
+	} else {
+		logger.Error("Failed to get folders from DB: %v", err)
+	}
+
 	return nil
 }
 
