@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
+	"github.com/FranLegon/cloud-drives-sync/internal/task"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 )
@@ -32,13 +33,21 @@ func init() {
 func runRemoveDuplicates(cmd *cobra.Command, args []string) error {
 	runner := getTaskRunner()
 
-	// First, update metadata
-	logger.Info("Updating metadata before checking for duplicates...")
 	if err := requiresPreFlightCheck(runner); err != nil {
 		return err
 	}
-	if err := runner.GetMetadata(); err != nil {
-		return err
+
+	return RemoveDuplicatesAction(runner, true)
+}
+
+// RemoveDuplicatesAction runs interactive duplicate removal
+func RemoveDuplicatesAction(runner *task.Runner, updateMetadata bool) error {
+	if updateMetadata {
+		// First, update metadata
+		logger.Info("Updating metadata before checking for duplicates...")
+		if err := runner.GetMetadata(); err != nil {
+			return err
+		}
 	}
 
 	// Find duplicates
@@ -139,13 +148,20 @@ func runRemoveDuplicates(cmd *cobra.Command, args []string) error {
 func runRemoveDuplicatesUnsafe(cmd *cobra.Command, args []string) error {
 	runner := getTaskRunner()
 
-	// First, update metadata
-	logger.Info("Updating metadata before checking for duplicates...")
 	if err := requiresPreFlightCheck(runner); err != nil {
 		return err
 	}
-	if err := runner.GetMetadata(); err != nil {
-		return err
+
+	return RemoveDuplicatesUnsafeAction(runner, true)
+}
+
+func RemoveDuplicatesUnsafeAction(runner *task.Runner, updateMetadata bool) error {
+	if updateMetadata {
+		// First, update metadata
+		logger.Info("Updating metadata before checking for duplicates...")
+		if err := runner.GetMetadata(); err != nil {
+			return err
+		}
 	}
 
 	// Find and remove duplicates

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
+	"github.com/FranLegon/cloud-drives-sync/internal/task"
 	"github.com/spf13/cobra"
 )
 
@@ -24,10 +25,17 @@ func runSyncProviders(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Update metadata first
-	logger.Info("Updating metadata...")
-	if err := runner.GetMetadata(); err != nil {
-		return err
+	return SyncProvidersAction(runner, true)
+}
+
+// SyncProvidersAction runs the sync logic with optional metadata update
+func SyncProvidersAction(runner *task.Runner, updateMetadata bool) error {
+	if updateMetadata {
+		// Update metadata first
+		logger.Info("Updating metadata...")
+		if err := runner.GetMetadata(); err != nil {
+			return err
+		}
 	}
 
 	return runner.SyncProviders()

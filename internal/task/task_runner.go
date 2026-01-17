@@ -560,6 +560,11 @@ func (r *Runner) BalanceStorage() error {
 							continue
 						}
 					}
+
+					// Update database to reflect ownership change
+					if err := r.db.UpdateReplicaOwner(string(provider), source.User.Email, file.ID, target.User.Email); err != nil {
+						logger.Warning("Failed to update local DB for %s: %v", file.Name, err)
+					}
 				} else {
 					logger.DryRunTagged([]string{string(provider), source.User.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
 				}

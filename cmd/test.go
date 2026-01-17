@@ -631,9 +631,9 @@ func runTestCase1(runner *task.Runner, mainUser *model.User) error {
 		return fmt.Errorf("FreeMain failed: %w", err)
 	}
 
-	logger.Info("Running SyncProviders...")
-	if err := runner.SyncProviders(); err != nil {
-		return fmt.Errorf("SyncProviders failed: %w", err)
+	logger.Info("Running Sync (Full Pipeline)...")
+	if err := SyncAction(runner, false); err != nil {
+		return fmt.Errorf("Sync failed: %w", err)
 	}
 
 	logger.Info("Verifying %s...", f1Name)
@@ -684,9 +684,9 @@ func runTestCase2(runner *task.Runner, backups []*model.User) error {
 		return fmt.Errorf("metadata update failed: %w", err)
 	}
 
-	logger.Info("Running SyncProviders...")
-	if err := runner.SyncProviders(); err != nil {
-		return fmt.Errorf("SyncProviders failed: %w", err)
+	logger.Info("Running Sync (Full Pipeline)...")
+	if err := SyncAction(runner, false); err != nil {
+		return fmt.Errorf("Sync failed: %w", err)
 	}
 
 	logger.Info("Verifying files...")
@@ -724,9 +724,9 @@ func runTestCase3(runner *task.Runner, mainUser *model.User) error {
 		return fmt.Errorf("metadata update failed: %w", err)
 	}
 
-	logger.Info("Running SyncProviders (Large File)...")
-	if err := runner.SyncProviders(); err != nil {
-		logger.Warning("SyncProviders (Large File) had error: %v. Continuing...", err)
+	logger.Info("Running Sync (Large File)...")
+	if err := SyncAction(runner, false); err != nil {
+		logger.Warning("Sync (Large File) had error: %v. Continuing...", err)
 	}
 
 	logger.Info("Verifying large file...")
@@ -816,8 +816,8 @@ func runTestCase4(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		return err
 	}
 
-	logger.Info("Running SyncProviders...")
-	if err := runner.SyncProviders(); err != nil {
+	logger.Info("Running Sync (Full Pipeline)...")
+	if err := SyncAction(runner, false); err != nil {
 		return err
 	}
 
@@ -919,8 +919,8 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	if err := runner.GetMetadata(); err != nil {
 		return err
 	}
-	logger.Info("Running SyncProviders...")
-	if err := runner.SyncProviders(); err != nil {
+	logger.Info("Running Sync (Full Pipeline)...")
+	if err := SyncAction(runner, false); err != nil {
 		return err
 	}
 
@@ -1024,8 +1024,8 @@ func runTestCase6(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	if err := runner.GetMetadata(); err != nil {
 		return err
 	}
-	logger.Info("Running SyncProviders...")
-	if err := runner.SyncProviders(); err != nil {
+	logger.Info("Running Sync (Full Pipeline)...")
+	if err := SyncAction(runner, false); err != nil {
 		return err
 	}
 
@@ -1151,9 +1151,9 @@ func runTestCase7(runner *task.Runner, mainUser *model.User) error {
 		return fmt.Errorf("metadata update failed: %w", err)
 	}
 
-	logger.Info("Running SyncProviders (Very Big File)...")
-	if err := runner.SyncProviders(); err != nil {
-		logger.Warning("SyncProviders (Very Big File) had error: %v. Continuing...", err)
+	logger.Info("Running Sync (Very Big File)...")
+	if err := SyncAction(runner, false); err != nil {
+		logger.Warning("Sync (Very Big File) had error: %v. Continuing...", err)
 	}
 
 	logger.Info("Verifying very big file...")
@@ -1224,8 +1224,8 @@ func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	}
 
 	// At this point, the system should detect the move (restore)
-	logger.Info("Running SyncProviders to propagate restore...")
-	if err := runner.SyncProviders(); err != nil {
+	logger.Info("Running Sync to propagate restore...")
+	if err := SyncAction(runner, false); err != nil {
 		return err
 	}
 
@@ -1368,8 +1368,8 @@ func runTestCase9(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	}
 
 	// 3. Sync
-	logger.Info("Running SyncProviders (Attempting Restore from Fragments)...")
-	if err := runner.SyncProviders(); err != nil {
+	logger.Info("Running Sync (Attempting Restore from Fragments)...")
+	if err := SyncAction(runner, false); err != nil {
 		return err
 	}
 
@@ -1483,8 +1483,8 @@ func runTestCase10(runner *task.Runner, mainUser *model.User, backups []*model.U
 	if err := runner.GetMetadata(); err != nil {
 		return err
 	}
-	logger.Info("Running SyncProviders...")
-	return runner.SyncProviders()
+	logger.Info("Running Sync...")
+	return SyncAction(runner, false)
 }
 
 func testMetadata(runner *task.Runner) error {

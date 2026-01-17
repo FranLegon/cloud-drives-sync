@@ -103,6 +103,7 @@ and Telegram.`,
 			"balance-storage":          true,
 			"free-main":                true,
 			"delete-unsynced-files":    false, // Typically doesn't alter DB? Check logic.
+			"sync":                     true,
 		}
 
 		if writingCommands[cmd.Name()] && cfg != nil {

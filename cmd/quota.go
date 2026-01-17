@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
+	"github.com/FranLegon/cloud-drives-sync/internal/task"
 	"github.com/spf13/cobra"
 )
 
@@ -23,12 +24,14 @@ func init() {
 func runQuota(cmd *cobra.Command, args []string) error {
 	runner := getTaskRunner()
 
-	// We don't strictly need pre-flight checks for quota, but we need clients initialized.
-	// Pre-flight checks might be good to ensure connectivity.
 	if err := requiresPreFlightCheck(runner); err != nil {
 		return err
 	}
 
+	return QuotaAction(runner)
+}
+
+func QuotaAction(runner *task.Runner) error {
 	quotas, err := runner.GetProviderQuotas()
 	if err != nil {
 		return err
