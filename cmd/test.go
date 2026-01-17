@@ -45,7 +45,7 @@ func init() {
 	rootCmd.AddCommand(testCmd)
 }
 
-func runTest(cmd *cobra.Command, args []string) error {
+func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	// Setup Logging to file
 	logFile, err := os.OpenFile("test.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 	if err != nil {
@@ -56,8 +56,15 @@ func runTest(cmd *cobra.Command, args []string) error {
 	logger.SetOutput(mw)
 
 	defer func() {
+		if retErr != nil {
+			logger.Error("Test failed: %v", retErr)
+		}
+	}()
+
+	defer func() {
 		if r := recover(); r != nil {
-			fmt.Printf("Recovered from panic: %v\n", r)
+			logger.Error("Recovered from panic: %v", r)
+			retErr = fmt.Errorf("panic: %v", r)
 		}
 	}()
 	logger.Info("Starting Test Command...")
@@ -249,7 +256,7 @@ func runTest(cmd *cobra.Command, args []string) error {
 
 func runTestCase11(r *task.Runner) error {
 	logger.Info("\n=== Running Test Case 11: Quota Similarity Check ===")
-	
+
 	logger.Info("Getting DB-based quotas...")
 	dbQuotas, err := r.GetProviderQuotasFromDB()
 	if err != nil {
@@ -278,10 +285,10 @@ func runTestCase11(r *task.Runner) error {
 		logger.Info("[%s]", dbQ.Provider)
 		logger.Info("  DB Sync Folder Usage: %s", formatBytes(dbQ.SyncFolderUsed))
 		logger.Info("  API Account Usage:    %s", formatBytes(apiQ.Used))
-		
+
 		// Logic Check: API usage (whole account) should be >= DB usage (sync folder only)
 		if apiQ.Used < dbQ.SyncFolderUsed {
-			logger.Error("CONSISTENCY ERROR: API usage (%d) is LESS than Sync Folder DB usage (%d) for %s", 
+			logger.Error("CONSISTENCY ERROR: API usage (%d) is LESS than Sync Folder DB usage (%d) for %s",
 				apiQ.Used, dbQ.SyncFolderUsed, dbQ.Provider)
 			return fmt.Errorf("quota inconsistency detected")
 		} else {

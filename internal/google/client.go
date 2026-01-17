@@ -337,10 +337,13 @@ func (c *Client) MoveFile(fileID, targetFolderID string) error {
 		return fmt.Errorf("failed to get file: %w", err)
 	}
 
-	_, err = c.service.Files.Update(fileID, &drive.File{}).
-		AddParents(targetFolderID).
-		RemoveParents(file.Parents[0]).
-		Do()
+	updateCall := c.service.Files.Update(fileID, &drive.File{}).AddParents(targetFolderID)
+
+	if len(file.Parents) > 0 {
+		updateCall = updateCall.RemoveParents(file.Parents[0])
+	}
+
+	_, err = updateCall.Do()
 
 	return err
 }

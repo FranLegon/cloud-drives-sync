@@ -676,11 +676,18 @@ func (r *Runner) FreeMain() error {
 
 	// Filter files owned by main user
 	var candidates []*model.File
+	seenIDs := make(map[string]bool)
+
 	for _, f := range files {
+		if seenIDs[f.ID] {
+			continue
+		}
+
 		// Check if any replica belongs to the main user
 		for _, replica := range f.Replicas {
 			if replica.AccountID == mainUser.Email {
 				candidates = append(candidates, f)
+				seenIDs[f.ID] = true
 				break
 			}
 		}
@@ -904,7 +911,29 @@ func (r *Runner) SyncProviders() error {
 		}
 
 		// If this file matches a soft-deleted file by content, and is NOT in soft-deleted folder, move it there
-		if anyFile != nil && !isSoftDeleted && softDeletedHashes[anyFile.CalculatedID] {
+		// EXCEPTION: If the file is present (Active) on the Main Account, assume it was Restored/Undeleted.
+		hasActiveMainReplica := false
+		for _, f := range fileMap {
+			for _, replica := range f.Replicas {
+				if replica.Status == "active" {
+					// Check if this replica belongs to a Main user
+					for _, u := range r.config.Users {
+						if u.IsMain && u.Provider == replica.Provider && u.Email == replica.AccountID {
+							hasActiveMainReplica = true
+							break
+						}
+					}
+				}
+				if hasActiveMainReplica {
+					break
+				}
+			}
+			if hasActiveMainReplica {
+				break
+			}
+		}
+
+		if anyFile != nil && !isSoftDeleted && softDeletedHashes[anyFile.CalculatedID] && !hasActiveMainReplica {
 			logger.Info("File %s matches a soft-deleted file. Moving to soft-deleted...", path)
 
 			for provider, f := range fileMap {
