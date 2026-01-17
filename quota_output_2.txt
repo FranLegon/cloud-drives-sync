@@ -1,0 +1,50 @@
+Local metadata.db found.
+Running pre-flight checks...
+Running pre-flight checks...
+[Google][franlegon.backup29@gmail.com] Moving sync folder to root
+[Google][franlegon.backup29@gmail.com] Pre-flight check passed: sync folder 'sync-cloud-drives' (ID: 1pDEABCNLDzGb-pHOViXJz-qM7yxHeiig)
+[Google][franlegon.backup30@gmail.com] Pre-flight check passed: sync folder 'sync-cloud-drives' (ID: 1pDEABCNLDzGb-pHOViXJz-qM7yxHeiig)
+[Google][franlegon.backup31@gmail.com] Pre-flight check passed: sync folder 'sync-cloud-drives' (ID: 1pDEABCNLDzGb-pHOViXJz-qM7yxHeiig)
+[Telegram][+51 955 740 434] Found existing sync channel: sync-cloud-drives (ID: 3505490847)
+Initialized OneDrive DriveID: 'BF0AC2CB3627B987' for francisco.legon@hotmail.com
+[Microsoft][francisco.legon@hotmail.com] Found sync folder 'sync-cloud-drives' (BF0AC2CB3627B987!s8ca43b58bf394eac9062687ed6e982db)
+Initialized OneDrive DriveID: 'b!ww6AzEzS4k-49zMNoJ19yTmi9hDtqB9HkqC7sLYx1POf-NX-jVe2QprtHYul74p4' for fladmin@grupobsa.onmicrosoft.com
+[Microsoft][fladmin@grupobsa.onmicrosoft.com] Found sync folder 'sync-cloud-drives' (01DNRXID7MTCJXBQZRRFDL2QCNZXTYRPKU)
+All pre-flight checks passed
+Gathering metadata from all providers...
+[Telegram][+51 955 740 434] Found 1 files in folder /
+Google ListFiles page: found 1 files
+[Google][franlegon.backup30@gmail.com] Found 1 files in folder 1pDEABCNLDzGb-pHOViXJz-qM7yxHeiig
+Google ListFiles page: found 1 files
+[Google][franlegon.backup29@gmail.com] Found 1 files in folder 1pDEABCNLDzGb-pHOViXJz-qM7yxHeiig
+[Microsoft][fladmin@grupobsa.onmicrosoft.com] Found 1 files in folder 01DNRXID7MTCJXBQZRRFDL2QCNZXTYRPKU
+Google ListFiles page: found 1 files
+[Google][franlegon.backup31@gmail.com] Found 1 files in folder 1pDEABCNLDzGb-pHOViXJz-qM7yxHeiig
+[Microsoft][francisco.legon@hotmail.com] Found 0 files in folder BF0AC2CB3627B987!s8ca43b58bf394eac9062687ed6e982db
+Updating logical files from latest replicas...
+Linking replicas to logical files...
+Creating new logical files for unmatched replicas...
+Marking missing replicas as deleted...
+Metadata gathering complete
+Calculating provider quotas using API (Account Usage)...
+Quota Summary:
+--------------
+[Google]
+  Total: 30.00 GB
+  Used:  2.26 MB
+  Used (Sync Folder): 144 B
+  Free:  30.00 GB
+
+[Microsoft]
+  Total: 1.00 TB
+  Used:  286.89 GB
+  Used (Sync Folder): 28 B
+  Free:  604.67 GB
+
+[Telegram]
+  Total: Unlimited
+  Used:  0 B
+  Used (Sync Folder): 47 B
+  Free:  Unlimited
+
+Quota check passed

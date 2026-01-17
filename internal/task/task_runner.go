@@ -1348,9 +1348,9 @@ func (r *Runner) DeleteUnsyncedFiles() error {
 	return nil
 }
 
-// GetProviderQuotas calculates aggregated quotas for all providers
-func (r *Runner) GetProviderQuotas() ([]*model.ProviderQuota, error) {
-	logger.Info("Calculating provider quotas...")
+// GetProviderQuotasFromAPI calculates aggregated quotas for all providers using API
+func (r *Runner) GetProviderQuotasFromAPI() ([]*model.ProviderQuota, error) {
+	logger.Info("Calculating provider quotas using API (Account Usage)...")
 
 	quotas := make(map[model.Provider]*model.ProviderQuota)
 
@@ -1396,16 +1396,6 @@ func (r *Runner) GetProviderQuotas() ([]*model.ProviderQuota, error) {
 		}
 	}
 
-	// Populate SyncFolderUsed from DB
-	for p := range quotas {
-		usage, err := r.db.GetProviderUsage(p)
-		if err != nil {
-			logger.Warning("Failed to calculate used storage in sync folder for %s: %v", p, err)
-		} else {
-			quotas[p].SyncFolderUsed = usage
-		}
-	}
-
 	// Convert map to slice
 	var result []*model.ProviderQuota
 	for _, p := range []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram} {
@@ -1415,6 +1405,33 @@ func (r *Runner) GetProviderQuotas() ([]*model.ProviderQuota, error) {
 	}
 
 	return result, nil
+}
+
+// GetProviderQuotasFromDB calculates aggregated quotas using DB for usage and API for limits
+func (r *Runner) GetProviderQuotasFromDB() ([]*model.ProviderQuota, error) {
+	// First, update metadata
+	if err := r.GetMetadata(); err != nil {
+		return nil, fmt.Errorf("failed to sync metadata: %w", err)
+	}
+
+	// Get base quotas (Limits) from API - we reuse the same logic for aggregation
+	// but we don't care about the 'Used' value for validation, only for reporting.
+	apiQuotas, err := r.GetProviderQuotasFromAPI()
+	if err != nil {
+		return nil, err
+	}
+
+	// Populate SyncFolderUsed from DB
+	for _, q := range apiQuotas {
+		usage, err := r.db.GetProviderUsage(q.Provider)
+		if err != nil {
+			logger.Warning("Failed to calculate used storage in sync folder for %s: %v", q.Provider, err)
+		} else {
+			q.SyncFolderUsed = usage
+		}
+	}
+
+	return apiQuotas, nil
 }
 
 // checkSoftDeletedConsistency ensures that if a file is in soft-deleted in one provider, it moves it there for others.
