@@ -1396,6 +1396,16 @@ func (r *Runner) GetProviderQuotas() ([]*model.ProviderQuota, error) {
 		}
 	}
 
+	// Populate SyncFolderUsed from DB
+	for p := range quotas {
+		usage, err := r.db.GetProviderUsage(p)
+		if err != nil {
+			logger.Warning("Failed to calculate used storage in sync folder for %s: %v", p, err)
+		} else {
+			quotas[p].SyncFolderUsed = usage
+		}
+	}
+
 	// Convert map to slice
 	var result []*model.ProviderQuota
 	for _, p := range []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram} {

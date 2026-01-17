@@ -53,6 +53,7 @@ func QuotaAction(runner *task.Runner) error {
 		fmt.Printf("[%s]\n", q.Provider)
 		fmt.Printf("  Total: %s\n", totalStr)
 		fmt.Printf("  Used:  %s\n", usedStr)
+		fmt.Printf("  Used (Sync Folder): %s\n", formatBytes(q.SyncFolderUsed))
 		fmt.Printf("  Free:  %s\n", freeStr)
 		fmt.Println()
 	}
@@ -68,9 +69,11 @@ func QuotaAction(runner *task.Runner) error {
 				continue
 			}
 
-			if q1.Used > q2.Total {
-				errs = append(errs, fmt.Sprintf("Provider %s Used (%s) > Provider %s Total (%s)",
-					q1.Provider, formatBytes(q1.Used), q2.Provider, formatBytes(q2.Total)))
+			// We use SyncFolderUsed for comparison because that's what we are syncing.
+			// q1.Used might be huge due to other files not related to this app.
+			if q1.SyncFolderUsed > q2.Total {
+				errs = append(errs, fmt.Sprintf("Provider %s Sync Folder Size (%s) > Provider %s Total Capacity (%s)",
+					q1.Provider, formatBytes(q1.SyncFolderUsed), q2.Provider, formatBytes(q2.Total)))
 			}
 		}
 	}

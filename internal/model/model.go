@@ -53,10 +53,11 @@ type Config struct {
 
 // ProviderQuota represents aggregated quota for a provider
 type ProviderQuota struct {
-	Provider Provider
-	Total    int64
-	Used     int64
-	Free     int64
+	Provider       Provider
+	Total          int64
+	Used           int64
+	Free           int64
+	SyncFolderUsed int64
 }
 
 // File represents a logical file

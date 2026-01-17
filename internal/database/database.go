@@ -1086,3 +1086,18 @@ func (db *DB) MarkDeletedReplicas(startTime time.Time) error {
 	_, err := db.conn.Exec(query, startTime.Unix())
 	return err
 }
+
+// GetProviderUsage returns the total size of active files for a provider
+func (db *DB) GetProviderUsage(provider model.Provider) (int64, error) {
+	query := `
+	SELECT COALESCE(SUM(size), 0)
+	FROM replicas
+	WHERE provider = ? AND status = 'active'
+	`
+	var size int64
+	err := db.conn.QueryRow(query, provider).Scan(&size)
+	if err != nil {
+		return 0, err
+	}
+	return size, nil
+}
