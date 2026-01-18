@@ -980,22 +980,21 @@ func (r *Runner) SyncProviders() error {
 					continue
 				}
 
-				// Telegram doesn't support folders, so we delete the file instead of moving to soft-deleted
+				// Telegram doesn't support folders, so we update status to deleted instead of moving
 				if replica.Provider == model.ProviderTelegram {
-					logger.Info("Deleting soft-deleted file on Telegram: %s", f.Name)
-					if err := client.DeleteFile(replica.NativeID); err != nil {
-						logger.Error("Failed to delete file on Telegram: %v", err)
-					} else {
-						// Update replica to reflect deletion
-						replica.Status = "deleted"
-						// We keep the path as is for history, or clear it?
-						// "deleted" status is enough to treat it as gone.
-						if err := r.db.UpdateReplica(replica); err != nil {
-							logger.Warning("Failed to update replica status in DB: %v", err)
+					logger.Info("Marking soft-deleted file on Telegram: %s", f.Name)
+					if tgClient, ok := client.(*telegram.Client); ok {
+						if err := tgClient.UpdateFileStatus(replica, "deleted"); err != nil {
+							logger.Error("Failed to update file status on Telegram: %v", err)
+						} else {
+							// Update replica to reflect deletion status
+							replica.Status = "deleted"
+							if err := r.db.UpdateReplica(replica); err != nil {
+								logger.Warning("Failed to update replica status in DB: %v", err)
+							}
 						}
-						// Note: We do NOT update the logical file path here because the file is gone, not moved.
-						// However, other replicas might be moved.
-						// If logical file 'f' is updated by other providers iterations, that's fine.
+					} else {
+						logger.Error("Client is not a Telegram client for %s", replica.Provider)
 					}
 					continue
 				}
@@ -1057,6 +1056,65 @@ func (r *Runner) SyncProviders() error {
 
 		// Skip syncing if this is the soft deleted folder
 		if isSoftDeleted {
+			// Enforce soft-deleted location for all replicas
+			if masterFile != nil {
+				for _, replica := range masterFile.Replicas {
+					if replica.Status == "active" && !strings.Contains(replica.Path, softDeletedPath) {
+						logger.Info("Replica for %s on %s is misplaced (found at %s). Moving to soft-deleted...", masterFile.Name, replica.Provider, replica.Path)
+
+						// Find user
+						var targetUser *model.User
+						for i := range r.config.Users {
+							u := &r.config.Users[i]
+							if u.Provider == replica.Provider && (u.Email == replica.AccountID || u.Phone == replica.AccountID) {
+								targetUser = u
+								break
+							}
+						}
+
+						if targetUser == nil {
+							logger.Error("User not found for replica %s", replica.AccountID)
+							continue
+						}
+
+						client, err := r.GetOrCreateClient(targetUser)
+						if err != nil {
+							logger.Error("Failed to create client: %v", err)
+							continue
+						}
+
+						if replica.Provider == model.ProviderTelegram {
+							// Telegram delete logic
+							logger.Info("Marking soft-deleted file on Telegram: %s", masterFile.Name)
+							if tgClient, ok := client.(*telegram.Client); ok {
+								if err := tgClient.UpdateFileStatus(replica, "deleted"); err != nil {
+									logger.Error("Failed to update file status on Telegram: %v", err)
+								} else {
+									replica.Status = "deleted"
+									r.db.UpdateReplica(replica)
+								}
+							} else {
+								logger.Error("Client is not a Telegram client for %s", replica.Provider)
+							}
+						} else {
+							// Move logic
+							destID, err := r.ensureFolderStructure(client, softDeletedPath, replica.Provider)
+							if err != nil {
+								logger.Error("Failed to ensure soft-deleted folder: %v", err)
+								continue
+							}
+
+							if err := client.MoveFile(replica.NativeID, destID); err != nil {
+								logger.Error("Failed to move file to soft-deleted: %v", err)
+							} else {
+								newPath := "/" + softDeletedPath + "/" + masterFile.Name
+								replica.Path = newPath
+								r.db.UpdateReplica(replica)
+							}
+						}
+					}
+				}
+			}
 			continue
 		}
 
@@ -1453,8 +1511,7 @@ func (r *Runner) GetProviderQuotasFromDB() ([]*model.ProviderQuota, error) {
 		return nil, fmt.Errorf("failed to sync metadata: %w", err)
 	}
 
-	// Get base quotas (Limits) from API - we reuse the same logic for aggregation
-	// but we don't care about the 'Used' value for validation, only for reporting.
+	// Get base quotas (Limits) from API
 	apiQuotas, err := r.GetProviderQuotasFromAPI()
 	if err != nil {
 		return nil, err
@@ -1657,6 +1714,20 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 
 					if client == nil || err != nil {
 						logger.Error("Could not find client for file %s", file.Path)
+						continue
+					}
+
+					// Telegram handling
+					if provider == model.ProviderTelegram {
+						if tgClient, ok := client.(*telegram.Client); ok {
+							logger.Info("Marking file as deleted on Telegram: %s", file.Name)
+							if err := tgClient.UpdateFileStatus(targetReplica, "deleted"); err != nil {
+								logger.Error("Failed to update file status on Telegram: %v", err)
+							} else {
+								targetReplica.Status = "deleted"
+								r.db.UpdateReplica(targetReplica)
+							}
+						}
 						continue
 					}
 
