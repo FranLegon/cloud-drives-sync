@@ -18,6 +18,7 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
 	msgraphsdk "github.com/microsoftgraph/msgraph-sdk-go"
+	msgraphgocore "github.com/microsoftgraph/msgraph-sdk-go-core"
 	"github.com/microsoftgraph/msgraph-sdk-go/drives"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/models/odataerrors"
@@ -138,13 +139,18 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 	}
 
 	ctx := context.Background()
-	items, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(folderID).Children().Get(ctx, nil)
+	result, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(folderID).Children().Get(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list items: %w", err)
 	}
 
+	pageIterator, err := msgraphgocore.NewPageIterator[models.DriveItemable](result, c.graphClient.GetAdapter(), models.CreateDriveItemCollectionResponseFromDiscriminatorValue)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create page iterator: %w", err)
+	}
+
 	var allFiles []*model.File
-	for _, item := range items.GetValue() {
+	err = pageIterator.Iterate(ctx, func(item models.DriveItemable) bool {
 		isFolder := item.GetFolder() != nil
 		isShortcut := item.GetRemoteItem() != nil
 
@@ -160,14 +166,17 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 		if isShortcut {
 			if item.GetRemoteItem().GetFolder() != nil {
-				continue // It's a folder shortcut
+				return true // It's a folder shortcut
 			}
 		} else if isFolder {
-			continue // It's a regular folder
+			return true // It's a regular folder
 		}
 
 		itemName := *item.GetName()
-		itemSize := *item.GetSize()
+		itemSize := int64(0)
+		if item.GetSize() != nil {
+			itemSize = *item.GetSize()
+		}
 		modTime := time.Now()
 		if item.GetLastModifiedDateTime() != nil {
 			modTime = *item.GetLastModifiedDateTime()
@@ -228,6 +237,11 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 		file.Replicas = []*model.Replica{replica}
 		allFiles = append(allFiles, file)
+		return true
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("pagination failed: %w", err)
 	}
 
 	return allFiles, nil

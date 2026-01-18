@@ -933,6 +933,11 @@ func (r *Runner) SyncProviders() error {
 			}
 		}
 
+		if anyFile != nil && strings.Contains(path, "test_4.txt") {
+			logger.Info("DEBUG: Checking %s. isSoftDeleted=%v, inHash=%v, Hash=%s, hasActiveMain=%v",
+				path, isSoftDeleted, softDeletedHashes[anyFile.CalculatedID], anyFile.CalculatedID, hasActiveMainReplica)
+		}
+
 		if anyFile != nil && !isSoftDeleted && softDeletedHashes[anyFile.CalculatedID] && !hasActiveMainReplica {
 			logger.Info("File %s matches a soft-deleted file. Moving to soft-deleted...", path)
 

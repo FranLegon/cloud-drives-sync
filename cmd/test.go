@@ -28,7 +28,7 @@ var testSafe bool
 var testForce bool
 var testStopOnError bool
 var testCase int
-var test6Hash string
+var test10Hash string
 
 var testCmd = &cobra.Command{
 	Use:   "test",
@@ -133,13 +133,14 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 			return true
 		}
 		// Dependencies
-		// 9 -> 7
-		if testCase == 9 && step == 7 {
+		// 11 (Restore Fragmented) -> 10 (Very Big File)
+		if testCase == 11 && step == 10 {
 			return true
 		}
-		// 8 -> 5 -> 4 -> 2
-		//        -> 3
-		if testCase == 8 {
+		// 7 (Restore Soft) -> 5
+		// 5 -> 4 -> 2
+		//   -> 3
+		if testCase == 7 {
 			if step == 5 || step == 4 || step == 3 || step == 2 {
 				return true
 			}
@@ -153,10 +154,6 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		// 4 -> 2
 		if testCase == 4 && step == 2 {
-			return true
-		}
-		// 11 (Quota Check)
-		if testCase == 11 && step == 11 {
 			return true
 		}
 		return false
@@ -213,7 +210,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 	if shouldRun(7) {
-		if err := runTestCase7(runner, mainUser); err != nil {
+		if err := runTestCase7(runner, mainUser, backups); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
@@ -229,15 +226,14 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 	if shouldRun(9) {
-		if err := runTestCase9(runner, mainUser, backups); err != nil {
-			return err
-		}
-		if err := testMetadata(runner); err != nil {
+		if err := runTestCase9(runner); err != nil {
 			return err
 		}
 	}
+
+	// Run large file tests at the end
 	if shouldRun(10) {
-		if err := runTestCase10(runner, mainUser, backups); err != nil {
+		if err := runTestCase10(runner, mainUser); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
@@ -245,7 +241,10 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 	if shouldRun(11) {
-		if err := runTestCase11(runner); err != nil {
+		if err := runTestCase11(runner, mainUser, backups); err != nil {
+			return err
+		}
+		if err := testMetadata(runner); err != nil {
 			return err
 		}
 	}
@@ -254,8 +253,8 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	return nil
 }
 
-func runTestCase11(r *task.Runner) error {
-	logger.Info("\n=== Running Test Case 11: Quota Similarity Check ===")
+func runTestCase9(r *task.Runner) error {
+	logger.Info("\n=== Running Test Case 9: Quota Similarity Check ===")
 
 	logger.Info("Getting DB-based quotas...")
 	dbQuotas, err := r.GetProviderQuotasFromDB()
@@ -1187,10 +1186,10 @@ func runTestCase6(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	return nil
 }
 
-func runTestCase7(runner *task.Runner, mainUser *model.User) error {
-	logger.Info("\n--- Test Case 7: Very Big File (3GB) ---")
-	test6Name := "test_6.txt"
-	test6Size := int64(3) * 1024 * 1024 * 1024
+func runTestCase10(runner *task.Runner, mainUser *model.User) error {
+	logger.Info("\n--- Test Case 10: Very Big File (3GB) ---")
+	test10Name := "test_10.txt"
+	test10Size := int64(3) * 1024 * 1024 * 1024
 
 	mainClient, err := runner.GetOrCreateClient(mainUser)
 	if err != nil {
@@ -1201,18 +1200,18 @@ func runTestCase7(runner *task.Runner, mainUser *model.User) error {
 		return err
 	}
 
-	logger.Info("Uploading %s to Main Account (Streamed)...", test6Name)
+	logger.Info("Uploading %s to Main Account (Streamed)...", test10Name)
 	// Calculate hash while uploading
 	hasher := sha256.New()
-	reader := io.LimitReader(rand.Reader, test6Size)
+	reader := io.LimitReader(rand.Reader, test10Size)
 	teeReader := io.TeeReader(reader, hasher)
 
-	if _, err := mainClient.UploadFile(mainSyncID, test6Name, teeReader, test6Size); err != nil {
+	if _, err := mainClient.UploadFile(mainSyncID, test10Name, teeReader, test10Size); err != nil {
 		logger.Error("Upload failed: %v", err)
 		return fmt.Errorf("upload very big file failed: %w", err)
 	}
-	test6Hash = hex.EncodeToString(hasher.Sum(nil))
-	logger.Info("Test file hash calculated: %s", test6Hash)
+	test10Hash = hex.EncodeToString(hasher.Sum(nil))
+	logger.Info("Test file hash calculated: %s", test10Hash)
 
 	logger.Info("Updating Metadata...")
 	if err := runner.GetMetadata(); err != nil {
@@ -1225,11 +1224,11 @@ func runTestCase7(runner *task.Runner, mainUser *model.User) error {
 	}
 
 	logger.Info("Verifying very big file...")
-	return verifyFile(db, "/"+test6Name, test6Size)
+	return verifyFile(db, "/"+test10Name, test10Size)
 }
 
-func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
-	logger.Info("\n--- Test Case 8: Restoring from Soft-Deleted ---")
+func runTestCase7(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
+	logger.Info("\n--- Test Case 7: Restoring from Soft-Deleted ---")
 
 	// Pre-requisite: Move test_5.txt back from soft-deleted to root on Main (Google)
 	mainClient, err := runner.GetOrCreateClient(mainUser)
@@ -1373,9 +1372,9 @@ func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	return nil
 }
 
-func runTestCase9(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
-	logger.Info("\n--- Test Case 9: Restoring Fragmented File ---")
-	// Scenario: test_6.txt (3GB) was uploaded in TC7.
+func runTestCase11(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
+	logger.Info("\n--- Test Case 11: Restoring Fragmented File ---")
+	// Scenario: test_10.txt (3GB) was uploaded in TC10.
 	// It should exist on Google (Main), Microsoft (Backup), and fragmented on Telegram.
 	// We will delete it from Google and Microsoft, then Sync to see if it heals from Telegram.
 
@@ -1385,23 +1384,23 @@ func runTestCase9(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		return err
 	}
 
-	f6, err := db.GetFileByPath("/test_6.txt")
+	f10, err := db.GetFileByPath("/test_10.txt")
 	if err != nil {
 		return err
 	}
-	if f6 == nil {
-		return fmt.Errorf("test_6.txt missing from DB before test case 9")
+	if f10 == nil {
+		return fmt.Errorf("test_10.txt missing from DB before test case 11")
 	}
 
-	googleNativeID := getNativeID(f6, mainUser)
+	googleNativeID := getNativeID(f10, mainUser)
 	if googleNativeID != "" {
-		logger.Info("Deleting test_6.txt from Google Main directly...")
+		logger.Info("Deleting test_10.txt from Google Main directly...")
 		if err := mainClient.DeleteFile(googleNativeID); err != nil {
 			return fmt.Errorf("failed to delete from google: %w", err)
 		}
 		// Manually delete ALL Google replicas from DB because Google uses a shared folder model.
 		// Deleting the file from Main (Owner) removes it for everyone.
-		for _, r := range f6.Replicas {
+		for _, r := range f10.Replicas {
 			if r.Provider == model.ProviderGoogle {
 				if err := db.DeleteReplica(r.ID); err != nil {
 					return fmt.Errorf("failed to delete Google replica from DB: %w", err)
@@ -1417,14 +1416,14 @@ func runTestCase9(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		if err != nil {
 			continue
 		}
-		msNativeID := getNativeID(f6, u)
+		msNativeID := getNativeID(f10, u)
 		if msNativeID != "" {
-			logger.Info("Deleting test_6.txt from Microsoft Backup (%s) directly...", u.Email)
+			logger.Info("Deleting test_10.txt from Microsoft Backup (%s) directly...", u.Email)
 			if err := msClient.DeleteFile(msNativeID); err != nil {
 				return fmt.Errorf("failed to delete from microsoft: %w", err)
 			}
 			// Manually delete replica from DB
-			for _, r := range f6.Replicas {
+			for _, r := range f10.Replicas {
 				if r.Provider == u.Provider && (r.AccountID == u.Email || r.AccountID == u.Phone) {
 					if err := db.DeleteReplica(r.ID); err != nil {
 						return fmt.Errorf("failed to delete Microsoft replica from DB: %w", err)
@@ -1445,32 +1444,32 @@ func runTestCase9(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	// Check if file is back active on Google/MS
 
 	// Reload file from DB to see replica status
-	f6, err = db.GetFileByPath("/test_6.txt")
+	f10, err = db.GetFileByPath("/test_10.txt")
 	if err != nil {
 		return err
 	}
 
 	// Check Google Replica
 	googleReplicaActive := false
-	for _, r := range f6.Replicas {
+	for _, r := range f10.Replicas {
 		if r.Provider == model.ProviderGoogle && r.Status == "active" {
 			googleReplicaActive = true
 			break
 		}
 	}
 	if !googleReplicaActive {
-		return fmt.Errorf("test_6.txt was not restored to Google Main")
+		return fmt.Errorf("test_10.txt was not restored to Google Main")
 	} else {
-		logger.Info("Verified: test_6.txt is active on Google.")
+		logger.Info("Verified: test_10.txt is active on Google.")
 	}
 
 	// Verify Hash
-	if test6Hash != "" {
+	if test10Hash != "" {
 		logger.Info("Verifying restored file integrity...")
 
 		// Find the new Google replica
 		var googleReplica *model.Replica
-		for _, r := range f6.Replicas {
+		for _, r := range f10.Replicas {
 			if r.Provider == model.ProviderGoogle && r.Status == "active" {
 				googleReplica = r
 				break
@@ -1487,19 +1486,19 @@ func runTestCase9(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		}
 
 		restoredHash := hex.EncodeToString(hasher.Sum(nil))
-		if restoredHash != test6Hash {
-			return fmt.Errorf("hash mismatch! Original: %s, Restored: %s", test6Hash, restoredHash)
+		if restoredHash != test10Hash {
+			return fmt.Errorf("hash mismatch! Original: %s, Restored: %s", test10Hash, restoredHash)
 		}
 		logger.Info("File integrity verified: Hashes match.")
 	} else {
-		logger.Warning("Skipping hash verification because original hash is missing (Test Case 7 not run in this session?)")
+		logger.Warning("Skipping hash verification because original hash is missing (Test Case 10 not run in this session?)")
 	}
 
 	return nil
 }
 
-func runTestCase10(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
-	logger.Info("\n--- Test Case 10: Hard Deletion ---")
+func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
+	logger.Info("\n--- Test Case 8: Hard Deletion ---")
 
 	getSoftID := func(c api.CloudClient, rootID string) (string, error) {
 		aux, err := getOrCreateFolder(c, rootID, "sync-cloud-drives-aux")

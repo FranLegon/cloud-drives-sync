@@ -572,7 +572,7 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 	}
 
 	// Try direct transfer first
-	_, err := c.service.Permissions.Create(fileID, permission).TransferOwnership(true).SendNotificationEmail(true).Do()
+	_, err := c.service.Permissions.Create(fileID, permission).TransferOwnership(true).SendNotificationEmail(false).Do()
 	if err == nil {
 		logger.InfoTagged([]string{"Google", c.user.Email}, "Transferred ownership of file %s to %s", fileID, newOwnerEmail)
 		return nil
@@ -584,15 +584,26 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 
 		// 1. Find existing permission
 		var permID string
-		perms, err := c.service.Permissions.List(fileID).Fields("permissions(id, emailAddress, role)").Do()
+		perms, err := c.service.Permissions.List(fileID).Fields("permissions(id, emailAddress, role, permissionDetails)").Do()
 		if err != nil {
 			return fmt.Errorf("failed to list permissions: %w", err)
 		}
 
 		for _, p := range perms.Permissions {
 			if p.EmailAddress == newOwnerEmail {
-				permID = p.Id
-				break
+				// Check if inherited
+				isInherited := false
+				for _, pd := range p.PermissionDetails {
+					if pd.Inherited {
+						isInherited = true
+						break
+					}
+				}
+
+				if !isInherited {
+					permID = p.Id
+					break
+				}
 			}
 		}
 
@@ -603,7 +614,7 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 				Role:         "writer",
 				EmailAddress: newOwnerEmail,
 			}
-			createdPerm, err := c.service.Permissions.Create(fileID, newPerm).Fields("id").SendNotificationEmail(true).Do()
+			createdPerm, err := c.service.Permissions.Create(fileID, newPerm).Fields("id").SendNotificationEmail(false).Do()
 			if err != nil {
 				return fmt.Errorf("failed to create writer permission: %w", err)
 			}
@@ -612,7 +623,7 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 
 		// 3. Update to pending owner
 		updatePerm := &drive.Permission{
-			Role:         "writer",
+			Role:         "owner",
 			PendingOwner: true,
 		}
 
