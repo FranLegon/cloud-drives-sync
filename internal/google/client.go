@@ -572,7 +572,7 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 	}
 
 	// Try direct transfer first
-	_, err := c.service.Permissions.Create(fileID, permission).TransferOwnership(true).SendNotificationEmail(false).Do()
+	_, err := c.service.Permissions.Create(fileID, permission).TransferOwnership(true).SendNotificationEmail(true).Do() // I way rather not send email here, but it seems like Google requires it for ownership transfer
 	if err == nil {
 		logger.InfoTagged([]string{"Google", c.user.Email}, "Transferred ownership of file %s to %s", fileID, newOwnerEmail)
 		return nil
