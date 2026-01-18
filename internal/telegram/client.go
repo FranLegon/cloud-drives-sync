@@ -485,6 +485,11 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			meta.Replica.Provider = model.ProviderTelegram
 			meta.Replica.AccountID = c.user.Phone
 
+			// Filter out soft-deleted files
+			if meta.Replica.Status == "deleted" {
+				continue
+			}
+
 			if !meta.Replica.Fragmented {
 				// Single file - create File with Replica
 
