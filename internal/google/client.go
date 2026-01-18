@@ -627,7 +627,7 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 			PendingOwner: true,
 		}
 
-		_, err = c.service.Permissions.Update(fileID, permID, updatePerm).Do()
+		_, err = c.service.Permissions.Update(fileID, permID, updatePerm).TransferOwnership(true).Do()
 		if err != nil {
 			return fmt.Errorf("failed to set pending owner: %w", err)
 		}

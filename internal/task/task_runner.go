@@ -167,6 +167,11 @@ func (r *Runner) GetMetadata() error {
 		return fmt.Errorf("failed to mark deleted replicas: %w", err)
 	}
 
+	logger.Info("Processing hard deletes...")
+	if err := r.ProcessHardDeletes(); err != nil {
+		logger.Error("Failed to process hard deletes: %v", err)
+	}
+
 	logger.Info("Metadata gathering complete")
 	return nil
 }
@@ -1466,6 +1471,126 @@ func (r *Runner) GetProviderQuotasFromDB() ([]*model.ProviderQuota, error) {
 	}
 
 	return apiQuotas, nil
+}
+
+// ProcessHardDeletes detects files that are soft-deleted but missing from Google,
+// implying a hard delete. It propagates this state to other providers.
+func (r *Runner) ProcessHardDeletes() error {
+	files, err := r.db.GetFilesByStatus("softdeleted")
+	if err != nil {
+		return fmt.Errorf("failed to get soft-deleted files: %w", err)
+	}
+
+	if len(files) == 0 {
+		return nil
+	}
+
+	logger.Info("Checking %d soft-deleted files for hard deletion...", len(files))
+
+	for _, file := range files {
+		// Check if file is still present in any Google account (active)
+		hasGoogleReplica := false
+		for _, rep := range file.Replicas {
+			if rep.Provider == model.ProviderGoogle && rep.Status == "active" {
+				hasGoogleReplica = true
+				break
+			}
+		}
+
+		if !hasGoogleReplica {
+			logger.Info("Detected Hard Delete for %s (CalculatedID: %s). Propagating...", file.Path, file.CalculatedID)
+
+			// 1. Mark as deleted in DB
+			file.Status = "deleted"
+			if err := r.db.UpdateFile(file); err != nil {
+				logger.Error("Failed to update file status for %s: %v", file.Path, err)
+				continue
+			}
+
+			// 2. Propagate to active and soft-deleted replicas
+			for _, rep := range file.Replicas {
+				if rep.Status == "deleted" {
+					continue
+				}
+
+				// Check provider
+				if rep.Provider == model.ProviderMicrosoft {
+					// Physical Hard Delete
+					user := r.getUser(rep.Provider, rep.AccountID)
+					if user == nil {
+						logger.Warning("User not found for replica %s", rep.AccountID)
+						continue
+					}
+
+					client, err := r.GetOrCreateClient(user)
+					if err != nil {
+						logger.Error("Failed to create client for %s: %v", user.Email, err)
+						continue
+					}
+
+					logger.Info("Hard deleting replica on Microsoft: %s", rep.NativeID)
+					if err := client.DeleteFile(rep.NativeID); err != nil {
+						logger.Error("Failed to delete file on Microsoft: %v", err)
+					}
+
+					rep.Status = "deleted"
+					if err := r.db.UpdateReplica(rep); err != nil {
+						logger.Error("Failed to update replica status: %v", err)
+					}
+
+				} else if rep.Provider == model.ProviderTelegram {
+					// Update Caption
+					user := r.getUser(rep.Provider, rep.AccountID)
+					if user == nil {
+						continue
+					}
+
+					client, err := r.GetOrCreateClient(user)
+					if err != nil {
+						logger.Error("Failed to create client for Telegram: %v", err)
+						continue
+					}
+
+					if tgClient, ok := client.(*telegram.Client); ok {
+						logger.Info("Updating Telegram caption to 'deleted' for %s", rep.NativeID)
+						if err := tgClient.UpdateFileStatus(rep, "deleted"); err != nil {
+							logger.Error("Failed to update Telegram status: %v", err)
+						} else {
+							rep.Status = "deleted"
+							if err := r.db.UpdateReplica(rep); err != nil {
+								logger.Error("Failed to update replica status: %v", err)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// getUser helper
+func (r *Runner) getUser(provider model.Provider, accountID string) *model.User {
+	for i := range r.config.Users {
+		u := &r.config.Users[i]
+		// Check provider and ID (Email or Phone)
+		match := false
+		if u.Provider == provider {
+			if provider == model.ProviderTelegram {
+				if u.Phone == accountID {
+					match = true
+				}
+			} else {
+				if u.Email == accountID {
+					match = true
+				}
+			}
+		}
+		if match {
+			return u
+		}
+	}
+	return nil
 }
 
 // checkSoftDeletedConsistency ensures that if a file is in soft-deleted in one provider, it moves it there for others.

@@ -552,6 +552,47 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 	return files, rows.Err()
 }
 
+// GetFilesByStatus returns all files with a specific status
+func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
+	query := `
+	SELECT id, path, name, size, calculated_id, mod_time, status
+	FROM files
+	WHERE status = ?
+	ORDER BY path ASC
+	`
+
+	rows, err := db.conn.Query(query, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var files []*model.File
+	for rows.Next() {
+		file := &model.File{}
+		var modTime int64
+		err := rows.Scan(
+			&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status,
+		)
+		if err != nil {
+			return nil, err
+		}
+		file.ModTime = time.Unix(modTime, 0)
+		files = append(files, file)
+	}
+
+	// Load replicas for each file
+	for _, file := range files {
+		replicas, err := db.GetReplicas(file.ID)
+		if err != nil {
+			return nil, err
+		}
+		file.Replicas = replicas
+	}
+
+	return files, nil
+}
+
 // GetAllFilesAcrossProviders returns all files (alias for GetAllFiles for backwards compatibility)
 func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 	return db.GetAllFiles()

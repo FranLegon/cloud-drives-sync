@@ -72,6 +72,62 @@ func (c *Client) findMessagesByGeneratedID(generatedID string) ([]tg.MessageClas
 	return messages, nil
 }
 
+// UpdateFileStatus updates the status of a file (message caption)
+func (c *Client) UpdateFileStatus(replica *model.Replica, newStatus string) error {
+	if c.channelID == 0 {
+		return fmt.Errorf("channel not initialized")
+	}
+
+	// Create a copy of replica to modify status
+	// We do this to ensure the JSON sent contains the new status
+	// Note: We modifying the passed replica pointer?? No, let's copy carefully or just modify field for JSON generation.
+	// Since we are inside the client, modifying the passed struct might be side-effecty but acceptable if caller expects it.
+	// Or better, creating a shallow copy.
+	repCopy := *replica
+	repCopy.Status = newStatus
+
+	if !repCopy.Fragmented {
+		meta := CaptionMetadata{
+			Replica: &repCopy,
+		}
+		caption, err := json.Marshal(meta)
+		if err != nil {
+			return err
+		}
+
+		msgID, err := strconv.Atoi(repCopy.NativeID)
+		if err != nil {
+			return fmt.Errorf("invalid message ID: %w", err)
+		}
+
+		return c.updateMessageCaption(msgID, string(caption))
+	}
+
+	// Fragmented
+	for _, frag := range repCopy.Fragments {
+		meta := CaptionMetadata{
+			Replica:         &repCopy,
+			ReplicaFragment: frag,
+		}
+		caption, err := json.Marshal(meta)
+		if err != nil {
+			return err
+		}
+
+		msgID, err := strconv.Atoi(frag.NativeFragmentID)
+		if err != nil {
+			logger.Error("Invalid fragment message ID: %v", err)
+			continue
+		}
+
+		if err := c.updateMessageCaption(msgID, string(caption)); err != nil {
+			return fmt.Errorf("failed to update fragment %d: %w", frag.FragmentNumber, err)
+		}
+	}
+
+	return nil
+}
+
 // updateMessageCaption updates the caption of a message
 func (c *Client) updateMessageCaption(msgID int, caption string) error {
 	inputPeer := &tg.InputPeerChannel{
