@@ -180,6 +180,13 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				Fragmented:   false,
 			}
 
+			if len(f.Owners) > 0 {
+				replica.Owner = f.Owners[0].EmailAddress
+			} else {
+				// Fallback, assume account is owner if not specified (unlikely for Google)
+				replica.Owner = c.user.Email
+			}
+
 			file.Replicas = []*model.Replica{replica}
 			allFiles = append(allFiles, file)
 		}
@@ -297,6 +304,12 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		ModTime:      modTime,
 		Status:       "active",
 		Fragmented:   false,
+	}
+
+	if len(createdFile.Owners) > 0 {
+		replica.Owner = createdFile.Owners[0].EmailAddress
+	} else {
+		replica.Owner = c.user.Email
 	}
 
 	result.Replicas = []*model.Replica{replica}

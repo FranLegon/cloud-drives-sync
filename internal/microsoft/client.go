@@ -235,6 +235,13 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			Fragmented:   false,
 		}
 
+		if isShortcut || nativeHash == model.NativeHashShortcut {
+			// Shortcuts don't consume quota for the user (usually) and represent shared files
+			replica.Owner = "SHARED"
+		} else {
+			replica.Owner = c.user.Email
+		}
+
 		file.Replicas = []*model.Replica{replica}
 		allFiles = append(allFiles, file)
 		return true
@@ -389,6 +396,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		ModTime:      modTime,
 		Status:       "active",
 		Fragmented:   false,
+		Owner:        c.user.Email,
 	}
 
 	file.Replicas = []*model.Replica{replica}

@@ -161,6 +161,7 @@ func (db *DB) Initialize() error {
 
 	// Migrations
 	_, _ = db.conn.Exec("ALTER TABLE replicas ADD COLUMN last_seen_at INTEGER DEFAULT 0")
+	_, _ = db.conn.Exec("ALTER TABLE replicas ADD COLUMN owner TEXT DEFAULT ''")
 
 	return nil
 }
@@ -189,13 +190,13 @@ func (db *DB) InsertFile(file *model.File) error {
 	for _, replica := range file.Replicas {
 		replicaQuery := `
 		INSERT OR REPLACE INTO replicas (
-			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
 		_, err := tx.Exec(replicaQuery,
 			file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-			replica.ModTime.Unix(), replica.Status, replica.Fragmented)
+			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
 		if err != nil {
 			return fmt.Errorf("failed to insert replica: %w", err)
 		}
@@ -225,8 +226,8 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 	now := time.Now().Unix()
 	replicaQuery := `
 		INSERT INTO replicas (
-			calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, file_id, last_seen_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+			calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, file_id, last_seen_at, owner
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
 		ON CONFLICT(provider, account_id, native_id) DO UPDATE SET
 			calculated_id=excluded.calculated_id,
 			path=excluded.path,
@@ -236,7 +237,8 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 			mod_time=excluded.mod_time,
 			status=excluded.status,
 			fragmented=excluded.fragmented,
-			last_seen_at=excluded.last_seen_at
+			last_seen_at=excluded.last_seen_at,
+			owner=excluded.owner
 	`
 	replicaStmt, err := tx.Prepare(replicaQuery)
 	if err != nil {
@@ -273,7 +275,7 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 			_, err := replicaStmt.Exec(
 				replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 				string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-				replica.ModTime.Unix(), replica.Status, replica.Fragmented, now)
+				replica.ModTime.Unix(), replica.Status, replica.Fragmented, now, replica.Owner)
 
 			if err != nil {
 				return fmt.Errorf("failed to upsert replica: %w", err)
@@ -351,13 +353,13 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 func (db *DB) InsertReplica(replica *model.Replica) error {
 	query := `
 	INSERT INTO replicas (
-		file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	res, err := db.conn.Exec(query,
 		replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-		replica.ModTime.Unix(), replica.Status, replica.Fragmented)
+		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
 	if err != nil {
 		return fmt.Errorf("failed to insert replica: %w", err)
 	}
@@ -374,13 +376,13 @@ func (db *DB) InsertReplica(replica *model.Replica) error {
 func (db *DB) UpsertReplica(replica *model.Replica) error {
 	query := `
 	INSERT OR REPLACE INTO replicas (
-		id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	_, err := db.conn.Exec(query,
 		replica.ID, replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-		replica.ModTime.Unix(), replica.Status, replica.Fragmented)
+		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
 	return err
 }
 
@@ -601,7 +603,7 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 // GetReplicas returns all replicas for a file
 func (db *DB) GetReplicas(fileID string) ([]*model.Replica, error) {
 	query := `
-	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
+	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	FROM replicas
 	WHERE file_id = ?
 	`
@@ -616,10 +618,14 @@ func (db *DB) GetReplicas(fileID string) ([]*model.Replica, error) {
 		r := &model.Replica{}
 		var providerStr string
 		var modTime int64
+		var owner sql.NullString
 		err := rows.Scan(&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
-			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented)
+			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner)
 		if err != nil {
 			return nil, err
+		}
+		if owner.Valid {
+			r.Owner = owner.String
 		}
 		r.Provider = model.Provider(providerStr)
 		r.ModTime = time.Unix(modTime, 0)
@@ -669,7 +675,7 @@ func (db *DB) GetReplicaFragments(replicaID int64) ([]*model.ReplicaFragment, er
 // GetReplicasByAccount returns all replicas for a specific account
 func (db *DB) GetReplicasByAccount(provider model.Provider, accountID string) ([]*model.Replica, error) {
 	query := `
-	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
+	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	FROM replicas
 	WHERE provider = ? AND account_id = ?
 	`
@@ -684,10 +690,14 @@ func (db *DB) GetReplicasByAccount(provider model.Provider, accountID string) ([
 		r := &model.Replica{}
 		var providerStr string
 		var modTime int64
+		var owner sql.NullString
 		err := rows.Scan(&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
-			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented)
+			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner)
 		if err != nil {
 			return nil, err
+		}
+		if owner.Valid {
+			r.Owner = owner.String
 		}
 		r.Provider = model.Provider(providerStr)
 		r.ModTime = time.Unix(modTime, 0)
@@ -699,22 +709,26 @@ func (db *DB) GetReplicasByAccount(provider model.Provider, accountID string) ([
 // GetReplicaByNativeID returns a replica by its native ID and provider
 func (db *DB) GetReplicaByNativeID(provider model.Provider, nativeID string) (*model.Replica, error) {
 	query := `
-	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
+	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	FROM replicas
 	WHERE provider = ? AND native_id = ?
 	`
 	r := &model.Replica{}
 	var providerStr string
 	var modTime int64
+	var owner sql.NullString
 	err := db.conn.QueryRow(query, string(provider), nativeID).Scan(
 		&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
-		&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented,
+		&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if owner.Valid {
+		r.Owner = owner.String
 	}
 	r.Provider = model.Provider(providerStr)
 	r.ModTime = time.Unix(modTime, 0)
@@ -725,7 +739,7 @@ func (db *DB) GetReplicaByNativeID(provider model.Provider, nativeID string) (*m
 func (db *DB) GetReplicaByNativeFragmentID(nativeFragmentID string) (*model.Replica, error) {
 	// Join with fragments
 	query := `
-	SELECT r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented
+	SELECT r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
 	FROM replicas r
 	JOIN replica_fragments f ON r.id = f.replica_id
 	WHERE f.native_fragment_id = ?
@@ -733,15 +747,19 @@ func (db *DB) GetReplicaByNativeFragmentID(nativeFragmentID string) (*model.Repl
 	r := &model.Replica{}
 	var providerStr string
 	var modTime int64
+	var owner sql.NullString
 	err := db.conn.QueryRow(query, nativeFragmentID).Scan(
 		&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
-		&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented,
+		&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if owner.Valid {
+		r.Owner = owner.String
 	}
 	r.Provider = model.Provider(providerStr)
 	r.ModTime = time.Unix(modTime, 0)
@@ -919,13 +937,13 @@ func (db *DB) UpdateReplica(replica *model.Replica) error {
 	UPDATE replicas SET
 		file_id = ?, calculated_id = ?, path = ?, name = ?, size = ?,
 		provider = ?, account_id = ?, native_id = ?, native_hash = ?,
-		mod_time = ?, status = ?, fragmented = ?
+		mod_time = ?, status = ?, fragmented = ?, owner = ?
 	WHERE id = ?
 	`
 	_, err := db.conn.Exec(query,
 		replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.ID)
+		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner, replica.ID)
 	return err
 }
 
@@ -953,7 +971,7 @@ func (db *DB) UpdateReplicaFileID(replicaID int64, fileID string) error {
 // GetReplicasWithNullFileID returns all replicas without a file_id
 func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
 	query := `
-	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented
+	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	FROM replicas
 	WHERE file_id IS NULL
 	`
@@ -969,8 +987,9 @@ func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
 		var providerStr string
 		var modTime int64
 		var fileID sql.NullString
+		var owner sql.NullString
 		err := rows.Scan(&r.ID, &fileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
-			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented)
+			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner)
 		if err != nil {
 			return nil, err
 		}
@@ -978,6 +997,9 @@ func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
 		r.ModTime = time.Unix(modTime, 0)
 		if fileID.Valid {
 			r.FileID = fileID.String
+		}
+		if owner.Valid {
+			r.Owner = owner.String
 		}
 		replicas = append(replicas, r)
 	}
@@ -1130,10 +1152,13 @@ func (db *DB) MarkDeletedReplicas(startTime time.Time) error {
 
 // GetProviderUsage returns the total size of active files for a provider
 func (db *DB) GetProviderUsage(provider model.Provider) (int64, error) {
+	// Only count files where the account is the owner (or owner is unknown/empty)
+	// This prevents double counting of shared files across multiple accounts
 	query := `
 	SELECT COALESCE(SUM(size), 0)
 	FROM replicas
 	WHERE provider = ? AND status = 'active'
+	AND (owner = '' OR owner IS NULL OR owner = account_id)
 	`
 	var size int64
 	err := db.conn.QueryRow(query, provider).Scan(&size)

@@ -484,6 +484,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			meta.Replica.ModTime = modTime
 			meta.Replica.Provider = model.ProviderTelegram
 			meta.Replica.AccountID = c.user.Phone
+			meta.Replica.Owner = c.user.Phone
 
 			// Filter out soft-deleted files
 			if meta.Replica.Status == "deleted" {
@@ -584,6 +585,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				Size:         file.Size,
 				Provider:     model.ProviderTelegram,
 				AccountID:    c.user.Phone,
+				Owner:        c.user.Phone,
 				NativeID:     nativeID,
 				NativeHash:   "", // Telegram doesn't provide hashes
 				ModTime:      file.ModTime,

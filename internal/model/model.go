@@ -87,6 +87,7 @@ type Replica struct {
 	ModTime      time.Time          `json:"mod_time"`
 	Status       string             `json:"status"`
 	Fragmented   bool               `json:"fragmented"`
+	Owner        string             `json:"owner"`
 	Fragments    []*ReplicaFragment `json:"-"`
 }
 
