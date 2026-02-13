@@ -1158,7 +1158,7 @@ func (db *DB) GetProviderUsage(provider model.Provider) (int64, error) {
 	SELECT COALESCE(SUM(size), 0)
 	FROM replicas
 	WHERE provider = ? AND status = 'active'
-	AND (owner = '' OR owner IS NULL OR owner = account_id)
+	AND (owner = '' OR owner IS NULL OR LOWER(owner) = LOWER(account_id))
 	`
 	var size int64
 	err := db.conn.QueryRow(query, provider).Scan(&size)

@@ -1518,6 +1518,9 @@ func (r *Runner) GetProviderQuotasFromDB() ([]*model.ProviderQuota, error) {
 	}
 
 	// Populate SyncFolderUsed from DB
+	// SyncFolderUsed reflects pure "Active Sync" data size (filtered by DB).
+	// usage from API includes everything (soft-deleted, trash, other files).
+
 	for _, q := range apiQuotas {
 		usage, err := r.db.GetProviderUsage(q.Provider)
 		if err != nil {

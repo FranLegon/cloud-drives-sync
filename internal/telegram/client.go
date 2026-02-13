@@ -487,7 +487,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			meta.Replica.Owner = c.user.Phone
 
 			// Filter out soft-deleted files
-			if meta.Replica.Status == "deleted" {
+			if meta.Replica.Status == "deleted" || meta.Replica.Status == "softdeleted" {
 				continue
 			}
 
