@@ -21,20 +21,23 @@ import (
 
 // Runner handles task orchestration
 type Runner struct {
-	config      *model.Config
-	db          *database.DB
-	safeMode    bool
-	stopOnError bool
-	clients     map[string]api.CloudClient
+	config                *model.Config
+	db                    *database.DB
+	safeMode              bool
+	stopOnError           bool
+	clients               map[string]api.CloudClient
+	msShareFailureCache   map[string]bool // Cache of failed Microsoft sharing attempts (sourceAccount:targetAccount)
+	msShareFailureCacheMu sync.RWMutex
 }
 
 // NewRunner creates a new task runner
 func NewRunner(config *model.Config, db *database.DB, safeMode bool) *Runner {
 	return &Runner{
-		config:   config,
-		db:       db,
-		safeMode: safeMode,
-		clients:  make(map[string]api.CloudClient),
+		config:              config,
+		db:                  db,
+		safeMode:            safeMode,
+		clients:             make(map[string]api.CloudClient),
+		msShareFailureCache: make(map[string]bool),
 	}
 }
 
@@ -1021,8 +1024,9 @@ func (r *Runner) SyncProviders() error {
 			continue
 		}
 
+		// Check ALL replicas to determine soft-deleted status, not just main replicas
 		for _, replica := range f.Replicas {
-			if replica.Status != "active" || !isMainReplica(replica) {
+			if replica.Status != "active" {
 				continue
 			}
 
@@ -1030,13 +1034,17 @@ func (r *Runner) SyncProviders() error {
 			inSoftDeleted := strings.Contains(strings.ReplaceAll(f.Path, "\\", "/"), softDeletedPath)
 
 			if inSoftDeleted {
-				if intent.Status == "" {
+				// If ANY replica is in soft-deleted, mark the intent as soft-deleted
+				if intent.Status != "active" {
 					intent.Status = "soft-deleted"
 					intent.SoftPath = f.Path
 				}
 			} else {
-				intent.Status = "active"
-				intent.ActivePath = f.Path
+				// Only override soft-deleted with active if we have a main replica in active location
+				if isMainReplica(replica) {
+					intent.Status = "active"
+					intent.ActivePath = f.Path
+				}
 			}
 
 			intents[f.CalculatedID] = intent

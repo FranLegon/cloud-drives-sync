@@ -363,10 +363,31 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 		return fmt.Errorf("failed to get source client: %w", err)
 	}
 
-	// 2. Share Source File with Target User
-	logger.InfoTagged([]string{string(sourceReplica.Provider), sourceReplica.AccountID}, "Sharing %s with %s...", sourceFile.Name, targetUser.Email)
-	if err := sourceClient.ShareFolder(sourceReplica.NativeID, targetUser.Email, "reader"); err != nil {
-		logger.Warning("Share failed (attempting shortcut anyway): %v", err)
+	// 2. Share Source File with Target User (with cache check for Microsoft)
+	shareSkipped := false
+	if targetUser.Provider == model.ProviderMicrosoft {
+		cacheKey := fmt.Sprintf("%s:%s", sourceReplica.AccountID, targetUser.Email)
+		r.msShareFailureCacheMu.RLock()
+		if r.msShareFailureCache[cacheKey] {
+			logger.InfoTagged([]string{string(sourceReplica.Provider), sourceReplica.AccountID}, "Skipping share for %s with %s (cached failure)", sourceFile.Name, targetUser.Email)
+			shareSkipped = true
+		}
+		r.msShareFailureCacheMu.RUnlock()
+	}
+
+	if !shareSkipped {
+		logger.InfoTagged([]string{string(sourceReplica.Provider), sourceReplica.AccountID}, "Sharing %s with %s...", sourceFile.Name, targetUser.Email)
+		if err := sourceClient.ShareFolder(sourceReplica.NativeID, targetUser.Email, "reader"); err != nil {
+			logger.Warning("Share failed (attempting shortcut anyway): %v", err)
+			// Cache the failure for Microsoft accounts to avoid retrying
+			if targetUser.Provider == model.ProviderMicrosoft && strings.Contains(err.Error(), "There was a problem sharing") {
+				cacheKey := fmt.Sprintf("%s:%s", sourceReplica.AccountID, targetUser.Email)
+				r.msShareFailureCacheMu.Lock()
+				r.msShareFailureCache[cacheKey] = true
+				r.msShareFailureCacheMu.Unlock()
+				logger.InfoTagged([]string{string(sourceReplica.Provider), sourceReplica.AccountID}, "Cached sharing failure for %s -> %s", sourceReplica.AccountID, targetUser.Email)
+			}
+		}
 	}
 
 	// 3. Get Target Client
