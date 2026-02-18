@@ -3,6 +3,7 @@ package microsoft
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -352,6 +353,19 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 				}
 				break
 			}
+
+			// Capture final response for ID update on completion
+			if resp.StatusCode == 201 || resp.StatusCode == 200 {
+				body, _ := io.ReadAll(resp.Body)
+				// Create a temporary struct to decode just the ID
+				var item struct {
+					Id string `json:"id"`
+				}
+				if jsonErr := json.Unmarshal(body, &item); jsonErr == nil && item.Id != "" {
+					createdItem.SetId(&item.Id)
+				}
+			}
+
 			resp.Body.Close()
 			uploadErr = nil
 			break

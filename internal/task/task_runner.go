@@ -2,6 +2,7 @@ package task
 
 import (
 	"fmt"
+	"io"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -505,7 +506,7 @@ func (r *Runner) BalanceStorage() error {
 				continue
 			}
 
-			files, err := r.getAllFilesRecursive(source.Client, syncFolderID)
+			files, err := r.getAllFilesRecursive(source.Client, syncFolderID, "/")
 			if err != nil {
 				logger.Error("Failed to list files recursively: %v", err)
 				continue
@@ -673,7 +674,7 @@ func (r *Runner) FreeMain() error {
 		return err
 	}
 
-	files, err := r.getAllFilesRecursive(mainClient, syncFolderID)
+	files, err := r.getAllFilesRecursive(mainClient, syncFolderID, "/")
 	if err != nil {
 		logger.Error("Failed to list files recursively: %v", err)
 		return err
@@ -688,9 +689,9 @@ func (r *Runner) FreeMain() error {
 			continue
 		}
 
-		// Check if any replica belongs to the main user
+		// Check if any replica is OWNED by the main user (not just present in their account)
 		for _, replica := range f.Replicas {
-			if replica.AccountID == mainUser.Email {
+			if replica.AccountID == mainUser.Email && replica.Owner == mainUser.Email {
 				candidates = append(candidates, f)
 				seenIDs[f.ID] = true
 				break
@@ -739,22 +740,153 @@ func (r *Runner) FreeMain() error {
 				logger.InfoTagged([]string{"Google", mainUser.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
 				if acceptErr := target.Client.AcceptOwnership(file.ID); acceptErr != nil {
 					logger.Error("Failed to accept ownership: %v", acceptErr)
-					continue
+					err = fmt.Errorf("acceptance failed: %w", acceptErr)
+				} else {
+					err = nil // Clear error as acceptance succeeded
 				}
-				err = nil // Clear error as acceptance succeeded
 			}
+
+			fallbackUsed := false
 
 			if err != nil {
-				logger.Error("Failed to transfer ownership: %v", err)
-				continue
+				// Check for consent error Consumer to Consumer transfer restriction
+				if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") {
+					logger.InfoTagged([]string{"Google", mainUser.Email}, "Transfer via ownership not supported (consent required). Falling back to Copy+Delete...")
+
+					fallbackUsed = true
+
+					// 1. Download
+					pr, pw := io.Pipe()
+					downloadErrChan := make(chan error, 1)
+
+					go func() {
+						defer pw.Close()
+						logger.Info("Downloading %s for fallback transfer...", file.Name)
+						if err := mainClient.DownloadFile(file.ID, pw); err != nil {
+							downloadErrChan <- err
+						} else {
+							downloadErrChan <- nil
+						}
+						close(downloadErrChan)
+					}()
+
+					// 2. Upload
+					// Ensure destination folder exists
+					dir := filepath.Dir(file.Path)
+					dir = strings.ReplaceAll(dir, "\\", "/") // valid for Google Drive
+					if dir == "." || dir == "" {
+						dir = "/"
+					}
+
+					logger.Info("Ensuring folder structure for %s on target...", dir)
+					targetFolderID, folderErr := r.ensureFolderStructure(target.Client, dir, target.User.Provider)
+					if folderErr != nil {
+						logger.Error("Fallback: Failed to ensure destination folder: %v", folderErr)
+						pr.Close() // Stop download
+						continue
+					}
+
+					logger.Info("Uploading %s to target...", file.Name)
+					uploadedFile, uploadErr := target.Client.UploadFile(targetFolderID, file.Name, pr, file.Size)
+
+					// Check download error
+					if dlErr := <-downloadErrChan; dlErr != nil {
+						logger.Error("Fallback: Download failed: %v", dlErr)
+						continue
+					}
+
+					if uploadErr != nil {
+						logger.Error("Fallback: Upload failed: %v", uploadErr)
+						continue
+					}
+
+					logger.InfoTagged([]string{"Google", mainUser.Email}, "Fallback: Copy successful, deleting original...")
+
+					// Resolve old DB replica using provider/account/native key so we always have a valid DB row ID.
+					oldReplicaDB, dbLookupErr := r.db.GetReplicaByNativeID(model.ProviderGoogle, file.ID)
+					if dbLookupErr != nil {
+						logger.Warning("Fallback: Failed to lookup original replica in DB by NativeID: %v", dbLookupErr)
+					}
+					if oldReplicaDB != nil && oldReplicaDB.AccountID != mainUser.Email {
+						oldReplicaDB = nil
+					}
+
+					// If NativeID lookup failed, try finding by file path and account
+					if oldReplicaDB == nil {
+						logger.Info("Attempting to find replica by file path: %s", file.Path)
+						fileDB, err := r.db.GetFileByPath(file.Path)
+						if err == nil && fileDB != nil {
+							// Search for replica matching provider and account
+							for _, replica := range fileDB.Replicas {
+								if replica.Provider == model.ProviderGoogle && replica.AccountID == mainUser.Email {
+									oldReplicaDB = replica
+									logger.Info("Found replica by path: ID=%d, NativeID=%s", replica.ID, replica.NativeID)
+									break
+								}
+							}
+						}
+					}
+
+					// 3. Delete original file
+					deleteSucceeded := true
+					if delErr := mainClient.DeleteFile(file.ID); delErr != nil {
+						deleteSucceeded = false
+						logger.Error("Fallback: Failed to delete original file: %v", delErr)
+					}
+
+					// 4. Update DB manually because fallback creates a new file ID on target.
+					if uploadedFile != nil && len(uploadedFile.Replicas) > 0 {
+						newReplica := uploadedFile.Replicas[0]
+
+						if oldReplicaDB == nil {
+							// Database lookup failed - try to find by path/name or trigger metadata refresh
+							logger.Warning("Could not find original replica in DB for fallback update: %s", file.Name)
+							logger.Info("Database out of sync - metadata refresh will reconcile this on next sync")
+
+							// The new replica from uploadedFile will be caught by the next GetMetadata
+							// No action needed here - just log that reconciliation is required
+							if !deleteSucceeded {
+								logger.Warning("Original file could not be deleted - duplicate will exist until manual cleanup")
+							}
+						} else if deleteSucceeded {
+							// Normal case: update existing replica with new ID and owner
+							oldReplicaDB.NativeID = newReplica.NativeID
+							oldReplicaDB.AccountID = target.User.Email
+							oldReplicaDB.Owner = target.User.Email
+							oldReplicaDB.ModTime = time.Now()
+
+							logger.Info("Updating replica DB: OldID=%s, NewID=%s, NewOwner=%s", file.ID, newReplica.NativeID, target.User.Email)
+							if dbErr := r.db.UpdateReplica(oldReplicaDB); dbErr != nil {
+								logger.Warning("Failed to update replica details in DB: %v", dbErr)
+							}
+						} else {
+							// Delete failed, so source still exists. Record copied target as an additional active replica.
+							newReplicaDB := *oldReplicaDB
+							newReplicaDB.ID = 0
+							newReplicaDB.NativeID = newReplica.NativeID
+							newReplicaDB.AccountID = target.User.Email
+							newReplicaDB.Owner = target.User.Email
+							newReplicaDB.ModTime = time.Now()
+
+							if dbErr := r.db.InsertReplica(&newReplicaDB); dbErr != nil {
+								logger.Warning("Failed to insert fallback copied replica in DB: %v", dbErr)
+							}
+						}
+					}
+
+					err = nil // Cleared
+				} else {
+					logger.Error("Failed to transfer ownership: %v", err)
+					continue
+				}
 			}
 
-			// Update database to reflect ownership change
-			if err := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainUser.Email, file.ID, target.User.Email); err != nil {
-				logger.Warning("Failed to update local DB for %s: %v", file.Name, err)
-				// Don't stop process, but log warning
+			if err == nil && !fallbackUsed {
+				// Update database to reflect ownership change for standard transfer
+				if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainUser.Email, file.ID, target.User.Email); dbErr != nil {
+					logger.Warning("Failed to update local DB for %s: %v", file.Name, dbErr)
+				}
 			}
-
 		} else {
 			logger.DryRunTagged([]string{"Google", mainUser.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
 		}
@@ -768,7 +900,7 @@ func (r *Runner) FreeMain() error {
 }
 
 // getAllFilesRecursive recursively lists all files in a folder and its subfolders
-func (r *Runner) getAllFilesRecursive(client api.CloudClient, folderID string) ([]*model.File, error) {
+func (r *Runner) getAllFilesRecursive(client api.CloudClient, folderID, parentPath string) ([]*model.File, error) {
 	var allFiles []*model.File
 
 	// List files in current folder
@@ -776,6 +908,12 @@ func (r *Runner) getAllFilesRecursive(client api.CloudClient, folderID string) (
 	if err != nil {
 		return nil, err
 	}
+
+	// Assign paths
+	for _, f := range files {
+		f.Path = strings.ReplaceAll(filepath.Join(parentPath, f.Name), "\\", "/")
+	}
+
 	allFiles = append(allFiles, files...)
 	if len(files) > 0 {
 		names := make([]string, 0, len(files))
@@ -793,7 +931,8 @@ func (r *Runner) getAllFilesRecursive(client api.CloudClient, folderID string) (
 
 	// Recursively list files in subfolders
 	for _, folder := range folders {
-		subFiles, err := r.getAllFilesRecursive(client, folder.ID)
+		currentPath := strings.ReplaceAll(filepath.Join(parentPath, folder.Name), "\\", "/")
+		subFiles, err := r.getAllFilesRecursive(client, folder.ID, currentPath)
 		if err != nil {
 			return nil, err
 		}
@@ -813,90 +952,206 @@ func (r *Runner) SyncProviders() error {
 		return fmt.Errorf("failed to get files: %w", err)
 	}
 
-	// Group by normalized path - now tracking which providers have replicas for each file
-	filesByPath := make(map[string]map[model.Provider]*model.File)
+	softDeletedPath := "sync-cloud-drives-aux/soft-deleted"
+
+	type statusIntent struct {
+		Status     string
+		ActivePath string
+		SoftPath   string
+	}
+
+	buildFilesByPath := func(all []*model.File) map[string]map[model.Provider]*model.File {
+		result := make(map[string]map[model.Provider]*model.File)
+		for _, f := range all {
+			if f.Status != "active" {
+				continue
+			}
+			if _, ok := result[f.Path]; !ok {
+				result[f.Path] = make(map[model.Provider]*model.File)
+			}
+			for _, replica := range f.Replicas {
+				if replica.Status != "active" {
+					continue
+				}
+				result[f.Path][replica.Provider] = f
+			}
+		}
+		return result
+	}
+
+	filesByCalculatedID := make(map[string][]*model.File)
+	seenFileByID := make(map[string]bool)
 	for _, f := range files {
-		if f.Status != "active" {
+		if f.Status != "active" || f.CalculatedID == "" {
+			continue
+		}
+		if seenFileByID[f.ID] {
+			continue
+		}
+		seenFileByID[f.ID] = true
+		filesByCalculatedID[f.CalculatedID] = append(filesByCalculatedID[f.CalculatedID], f)
+	}
+
+	mainAccounts := make(map[model.Provider]map[string]bool)
+	for _, u := range r.config.Users {
+		if !u.IsMain {
+			continue
+		}
+		if _, ok := mainAccounts[u.Provider]; !ok {
+			mainAccounts[u.Provider] = make(map[string]bool)
+		}
+		if u.Provider == model.ProviderTelegram {
+			mainAccounts[u.Provider][u.Phone] = true
+		} else {
+			mainAccounts[u.Provider][u.Email] = true
+		}
+	}
+
+	isMainReplica := func(replica *model.Replica) bool {
+		accounts, ok := mainAccounts[replica.Provider]
+		if !ok {
+			return false
+		}
+		return accounts[replica.AccountID]
+	}
+
+	intents := make(map[string]statusIntent)
+	for _, f := range files {
+		if f.Status != "active" || f.CalculatedID == "" {
 			continue
 		}
 
-		if _, ok := filesByPath[f.Path]; !ok {
-			filesByPath[f.Path] = make(map[model.Provider]*model.File)
-		}
-		// Add entry for each provider that has a replica of this file
 		for _, replica := range f.Replicas {
-			if replica.Status != "active" {
+			if replica.Status != "active" || !isMainReplica(replica) {
 				continue
 			}
-			filesByPath[f.Path][replica.Provider] = f
+
+			intent := intents[f.CalculatedID]
+			inSoftDeleted := strings.Contains(strings.ReplaceAll(f.Path, "\\", "/"), softDeletedPath)
+
+			if inSoftDeleted {
+				if intent.Status == "" {
+					intent.Status = "soft-deleted"
+					intent.SoftPath = f.Path
+				}
+			} else {
+				intent.Status = "active"
+				intent.ActivePath = f.Path
+			}
+
+			intents[f.CalculatedID] = intent
 		}
 	}
+
+	moveReplicaToPath := func(replica *model.Replica, fileName, targetPath string) {
+		user := r.getUser(replica.Provider, replica.AccountID)
+		if user == nil {
+			logger.Error("User not found for replica %s on %s", replica.AccountID, replica.Provider)
+			return
+		}
+
+		client, err := r.GetOrCreateClient(user)
+		if err != nil {
+			logger.Error("Failed to get client for %s: %v", replica.AccountID, err)
+			return
+		}
+
+		targetDir := filepath.Dir(targetPath)
+		targetDir = strings.ReplaceAll(targetDir, "\\", "/")
+		if targetDir == "." || targetDir == "" {
+			targetDir = "/"
+		}
+
+		destID, err := r.ensureFolderStructure(client, targetDir, replica.Provider)
+		if err != nil {
+			logger.Error("Failed to ensure folder structure for %s: %v", targetDir, err)
+			return
+		}
+
+		if err := client.MoveFile(replica.NativeID, destID); err != nil {
+			logger.Error("Failed to move %s on %s to %s: %v", fileName, replica.Provider, targetPath, err)
+			return
+		}
+
+		replica.Path = strings.ReplaceAll(filepath.Join(targetDir, fileName), "\\", "/")
+		if err := r.db.UpdateReplica(replica); err != nil {
+			logger.Warning("Failed to update replica path in DB: %v", err)
+		}
+	}
+
+	for calculatedID, intent := range intents {
+		fileSet := filesByCalculatedID[calculatedID]
+		for _, f := range fileSet {
+			for _, replica := range f.Replicas {
+				if replica.Status != "active" || isMainReplica(replica) {
+					continue
+				}
+
+				replicaInSoftDeleted := strings.Contains(strings.ReplaceAll(replica.Path, "\\", "/"), softDeletedPath)
+
+				switch intent.Status {
+				case "soft-deleted":
+					if replicaInSoftDeleted {
+						continue
+					}
+
+					if replica.Provider == model.ProviderTelegram {
+						user := r.getUser(replica.Provider, replica.AccountID)
+						if user == nil {
+							logger.Error("User not found for telegram replica %s", replica.AccountID)
+							continue
+						}
+						client, err := r.GetOrCreateClient(user)
+						if err != nil {
+							logger.Error("Failed to get telegram client for %s: %v", replica.AccountID, err)
+							continue
+						}
+						tgClient, ok := client.(*telegram.Client)
+						if !ok {
+							logger.Error("Client is not a Telegram client for %s", replica.Provider)
+							continue
+						}
+						logger.Info("Marking soft-deleted file on Telegram: %s", f.Name)
+						if err := tgClient.UpdateFileStatus(replica, "deleted"); err != nil {
+							logger.Error("Failed to update file status on Telegram: %v", err)
+							continue
+						}
+						replica.Status = "deleted"
+						if err := r.db.UpdateReplica(replica); err != nil {
+							logger.Warning("Failed to update telegram replica status in DB: %v", err)
+						}
+						continue
+					}
+
+					moveReplicaToPath(replica, f.Name, "/"+softDeletedPath+"/"+f.Name)
+
+				case "active":
+					if !replicaInSoftDeleted {
+						continue
+					}
+					if intent.ActivePath == "" {
+						continue
+					}
+					if replica.Provider == model.ProviderTelegram {
+						continue
+					}
+					moveReplicaToPath(replica, f.Name, intent.ActivePath)
+				}
+			}
+		}
+	}
+
+	// Refresh after status convergence so copy/conflict sync uses updated paths/statuses
+	files, err = r.db.GetAllFilesAcrossProviders()
+	if err != nil {
+		return fmt.Errorf("failed to refresh files after status convergence: %w", err)
+	}
+
+	// Group by normalized path - now tracking which providers have replicas for each file
+	filesByPath := buildFilesByPath(files)
 
 	// Check for missing files
 	providers := []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram}
-	softDeletedPath := "sync-cloud-drives-aux/soft-deleted"
-
-	// Index soft deleted files by CalculatedID to detect moves to trash
-	softDeletedHashes := make(map[string]bool)
-	checkedAccounts := make(map[string]bool)
-
-	for _, user := range r.config.Users {
-		accountKey := string(user.Provider) + ":" + user.Email
-		if checkedAccounts[accountKey] {
-			continue
-		}
-		checkedAccounts[accountKey] = true
-
-		if user.Provider == model.ProviderTelegram {
-			continue
-		}
-
-		client, err := r.GetOrCreateClient(&user)
-		if err != nil {
-			logger.Warning("Failed to get client for %s: %v", user.Email, err)
-			continue
-		}
-
-		// Find aux folder (syncFolderID -> sync-cloud-drives-aux)
-		syncFolderID, err := client.GetSyncFolderID()
-		if err != nil {
-			logger.Warning("Failed to get sync folder for %s: %v", user.Email, err)
-			continue
-		}
-
-		findFolder := func(parentID, name string) (string, error) {
-			folders, err := client.ListFolders(parentID)
-			if err != nil {
-				return "", err
-			}
-			for _, f := range folders {
-				if f.Name == name {
-					return f.ID, nil
-				}
-			}
-			return "", fmt.Errorf("not found")
-		}
-
-		auxID, err := findFolder(syncFolderID, "sync-cloud-drives-aux")
-		if err != nil {
-			continue
-		}
-		softID, err := findFolder(auxID, "soft-deleted")
-		if err != nil {
-			continue
-		}
-
-		files, err := client.ListFiles(softID)
-		if err != nil {
-			logger.Warning("Failed to list soft-deleted files for %s: %v", user.Email, err)
-			continue
-		}
-
-		for _, f := range files {
-			softDeletedHashes[f.CalculatedID] = true
-			logger.Info("Found soft-deleted file: %s (Hash: %s) on %s", f.Name, f.CalculatedID, user.Email)
-		}
-	}
 
 	for path, fileMap := range filesByPath {
 		// Determine master file (prioritize Google, then Microsoft, then Telegram)
@@ -906,140 +1161,6 @@ func (r *Runner) SyncProviders() error {
 		isSoftDeleted := false
 		if strings.Contains(path, softDeletedPath) {
 			isSoftDeleted = true
-		}
-
-		// Pick any file to check calculated ID
-		var anyFile *model.File
-		for _, f := range fileMap {
-			anyFile = f
-			break
-		}
-
-		// If this file matches a soft-deleted file by content, and is NOT in soft-deleted folder, move it there
-		// EXCEPTION: If the file is present (Active) on the Main Account, assume it was Restored/Undeleted.
-		hasActiveMainReplica := false
-		for _, f := range fileMap {
-			for _, replica := range f.Replicas {
-				if replica.Status == "active" {
-					// Check if this replica belongs to a Main user
-					for _, u := range r.config.Users {
-						if u.IsMain && u.Provider == replica.Provider && u.Email == replica.AccountID {
-							hasActiveMainReplica = true
-							break
-						}
-					}
-				}
-				if hasActiveMainReplica {
-					break
-				}
-			}
-			if hasActiveMainReplica {
-				break
-			}
-		}
-
-		if anyFile != nil && strings.Contains(path, "test_4.txt") {
-			logger.Info("DEBUG: Checking %s. isSoftDeleted=%v, inHash=%v, Hash=%s, hasActiveMain=%v",
-				path, isSoftDeleted, softDeletedHashes[anyFile.CalculatedID], anyFile.CalculatedID, hasActiveMainReplica)
-		}
-
-		if anyFile != nil && !isSoftDeleted && softDeletedHashes[anyFile.CalculatedID] && !hasActiveMainReplica {
-			logger.Info("File %s matches a soft-deleted file. Moving to soft-deleted...", path)
-
-			for provider, f := range fileMap {
-				// Find replica for this provider
-				var replica *model.Replica
-				for _, r := range f.Replicas {
-					if r.Provider == provider {
-						replica = r
-						break
-					}
-				}
-				if replica == nil {
-					continue
-				}
-
-				if replica.Status != "active" {
-					continue
-				}
-
-				// Get Client
-				var email, phone string
-				if replica.Provider == model.ProviderTelegram {
-					phone = replica.AccountID
-				} else {
-					email = replica.AccountID
-				}
-				client, err := r.GetOrCreateClient(&model.User{
-					Provider: replica.Provider,
-					Email:    email,
-					Phone:    phone,
-				})
-				if err != nil {
-					logger.Error("Failed to get client for %s: %v", replica.AccountID, err)
-					continue
-				}
-
-				// Telegram doesn't support folders, so we update status to deleted instead of moving
-				if replica.Provider == model.ProviderTelegram {
-					logger.Info("Marking soft-deleted file on Telegram: %s", f.Name)
-					if tgClient, ok := client.(*telegram.Client); ok {
-						if err := tgClient.UpdateFileStatus(replica, "deleted"); err != nil {
-							logger.Error("Failed to update file status on Telegram: %v", err)
-						} else {
-							// Update replica to reflect deletion status
-							replica.Status = "deleted"
-							if err := r.db.UpdateReplica(replica); err != nil {
-								logger.Warning("Failed to update replica status in DB: %v", err)
-							}
-						}
-					} else {
-						logger.Error("Client is not a Telegram client for %s", replica.Provider)
-					}
-					continue
-				}
-
-				// Ensure soft-deleted folder exists
-				destID, err := r.ensureFolderStructure(client, softDeletedPath, provider)
-				if err != nil {
-					logger.Error("Failed to ensure soft-deleted folder: %v", err)
-					continue
-				}
-
-				// Move file
-				logger.Info("Moving %s to soft-deleted on %s...", f.Name, provider)
-				if err := client.MoveFile(replica.NativeID, destID); err != nil {
-					logger.Error("Failed to move file to soft-deleted: %v", err)
-				} else {
-					// Update DB (rudimentary, ideally we re-scan or update replica path)
-					// Verify logic relies on DB. We should update the replica status or path in DB.
-					// For now, let's mark it as 'deleted' or update path to soft-deleted in DB?
-					// Updating path to soft-deleted is better.
-					// But we don't have easy DB update method here for "Update Replica Path".
-					// We can assume next metadata scan fixes it. But test might verify immediately?
-					// Test calls verifyGone -> GetFileByPath(originalPath).
-					// If we moved it, GetFileByPath(originalPath) should assume it's gone?
-					// No, DB still has old path.
-					// We must update DB.
-
-					// Let's delete the file/replica from DB to match "Soft Deleted = Gone from View".
-					// Or change its path to the new path.
-					newPath := "/" + softDeletedPath + "/" + f.Name
-					// Update replica path
-					replica.Path = newPath
-					if err := r.db.UpdateReplica(replica); err != nil {
-						logger.Warning("Failed to update replica path in DB: %v", err)
-					}
-
-					// Update logical file path so verifying by old path fails/returns nil
-					f.Path = newPath
-					if err := r.db.UpdateFile(f); err != nil {
-						logger.Warning("Failed to update file path in DB: %v", err)
-					}
-				}
-			}
-			// Don't process this file further (don't sync it back)
-			continue
 		}
 
 		if f, ok := fileMap[model.ProviderGoogle]; ok {

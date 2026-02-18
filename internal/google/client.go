@@ -627,24 +627,39 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 				Role:         "writer",
 				EmailAddress: newOwnerEmail,
 			}
+			// Try without notification first, fallback to with notification
 			createdPerm, err := c.service.Permissions.Create(fileID, newPerm).Fields("id").SendNotificationEmail(false).Do()
 			if err != nil {
-				return fmt.Errorf("failed to create writer permission: %w", err)
+				logger.InfoTagged([]string{"Google", c.user.Email}, "Failed to create writer permission without notification, retrying with notification...")
+				createdPerm, err = c.service.Permissions.Create(fileID, newPerm).Fields("id").SendNotificationEmail(true).Do()
+				if err != nil {
+					return fmt.Errorf("failed to create writer permission: %w", err)
+				}
 			}
 			permID = createdPerm.Id
 		}
 
 		// 3. Update to pending owner
+		// NOTE: Do NOT use TransferOwnership(true) here - it requires consent for consumer accounts.
+		// TransferOwnership(true) should only be used when accepting/completing the transfer.
 		updatePerm := &drive.Permission{
 			Role:         "owner",
 			PendingOwner: true,
 		}
 
-		_, err = c.service.Permissions.Update(fileID, permID, updatePerm).TransferOwnership(true).Do()
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Setting pending owner for permission ID %s...", permID)
+		// Try without notification first, fallback to with notification
+		_, err = c.service.Permissions.Update(fileID, permID, updatePerm).Do()
 		if err != nil {
-			return fmt.Errorf("failed to set pending owner: %w", err)
+			logger.InfoTagged([]string{"Google", c.user.Email}, "Failed to set pending owner, retrying with notification...")
+			_, err = c.service.Permissions.Update(fileID, permID, updatePerm).SendNotificationEmail(true).Do()
+			if err != nil {
+				logger.Error("Failed to set pending owner: %v", err)
+				return fmt.Errorf("failed to set pending owner: %w", err)
+			}
 		}
 
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Pending owner set successfully, requires acceptance by %s", newOwnerEmail)
 		return api.ErrOwnershipTransferPending
 	}
 

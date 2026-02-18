@@ -142,26 +142,6 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		return fmt.Errorf("file has no viable replicas (only shortcuts found)")
 	}
 
-	// Use first viable replica
-	sourceReplica := viableReplicas[0]
-
-	// Get source client
-	var email, phone string
-	if sourceReplica.Provider == model.ProviderTelegram {
-		phone = sourceReplica.AccountID
-	} else {
-		email = sourceReplica.AccountID
-	}
-
-	sourceClient, err := r.GetOrCreateClient(&model.User{
-		Provider: sourceReplica.Provider,
-		Email:    email,
-		Phone:    phone,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to get source client: %w", err)
-	}
-
 	// 2. Get destination client
 	destClient, destUser, err := r.getDestinationClient(targetProvider, masterFile.Size)
 	if err != nil {
@@ -173,8 +153,6 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		finalName = targetName
 	}
 
-	logger.InfoTagged([]string{string(targetProvider), destUser.Email}, "Copying %s (as %s) from %s...", masterFile.Path, finalName, sourceReplica.Provider)
-
 	// 3. Ensure folder structure
 	dir := filepath.Dir(masterFile.Path)
 	// Normalize path separators
@@ -185,113 +163,165 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		return fmt.Errorf("failed to ensure folder structure: %w", err)
 	}
 
-	// 4. Transfer file
-	pr, pw := io.Pipe()
-	errChan := make(chan error, 1)
+	// 4. Transfer file (Try all viable replicas)
+	var lastErr error
+	for i, sourceReplica := range viableReplicas {
+		logger.InfoTagged([]string{string(targetProvider), destUser.Email}, "Copying %s (as %s) from %s (Replica %d/%d)...", masterFile.Path, finalName, sourceReplica.Provider, i+1, len(viableReplicas))
 
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.Error("Panic in download goroutine: %v", r)
-				pw.CloseWithError(fmt.Errorf("panic: %v", r))
-			} else {
-				pw.Close()
-			}
-		}()
+		// Get source client
+		var email, phone string
+		if sourceReplica.Provider == model.ProviderTelegram {
+			phone = sourceReplica.AccountID
+		} else {
+			email = sourceReplica.AccountID
+		}
 
-		if sourceReplica.Fragmented {
-			if len(sourceReplica.Fragments) == 0 {
-				errChan <- fmt.Errorf("replica is fragmented but has no fragments")
-				return
-			}
-			// Fragments are ordered by the DB query (ORDER BY fragment_number ASC)
-			for _, frag := range sourceReplica.Fragments {
-				if err := sourceClient.DownloadFile(frag.NativeFragmentID, pw); err != nil {
-					// Ignore closed pipe error (happens if upload is skipped or finishes early)
-					if err != io.ErrClosedPipe && !strings.Contains(err.Error(), "closed pipe") {
-						logger.Warning("Download error in pipe (fragment %d): %v", frag.FragmentNumber, err)
-						errChan <- err
-					}
+		sourceClient, err := r.GetOrCreateClient(&model.User{
+			Provider: sourceReplica.Provider,
+			Email:    email,
+			Phone:    phone,
+		})
+		if err != nil {
+			lastErr = fmt.Errorf("failed to get source client for replica %s: %w", sourceReplica.AccountID, err)
+			logger.Warning("%v", lastErr)
+			continue
+		}
+
+		pr, pw := io.Pipe()
+		errChan := make(chan error, 1)
+
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					logger.Error("Panic in download goroutine: %v", r)
+					pw.CloseWithError(fmt.Errorf("panic: %v", r))
+				} else {
+					pw.Close()
+				}
+			}()
+
+			if sourceReplica.Fragmented {
+				// Fragment logic...
+				if len(sourceReplica.Fragments) == 0 {
+					errChan <- fmt.Errorf("replica is fragmented but has no fragments")
 					return
 				}
+				for _, frag := range sourceReplica.Fragments {
+					if err := sourceClient.DownloadFile(frag.NativeFragmentID, pw); err != nil {
+						// Ignore closed pipe error (happens if upload is skipped or finishes early)
+						if err != io.ErrClosedPipe && !strings.Contains(err.Error(), "closed pipe") {
+							// Downgrade 404 errors
+							if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "notFound") {
+								logger.Info("Download source fragment skipped (404): %v", err)
+							} else {
+								logger.Warning("Download error in pipe (fragment %d): %v", frag.FragmentNumber, err)
+							}
+							errChan <- err
+						}
+						return
+					}
+				}
+			} else {
+				if err := sourceClient.DownloadFile(sourceReplica.NativeID, pw); err != nil {
+					// Ignore closed pipe error (happens if upload is skipped or finishes early)
+					if err != io.ErrClosedPipe && !strings.Contains(err.Error(), "closed pipe") {
+						// Downgrade 404 errors to Info as they are expected during sync of moved files
+						if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "notFound") {
+							logger.Info("Download source skipped (404 Not Found): %v", err)
+						} else {
+							logger.Warning("Download error in pipe: %v", err)
+						}
+						errChan <- err
+					}
+					return // Return early on error
+				}
 			}
+			errChan <- nil // Signal success
+			close(errChan)
+		}()
+
+		uploadedFile, uploadErr := destClient.UploadFile(parentID, finalName, pr, masterFile.Size)
+		// Close the reader to ensure the writer stops if it's still writing
+		_ = pr.Close()
+
+		// Check download error
+		var downloadErr error
+		select {
+		case downloadErr = <-errChan:
+		default:
+			// If channel is empty, it means goroutine hasn't finished or panic
+			// But since pr.Close() is called, download should error out or finish
+			// Actually best to wait for it.
+			downloadErr = <-errChan
+		}
+
+		if uploadErr != nil {
+			lastErr = fmt.Errorf("upload failed: %w", uploadErr)
+			logger.Warning("Copy attempt failed (Upload): %v", lastErr)
+			continue
+		}
+
+		if downloadErr != nil {
+			lastErr = fmt.Errorf("download failed: %w", downloadErr)
+			logger.Warning("Copy attempt failed (Download): %v", lastErr)
+			// Ensure we rollback the upload if possible?
+			// destClient.DeleteFile(uploadedFile.ID) // Optional but good practice
+			continue
+		}
+
+		// Success! Update Database with new replica
+		accountID := destUser.Email
+		if targetProvider == model.ProviderTelegram {
+			accountID = destUser.Phone
+		}
+
+		// Determine NativeID from uploaded result
+		nativeID := uploadedFile.ID
+		if len(uploadedFile.Replicas) > 0 && uploadedFile.Replicas[0].NativeID != "" {
+			nativeID = uploadedFile.Replicas[0].NativeID
+		}
+
+		newReplica := &model.Replica{
+			FileID:       masterFile.ID,
+			CalculatedID: masterFile.CalculatedID,
+			Path:         masterFile.Path,
+			Name:         uploadedFile.Name,
+			Size:         uploadedFile.Size,
+			Status:       "active",
+			Provider:     targetProvider,
+			AccountID:    accountID,
+			NativeID:     nativeID,
+			NativeHash:   uploadedFile.CalculatedID,
+			ModTime:      time.Now(),
+			Fragmented:   false,
+		}
+
+		if len(uploadedFile.Replicas) > 0 {
+			newReplica.Fragmented = uploadedFile.Replicas[0].Fragmented
+			newReplica.Fragments = uploadedFile.Replicas[0].Fragments
+		}
+
+		if err := r.db.InsertReplica(newReplica); err != nil {
+			logger.Error("Failed to insert new replica to DB: %v", err)
 		} else {
-			if err := sourceClient.DownloadFile(sourceReplica.NativeID, pw); err != nil {
-				// Ignore closed pipe error (happens if upload is skipped or finishes early)
-				if err != io.ErrClosedPipe && !strings.Contains(err.Error(), "closed pipe") {
-					logger.Warning("Download error in pipe: %v", err)
-					errChan <- err
+			// Insert fragments if any
+			if newReplica.Fragmented && len(newReplica.Fragments) > 0 {
+				for _, frag := range newReplica.Fragments {
+					frag.ReplicaID = newReplica.ID
+					if err := r.db.InsertReplicaFragment(frag); err != nil {
+						logger.Error("Failed to insert fragment into DB: %v", err)
+					}
 				}
 			}
+			// Update in-memory masterFile to include new replica
+			masterFile.Replicas = append(masterFile.Replicas, newReplica)
 		}
-		close(errChan)
-	}()
 
-	uploadedFile, err := destClient.UploadFile(parentID, finalName, pr, masterFile.Size)
-	// Close the reader to ensure the writer stops if it's still writing
-	_ = pr.Close()
-
-	if err != nil {
-		return fmt.Errorf("upload failed: %w", err)
+		logger.Info("File copied successfully")
+		return nil
 	}
 
-	// Check download error
-	if err := <-errChan; err != nil {
-		return fmt.Errorf("download failed: %w", err)
-	}
-
-	// Update Database with new replica
-	accountID := destUser.Email
-	if targetProvider == model.ProviderTelegram {
-		accountID = destUser.Phone
-	}
-
-	// Determine NativeID from uploaded result
-	nativeID := uploadedFile.ID
-	if len(uploadedFile.Replicas) > 0 && uploadedFile.Replicas[0].NativeID != "" {
-		nativeID = uploadedFile.Replicas[0].NativeID
-	}
-
-	newReplica := &model.Replica{
-		FileID:       masterFile.ID,
-		CalculatedID: masterFile.CalculatedID,
-		Path:         masterFile.Path,
-		Name:         uploadedFile.Name,
-		Size:         uploadedFile.Size,
-		Provider:     targetProvider,
-		AccountID:    accountID,
-		NativeID:     nativeID,
-		ModTime:      time.Now(),
-		Status:       "active",
-		Fragmented:   false, // Default safely, check below
-	}
-
-	// Copy fragmentation info if present in uploaded result
-	if len(uploadedFile.Replicas) > 0 {
-		newReplica.Fragmented = uploadedFile.Replicas[0].Fragmented
-		newReplica.Fragments = uploadedFile.Replicas[0].Fragments
-	}
-
-	if err := r.db.InsertReplica(newReplica); err != nil {
-		logger.Error("Failed to insert new replica into DB: %v", err)
-		// Don't fail the operation, but consistency is compromised
-	} else {
-		logger.Info("Replica recorded in DB for %s on %s", masterFile.Path, targetProvider)
-
-		// Insert fragments if any
-		if newReplica.Fragmented && len(newReplica.Fragments) > 0 {
-			// Update Replica ID for fragments (assigned by DB)
-			for _, frag := range newReplica.Fragments {
-				frag.ReplicaID = newReplica.ID
-				if err := r.db.InsertReplicaFragment(frag); err != nil {
-					logger.Error("Failed to insert fragment into DB: %v", err)
-				}
-			}
-		}
-	}
-
-	logger.InfoTagged([]string{string(targetProvider), destUser.Email}, "File copied successfully")
-	return nil
+	return fmt.Errorf("failed to copy file %s after %d attempts. Last error: %v", masterFile.Name, len(viableReplicas), lastErr)
 }
 
 // createShortcut shares the source file and creates a shortcut in the target account

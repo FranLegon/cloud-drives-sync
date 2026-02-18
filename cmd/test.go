@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
@@ -245,6 +246,11 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
+			return err
+		}
+	}
+	if shouldRun(12) {
+		if err := runTestCase12(runner, mainUser, backups); err != nil {
 			return err
 		}
 	}
@@ -942,19 +948,37 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	}
 
 	// Move test_5.txt to soft-deleted in Main
-	mainClient, _ := runner.GetOrCreateClient(mainUser)
-	mainSyncID, _ := mainClient.GetSyncFolderID()
-	softMain, _ := getSoftID(mainClient, mainSyncID)
-	moveFileWrapper(mainClient, mainUser, "/test_5.txt", softMain)
+	mainClient, err := runner.GetOrCreateClient(mainUser)
+	if err != nil {
+		return fmt.Errorf("failed to get main client: %w", err)
+	}
+	mainSyncID, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return fmt.Errorf("failed to get main sync folder ID: %w", err)
+	}
+	softMain, err := getSoftID(mainClient, mainSyncID)
+	if err != nil {
+		return fmt.Errorf("failed to get main soft-deleted folder: %w", err)
+	}
+	if err := moveFileWrapper(mainClient, mainUser, "/test_5.txt", softMain); err != nil {
+		logger.Warning("Failed to move /test_5.txt to soft-deleted (may already be moved/deleted): %v", err)
+		// Continue anyway - metadata sync should reconcile
+	}
 
 	// Move test_4.txt to soft-deleted in Google (Backup or Main)
 	u4, err := getUserForReplica(db, "/test_4.txt", model.ProviderGoogle, cfg.Users)
 	if err == nil {
-		c4, _ := runner.GetOrCreateClient(u4)
-		sid4, _ := c4.GetSyncFolderID()
-		softG4, _ := getSoftID(c4, sid4)
-		logger.Info("Moving /test_4.txt to soft-deleted on Google (%s)...", u4.Email)
-		moveFileWrapper(c4, u4, "/test_4.txt", softG4)
+		c4, err := runner.GetOrCreateClient(u4)
+		if err != nil {
+			logger.Warning("Failed to get client for test_4.txt move: %v", err)
+		} else {
+			sid4, _ := c4.GetSyncFolderID()
+			softG4, _ := getSoftID(c4, sid4)
+			logger.Info("Moving /test_4.txt to soft-deleted on Google (%s)...", u4.Email)
+			if err := moveFileWrapper(c4, u4, "/test_4.txt", softG4); err != nil {
+				logger.Warning("Failed to move /test_4.txt to soft-deleted: %v", err)
+			}
+		}
 	} else {
 		logger.Warning("Could not find Google replica for /test_4.txt for soft-deletion test")
 	}
@@ -967,7 +991,9 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 			c, _ := runner.GetOrCreateClient(u)
 			sid, _ := c.GetSyncFolderID()
 			softMS, _ := getSoftID(c, sid)
-			moveFileWrapper(c, u, "/Folder_MS/test_2.txt", softMS)
+			if err := moveFileWrapper(c, u, "/Folder_MS/test_2.txt", softMS); err != nil {
+				logger.Warning("Failed to move /Folder_MS/test_2.txt to soft-deleted: %v", err)
+			}
 		}
 	}
 
@@ -981,7 +1007,9 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 			// Note: getSoftID creates aux/soft-deleted.
 			// Re-instantiate getting soft ID for Google
 			softG2, _ := getSoftID(c, sid)
-			moveFileWrapper(c, u, "/Folder_Google/test_3.txt", softG2)
+			if err := moveFileWrapper(c, u, "/Folder_Google/test_3.txt", softG2); err != nil {
+				logger.Warning("Failed to move /Folder_Google/test_3.txt to soft-deleted: %v", err)
+			}
 		}
 	}
 
@@ -1498,6 +1526,126 @@ func runTestCase11(runner *task.Runner, mainUser *model.User, backups []*model.U
 	}
 
 	return nil
+}
+
+func runTestCase12(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
+	logger.Info("\n--- Test Case 12: Ownership Transfer API Test ---")
+
+	// Filter Google backups only (ownership transfer is Google-specific)
+	googleBackups := filterUsers(backups, model.ProviderGoogle)
+	if len(googleBackups) == 0 {
+		logger.Warning("No Google backup accounts found, skipping ownership transfer test")
+		return nil
+	}
+
+	targetBackup := googleBackups[0]
+
+	mainClient, err := runner.GetOrCreateClient(mainUser)
+	if err != nil {
+		return fmt.Errorf("failed to get main client: %w", err)
+	}
+
+	targetClient, err := runner.GetOrCreateClient(targetBackup)
+	if err != nil {
+		return fmt.Errorf("failed to get target client: %w", err)
+	}
+
+	mainSyncID, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return fmt.Errorf("failed to get main sync folder: %w", err)
+	}
+
+	// Create a test file
+	testFileName := "ownership_transfer_test.txt"
+	testData := []byte("Testing ownership transfer with pending owner flow")
+
+	logger.Info("Step 1: Uploading test file to main account...")
+	uploadedFile, err := mainClient.UploadFile(mainSyncID, testFileName, bytes.NewReader(testData), int64(len(testData)))
+	if err != nil {
+		return fmt.Errorf("failed to upload test file: %w", err)
+	}
+
+	fileID := uploadedFile.Replicas[0].NativeID
+	logger.Info("Uploaded file with ID: %s", fileID)
+
+	// Test direct transfer (expected to fail with consent error for consumer accounts)
+	logger.Info("\nStep 2: Testing direct ownership transfer...")
+	err = mainClient.TransferOwnership(fileID, targetBackup.Email)
+
+	if err == nil {
+		logger.Info("✓ Direct transfer succeeded!")
+		// Verify ownership changed
+		metadata, err := mainClient.GetFileMetadata(fileID)
+		if err != nil {
+			return fmt.Errorf("failed to get file metadata: %w", err)
+		}
+		if len(metadata.Replicas) > 0 && metadata.Replicas[0].Owner == targetBackup.Email {
+			logger.Info("✓ Ownership verified: %s", targetBackup.Email)
+			// Clean up
+			logger.Info("Cleaning up test file...")
+			targetClient.DeleteFile(fileID)
+			logger.Info("\n✓ Ownership Transfer Test PASSED (Direct transfer worked)")
+			return nil
+		}
+		return fmt.Errorf("ownership not transferred correctly")
+	}
+
+	// Check if it's the expected pending owner scenario
+	if err == api.ErrOwnershipTransferPending {
+		logger.Info("✓ Got pending transfer signal")
+
+		// Test acceptance
+		logger.Info("\nStep 3: Testing ownership acceptance...")
+		err = targetClient.AcceptOwnership(fileID)
+		if err != nil {
+			return fmt.Errorf("failed to accept ownership: %w", err)
+		}
+		logger.Info("✓ Ownership acceptance succeeded")
+
+		// Verify ownership changed
+		logger.Info("\nStep 4: Verifying ownership transfer...")
+		time.Sleep(2 * time.Second) // Give Google a moment to propagate
+
+		metadata, err := targetClient.GetFileMetadata(fileID)
+		if err != nil {
+			return fmt.Errorf("failed to get file metadata: %w", err)
+		}
+
+		if len(metadata.Replicas) > 0 && metadata.Replicas[0].Owner == targetBackup.Email {
+			logger.Info("✓ Ownership verified: file now owned by %s", targetBackup.Email)
+		} else {
+			logger.Warning("Owner field: %s (expected: %s)", metadata.Replicas[0].Owner, targetBackup.Email)
+			return fmt.Errorf("ownership not transferred correctly")
+		}
+
+		// Clean up
+		logger.Info("\nStep 5: Cleaning up test file...")
+		if err := targetClient.DeleteFile(fileID); err != nil {
+			logger.Warning("Failed to clean up test file: %v", err)
+		}
+
+		logger.Info("\n✓ Ownership Transfer Test PASSED (Pending owner flow worked)")
+		return nil
+	}
+
+	// Check if it's a consent error (expected for consumer accounts)
+	if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") {
+		logger.Info("✓ Got expected consent error for consumer account")
+		logger.Info("   Consumer-to-consumer transfers require manual consent via Drive UI")
+		logger.Info("   This is expected behavior - the system will use Copy+Delete fallback")
+
+		// Clean up
+		logger.Info("\nCleaning up test file...")
+		if err := mainClient.DeleteFile(fileID); err != nil {
+			logger.Warning("Failed to clean up test file: %v", err)
+		}
+
+		logger.Info("\n✓ Ownership Transfer Test PASSED (Consent required as expected for consumer accounts)")
+		return nil
+	}
+
+	// If we get here, it's an unexpected error
+	return fmt.Errorf("unexpected error during transfer: %w", err)
 }
 
 func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.User) error {

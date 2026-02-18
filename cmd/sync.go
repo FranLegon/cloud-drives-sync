@@ -64,8 +64,8 @@ func SyncAction(runner *task.Runner, isSafeMode bool) error {
 
 	// 4. Sync Providers
 	logger.Info("[Step 4/5] Syncing Providers...")
-	// Pass false to skip redundant metadata updates
-	if err := SyncProvidersAction(runner, false); err != nil {
+	// Refresh metadata after FreeMain to avoid stale replica IDs before provider sync.
+	if err := SyncProvidersAction(runner, true); err != nil {
 		return err
 	}
 
