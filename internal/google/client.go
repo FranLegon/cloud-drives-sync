@@ -643,14 +643,13 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 		// NOTE: Do NOT use TransferOwnership(true) here - it requires consent for consumer accounts.
 		// TransferOwnership(true) should only be used when accepting/completing the transfer.
 		// NOTE: Permissions.Update() does not support SendNotificationEmail() - notifications only work on Create()
-		// UPDATE: We need TransferOwnership(true) to properly set the owner role
 		updatePerm := &drive.Permission{
 			Role:         "owner",
 			PendingOwner: true,
 		}
 
 		logger.InfoTagged([]string{"Google", c.user.Email}, "Setting pending owner for permission ID %s...", permID)
-		_, err = c.service.Permissions.Update(fileID, permID, updatePerm).TransferOwnership(true).Do()
+		_, err = c.service.Permissions.Update(fileID, permID, updatePerm).Do()
 		if err != nil {
 			logger.Error("Failed to set pending owner: %v", err)
 			return fmt.Errorf("failed to set pending owner: %w", err)

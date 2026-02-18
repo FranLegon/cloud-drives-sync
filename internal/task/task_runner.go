@@ -1035,13 +1035,11 @@ func (r *Runner) SyncProviders() error {
 
 			if inSoftDeleted {
 				// If ANY replica is in soft-deleted, mark the intent as soft-deleted
-				if intent.Status != "active" {
-					intent.Status = "soft-deleted"
-					intent.SoftPath = f.Path
-				}
+				intent.Status = "soft-deleted"
+				intent.SoftPath = f.Path
 			} else {
 				// Only override soft-deleted with active if we have a main replica in active location
-				if isMainReplica(replica) {
+				if isMainReplica(replica) && intent.Status != "soft-deleted" {
 					intent.Status = "active"
 					intent.ActivePath = f.Path
 				}
