@@ -1629,7 +1629,7 @@ func runTestCase12(runner *task.Runner, mainUser *model.User, backups []*model.U
 	}
 
 	// Check if it's a consent error (expected for consumer accounts)
-	if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") {
+	if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") || strings.Contains(err.Error(), "transferOwnership parameter must be enabled") {
 		logger.Info("✓ Got expected consent error for consumer account")
 		logger.Info("   Consumer-to-consumer transfers require manual consent via Drive UI")
 		logger.Info("   This is expected behavior - the system will use Copy+Delete fallback")

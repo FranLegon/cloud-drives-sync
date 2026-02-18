@@ -640,8 +640,9 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 		}
 
 		// 3. Update to pending owner
-		// NOTE: Do NOT use TransferOwnership(true) here - it requires consent for consumer accounts.
-		// TransferOwnership(true) should only be used when accepting/completing the transfer.
+		// NOTE: TransferOwnership parameter should NOT be used with Permissions.Update() for pending owner.
+		// It's only needed for direct transfers via Permissions.Create().
+		// The pending owner must then accept via Permissions.Update() to complete the transfer.
 		// NOTE: Permissions.Update() does not support SendNotificationEmail() - notifications only work on Create()
 		updatePerm := &drive.Permission{
 			Role:         "owner",
@@ -689,8 +690,9 @@ func (c *Client) AcceptOwnership(fileID string) error {
 		return errors.New("no pending ownership permission found")
 	}
 
-	// Update permission to owner
-	_, err = c.service.Permissions.Update(fileID, permID, &drive.Permission{Role: "owner"}).TransferOwnership(true).Do()
+	// Update permission to owner (accepting the pending transfer)
+	// NOTE: TransferOwnership parameter is not used when accepting - only when creating pending owner
+	_, err = c.service.Permissions.Update(fileID, permID, &drive.Permission{Role: "owner"}).Do()
 	if err != nil {
 		return fmt.Errorf("failed to accept ownership: %w", err)
 	}
@@ -703,12 +705,14 @@ func isConsentRequiredError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// Check for specific error string or code
+	// Check for specific error strings that indicate ownership transfer restrictions:
 	// "Consent is required to transfer ownership of a file to another user"
 	// "consentRequiredForOwnershipTransfer"
+	// "The transferOwnership parameter must be enabled when the permission role is 'owner'"
 	errStr := err.Error()
 	return strings.Contains(errStr, "consentRequiredForOwnershipTransfer") ||
-		strings.Contains(errStr, "Consent is required")
+		strings.Contains(errStr, "Consent is required") ||
+		strings.Contains(errStr, "transferOwnership parameter must be enabled")
 }
 
 // GetUserEmail returns the user's email

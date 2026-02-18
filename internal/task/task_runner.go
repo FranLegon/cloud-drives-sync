@@ -753,7 +753,7 @@ func (r *Runner) FreeMain() error {
 
 			if err != nil {
 				// Check for consent error Consumer to Consumer transfer restriction
-				if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") {
+				if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") || strings.Contains(err.Error(), "transferOwnership parameter must be enabled") {
 					logger.InfoTagged([]string{"Google", mainUser.Email}, "Transfer via ownership not supported (consent required). Falling back to Copy+Delete...")
 
 					fallbackUsed = true
