@@ -678,6 +678,71 @@ var testFileContents = map[string]string{
 	"test_move.txt": "This is a file dedicated to testing movement.",
 }
 
+// Helper wrappers for clear test actions
+
+func simulateUserUploadFile(client api.CloudClient, folderID, fileName string, data []byte, userEmail string) (*model.File, error) {
+	logger.Info("[SIMULATE USER ACTION] User %s uploading file '%s' (%d bytes)", userEmail, fileName, len(data))
+	return client.UploadFile(folderID, fileName, bytes.NewReader(data), int64(len(data)))
+}
+
+func simulateUserMoveFile(client api.CloudClient, fileID, targetFolderID, fileName, userEmail string) error {
+	logger.Info("[SIMULATE USER ACTION] User %s moving file '%s' to folder %s", userEmail, fileName, targetFolderID)
+	return client.MoveFile(fileID, targetFolderID)
+}
+
+func simulateUserDeleteFile(client api.CloudClient, fileID, fileName, userEmail string) error {
+	logger.Info("[SIMULATE USER ACTION] User %s deleting file '%s'", userEmail, fileName)
+	return client.DeleteFile(fileID)
+}
+
+func simulateUserCreateFolder(client api.CloudClient, parentID, folderName, userEmail string) (*model.Folder, error) {
+	logger.Info("[SIMULATE USER ACTION] User %s creating folder '%s'", userEmail, folderName)
+	return client.CreateFolder(parentID, folderName)
+}
+
+func runCLIGetMetadata(runner *task.Runner) error {
+	logger.Info("[CLI COMMAND] Running: GetMetadata")
+	return runner.GetMetadata()
+}
+
+func runCLISync(runner *task.Runner) error {
+	logger.Info("[CLI COMMAND] Running: Sync (Full Pipeline)")
+	return SyncAction(runner, false)
+}
+
+func runCLIFreeMain(runner *task.Runner) error {
+	logger.Info("[CLI COMMAND] Running: FreeMain")
+	return runner.FreeMain()
+}
+
+func verifyFileInDB(path string) error {
+	logger.Info("[VERIFICATION] Checking file '%s' exists in DB", path)
+	return verifyFile(db, path, 0)
+}
+
+func verifyFileStatus(db *database.DB, path, expectedStatus string, shouldBeInactive bool) error {
+	if shouldBeInactive {
+		logger.Info("[VERIFICATION] Checking file '%s' is NOT '%s' (should be soft-deleted/inactive)", path, expectedStatus)
+		f, _ := db.GetFileByPath(path)
+		if f != nil && f.Status == expectedStatus {
+			return fmt.Errorf("file %s should be soft-deleted/inactive but is %s", path, f.Status)
+		}
+		return nil
+	}
+	logger.Info("[VERIFICATION] Checking file '%s' has status '%s'", path, expectedStatus)
+	f, err := db.GetFileByPath(path)
+	if err != nil {
+		return err
+	}
+	if f == nil {
+		return fmt.Errorf("file %s not found", path)
+	}
+	if f.Status != expectedStatus {
+		return fmt.Errorf("file %s has status %s, expected %s", path, f.Status, expectedStatus)
+	}
+	return nil
+}
+
 func runTestCase1(runner *task.Runner, mainUser *model.User) error {
 	logger.Info("\n--- Test Case 1: test_1.txt (Main -> Free -> Sync) ---")
 	f1Name := "test_1.txt"
@@ -693,27 +758,27 @@ func runTestCase1(runner *task.Runner, mainUser *model.User) error {
 	}
 
 	logger.Info("Uploading %s to Main Account...", f1Name)
-	if _, err := mainClient.UploadFile(mainSyncID, f1Name, bytes.NewReader(f1Data), int64(len(f1Data))); err != nil {
+	if _, err := simulateUserUploadFile(mainClient, mainSyncID, f1Name, f1Data, mainUser.Email); err != nil {
 		return fmt.Errorf("upload test_1 failed: %w", err)
 	}
 
 	logger.Info("Updating Metadata to find uploaded file...")
-	if err := runner.GetMetadata(); err != nil {
+	if err := runCLIGetMetadata(runner); err != nil {
 		return fmt.Errorf("metadata update failed: %w", err)
 	}
 
 	logger.Info("Running FreeMain...")
-	if err := runner.FreeMain(); err != nil {
+	if err := runCLIFreeMain(runner); err != nil {
 		return fmt.Errorf("FreeMain failed: %w", err)
 	}
 
 	logger.Info("Running Sync (Full Pipeline)...")
-	if err := SyncAction(runner, false); err != nil {
+	if err := runCLISync(runner); err != nil {
 		return fmt.Errorf("Sync failed: %w", err)
 	}
 
 	logger.Info("Verifying %s...", f1Name)
-	return verifyFile(db, "/"+f1Name, int64(len(f1Data)))
+	return verifyFileInDB("/" + f1Name)
 }
 
 func runTestCase2(runner *task.Runner, backups []*model.User) error {
@@ -740,8 +805,7 @@ func runTestCase2(runner *task.Runner, backups []*model.User) error {
 			return err
 		}
 
-		logger.Info("Uploading %s to %s (%s)...", filename, u.Email, u.Provider)
-		_, err = client.UploadFile(syncID, filename, bytes.NewReader(data), int64(len(data)))
+		_, err = simulateUserUploadFile(client, syncID, filename, data, u.Email)
 		return err
 	}
 
@@ -756,23 +820,23 @@ func runTestCase2(runner *task.Runner, backups []*model.User) error {
 	}
 
 	logger.Info("Updating Metadata to find uploaded files (Test Case 2)...")
-	if err := runner.GetMetadata(); err != nil {
+	if err := runCLIGetMetadata(runner); err != nil {
 		return fmt.Errorf("metadata update failed: %w", err)
 	}
 
 	logger.Info("Running Sync (Full Pipeline)...")
-	if err := SyncAction(runner, false); err != nil {
+	if err := runCLISync(runner); err != nil {
 		return fmt.Errorf("Sync failed: %w", err)
 	}
 
 	logger.Info("Verifying files...")
-	if err := verifyFile(db, "/test_2.txt", 0); err != nil {
+	if err := verifyFileInDB("/test_2.txt"); err != nil {
 		return err
 	}
-	if err := verifyFile(db, "/test_3.txt", 0); err != nil {
+	if err := verifyFileInDB("/test_3.txt"); err != nil {
 		return err
 	}
-	return verifyFile(db, "/test_4.txt", 0)
+	return verifyFileInDB("/test_4.txt")
 }
 
 func runTestCase3(runner *task.Runner, mainUser *model.User) error {
@@ -789,24 +853,21 @@ func runTestCase3(runner *task.Runner, mainUser *model.User) error {
 		return err
 	}
 
-	logger.Info("Uploading %s to Main Account (Streamed)...", test5Name)
+	logger.Info("[SIMULATE USER ACTION] Uploading %s to Main Account (Streamed, 50MB)...", test5Name)
 	if _, err := mainClient.UploadFile(mainSyncID, test5Name, io.LimitReader(rand.Reader, test5Size), test5Size); err != nil {
 		logger.Error("Upload failed: %v", err)
 		return fmt.Errorf("upload large file failed: %w", err)
 	}
 
-	logger.Info("Updating Metadata...")
-	if err := runner.GetMetadata(); err != nil {
+	if err := runCLIGetMetadata(runner); err != nil {
 		return fmt.Errorf("metadata update failed: %w", err)
 	}
 
-	logger.Info("Running Sync (Large File)...")
-	if err := SyncAction(runner, false); err != nil {
+	if err := runCLISync(runner); err != nil {
 		logger.Warning("Sync (Large File) had error: %v. Continuing...", err)
 	}
 
-	logger.Info("Verifying large file...")
-	return verifyFile(db, "/"+test5Name, test5Size)
+	return verifyFileInDB("/" + test5Name)
 }
 
 func runTestCase4(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
@@ -824,7 +885,7 @@ func runTestCase4(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		if nativeID == "" {
 			return fmt.Errorf("nativeID not found for %s on %s", path, u.Email)
 		}
-		logger.Info("Moving %s on %s...", path, u.Email)
+		logger.Info("[SIMULATE USER ACTION] User %s moving %s", u.Email, path)
 		return c.MoveFile(nativeID, targetFolderID)
 	}
 
@@ -841,24 +902,20 @@ func runTestCase4(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	moveName := "test_move.txt"
 	moveData := []byte(testFileContents[moveName])
 
-	logger.Info("Uploading %s to Main...", moveName)
-	if _, err := mainClient.UploadFile(mainSyncID, moveName, bytes.NewReader(moveData), int64(len(moveData))); err != nil {
+	if _, err := simulateUserUploadFile(mainClient, mainSyncID, moveName, moveData, mainUser.Email); err != nil {
 		return fmt.Errorf("upload %s failed: %w", moveName, err)
 	}
 
-	logger.Info("Updating Metadata to find %s...", moveName)
-	if err := runner.GetMetadata(); err != nil {
+	if err := runCLIGetMetadata(runner); err != nil {
 		return err
 	}
 
 	folderName := "Folder_Main"
-	logger.Info("Creating folder %s ...", folderName)
-	newFolder, err := mainClient.CreateFolder(mainSyncID, folderName)
+	newFolder, err := simulateUserCreateFolder(mainClient, mainSyncID, folderName, mainUser.Email)
 	if err != nil {
 		return err
 	}
 
-	logger.Info("Moving %s...", moveName)
 	if err := moveFileWrapper(mainClient, mainUser, "/"+moveName, newFolder.ID); err != nil {
 		return fmt.Errorf("failed to move %s: %w", moveName, err)
 	}
@@ -887,30 +944,28 @@ func runTestCase4(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		}
 	}
 
-	logger.Info("Updating Metadata...")
-	if err := runner.GetMetadata(); err != nil {
+	if err := runCLIGetMetadata(runner); err != nil {
 		return err
 	}
 
-	logger.Info("Running Sync (Full Pipeline)...")
-	if err := SyncAction(runner, false); err != nil {
+	if err := runCLISync(runner); err != nil {
 		return err
 	}
 
-	logger.Info("Verifying movements...")
-	if err := verifyFile(db, "/Folder_Main/test_move.txt", 0); err != nil {
+	logger.Info("[VERIFICATION] Verifying movements...")
+	if err := verifyFileInDB("/Folder_Main/test_move.txt"); err != nil {
 		logger.Error("Verification failed for /Folder_Main/test_move.txt: %v", err)
 		printAllFiles(db)
 		return err
 	}
 
 	if len(microsoftBackups) > 0 {
-		if err := verifyFile(db, "/Folder_MS/test_2.txt", 0); err != nil {
+		if err := verifyFileInDB("/Folder_MS/test_2.txt"); err != nil {
 			logger.Warning("Verification failed for /Folder_MS/test_2.txt (Move detection might be delayed due to ModTime mismatch): %v", err)
 		}
 	}
 	if len(googleBackups) > 0 {
-		if err := verifyFile(db, "/Folder_Google/test_3.txt", 0); err != nil {
+		if err := verifyFileInDB("/Folder_Google/test_3.txt"); err != nil {
 			logger.Warning("Verification failed for /Folder_Google/test_3.txt (Move detection might be delayed due to ModTime mismatch): %v", err)
 		}
 	}
@@ -944,25 +999,25 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		if nativeID == "" {
 			return fmt.Errorf("nativeID not found for %s on %s", path, u.Email)
 		}
+		logger.Info("[SIMULATE USER ACTION] User %s moving %s to soft-deleted", u.Email, path)
 		return c.MoveFile(nativeID, targetFolderID)
 	}
 
-	// Move test_5.txt to soft-deleted in Main
-	mainClient, err := runner.GetOrCreateClient(mainUser)
-	if err != nil {
-		return fmt.Errorf("failed to get main client: %w", err)
-	}
-	mainSyncID, err := mainClient.GetSyncFolderID()
-	if err != nil {
-		return fmt.Errorf("failed to get main sync folder ID: %w", err)
-	}
-	softMain, err := getSoftID(mainClient, mainSyncID)
-	if err != nil {
-		return fmt.Errorf("failed to get main soft-deleted folder: %w", err)
-	}
-	if err := moveFileWrapper(mainClient, mainUser, "/test_5.txt", softMain); err != nil {
-		logger.Warning("Failed to move /test_5.txt to soft-deleted (may already be moved/deleted): %v", err)
-		// Continue anyway - metadata sync should reconcile
+	// Move test_5.txt to soft-deleted (find which account has it after FreeMain)
+	u5, err := getUserForReplica(db, "/test_5.txt", model.ProviderGoogle, cfg.Users)
+	if err == nil {
+		c5, err := runner.GetOrCreateClient(u5)
+		if err != nil {
+			logger.Warning("Failed to get client for test_5.txt move: %v", err)
+		} else {
+			sid5, _ := c5.GetSyncFolderID()
+			softG5, _ := getSoftID(c5, sid5)
+			if err := moveFileWrapper(c5, u5, "/test_5.txt", softG5); err != nil {
+				logger.Warning("Failed to move /test_5.txt to soft-deleted: %v", err)
+			}
+		}
+	} else {
+		logger.Warning("Could not find Google replica for /test_5.txt for soft-deletion test")
 	}
 
 	// Move test_4.txt to soft-deleted in Google (Backup or Main)
@@ -974,7 +1029,6 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		} else {
 			sid4, _ := c4.GetSyncFolderID()
 			softG4, _ := getSoftID(c4, sid4)
-			logger.Info("Moving /test_4.txt to soft-deleted on Google (%s)...", u4.Email)
 			if err := moveFileWrapper(c4, u4, "/test_4.txt", softG4); err != nil {
 				logger.Warning("Failed to move /test_4.txt to soft-deleted: %v", err)
 			}
@@ -1013,32 +1067,25 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		}
 	}
 
-	logger.Info("Updating Metadata...")
-	if err := runner.GetMetadata(); err != nil {
-		return err
-	}
-	logger.Info("Running Sync (Full Pipeline)...")
-	if err := SyncAction(runner, false); err != nil {
+	if err := runCLIGetMetadata(runner); err != nil {
 		return err
 	}
 
-	verifyGone := func(path string) error {
-		f, _ := db.GetFileByPath(path)
-		if f != nil && f.Status == "active" {
-			return fmt.Errorf("file %s should be soft-deleted/inactive but is %s", path, f.Status)
-		}
-		return nil
-	}
-	if err := verifyGone("/test_5.txt"); err != nil {
+	if err := runCLISync(runner); err != nil {
 		return err
 	}
-	if err := verifyGone("/test_4.txt"); err != nil {
+
+	logger.Info("[VERIFICATION] Verifying soft-deletions...")
+	if err := verifyFileStatus(db, "/test_5.txt", "active", true); err != nil {
 		return err
 	}
-	if err := verifyGone("/Folder_MS/test_2.txt"); err != nil {
+	if err := verifyFileStatus(db, "/test_4.txt", "active", true); err != nil {
 		return err
 	}
-	if err := verifyGone("/Folder_Google/test_3.txt"); err != nil {
+	if err := verifyFileStatus(db, "/Folder_MS/test_2.txt", "active", true); err != nil {
+		return err
+	}
+	if err := verifyFileStatus(db, "/Folder_Google/test_3.txt", "active", true); err != nil {
 		return err
 	}
 	return nil
@@ -1058,6 +1105,7 @@ func runTestCase6(runner *task.Runner, mainUser *model.User, backups []*model.Us
 
 	// Create structure
 	// A: Level_1_A/Level_2_A/Level_3_A
+	logger.Info("[SIMULATE USER ACTION] Creating folder structure Level_1_A/Level_2_A/Level_3_A...")
 	l1a, err := getOrCreateFolder(mainClient, mainSyncID, "Level_1_A")
 	if err != nil {
 		return err
@@ -1073,6 +1121,7 @@ func runTestCase6(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	_ = l3a
 
 	// B: Level_1_B/Level_2_B
+	logger.Info("[SIMULATE USER ACTION] Creating folder structure Level_1_B/Level_2_B...")
 	l1b, err := getOrCreateFolder(mainClient, mainSyncID, "Level_1_B")
 	if err != nil {
 		return err
@@ -1083,6 +1132,7 @@ func runTestCase6(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	}
 
 	// C: Level_1_C/Level_2_C/Level_3_C/Level_4_C
+	logger.Info("[SIMULATE USER ACTION] Creating folder structure Level_1_C/Level_2_C/Level_3_C/Level_4_C...")
 	l1c, err := getOrCreateFolder(mainClient, mainSyncID, "Level_1_C")
 	if err != nil {
 		return err
@@ -1105,30 +1155,29 @@ func runTestCase6(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	// Move a file to Level_2_B
 	fBName := "test_6_B.txt"
 	fBData := []byte("Content for Level 2 B")
-	logger.Info("Uploading %s to Level_2_B...", fBName)
+	logger.Info("[SIMULATE USER ACTION] Uploading %s to Level_2_B...", fBName)
 	if _, err := mainClient.UploadFile(l2b.ID, fBName, bytes.NewReader(fBData), int64(len(fBData))); err != nil {
 		return fmt.Errorf("failed to upload %s: %w", fBName, err)
 	}
 
 	// Move another to Level_3_C
-	fCName := "test_6_C.txt" // Fixed typo in thought
+	fCName := "test_6_C.txt"
 	fCData := []byte("Content for Level 3 C")
-	logger.Info("Uploading %s to Level_3_C...", fCName)
+	logger.Info("[SIMULATE USER ACTION] Uploading %s to Level_3_C...", fCName)
 	if _, err := mainClient.UploadFile(l3c.ID, fCName, bytes.NewReader(fCData), int64(len(fCData))); err != nil {
 		return fmt.Errorf("failed to upload %s: %w", fCName, err)
 	}
 
-	logger.Info("Updating Metadata...")
-	if err := runner.GetMetadata(); err != nil {
+	if err := runCLIGetMetadata(runner); err != nil {
 		return err
 	}
-	logger.Info("Running Sync (Full Pipeline)...")
-	if err := SyncAction(runner, false); err != nil {
+
+	if err := runCLISync(runner); err != nil {
 		return err
 	}
 
 	// Assertions
-	logger.Info("Validating Microsoft folder structure...")
+	logger.Info("[VERIFICATION] Validating Microsoft folder structure...")
 	msBackups := filterUsers(backups, model.ProviderMicrosoft)
 	for _, u := range msBackups {
 		c, err := runner.GetOrCreateClient(u)
@@ -1193,22 +1242,11 @@ func runTestCase6(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		}
 	}
 
-	logger.Info("Validating Paths in DB/Telegram...")
-	verifyPath := func(expectedPath string) error {
-		f, err := db.GetFileByPath(expectedPath)
-		if err != nil {
-			return err
-		}
-		if f == nil {
-			return fmt.Errorf("file %s not found in DB", expectedPath)
-		}
-		return nil
-	}
-
-	if err := verifyPath("/Level_1_B/Level_2_B/test_6_B.txt"); err != nil {
+	logger.Info("[VERIFICATION] Validating Paths in DB/Telegram...")
+	if err := verifyFileInDB("/Level_1_B/Level_2_B/test_6_B.txt"); err != nil {
 		return err
 	}
-	if err := verifyPath("/Level_1_C/Level_2_C/Level_3_C/test_6_C.txt"); err != nil {
+	if err := verifyFileInDB("/Level_1_C/Level_2_C/Level_3_C/test_6_C.txt"); err != nil {
 		// Note from requirement: "Level_3_C" in requirement "move another to Level_3_C"
 		// Path: Level_1_C/Level_2_C/Level_3_C/test_6_C.txt
 		return err
@@ -1231,7 +1269,7 @@ func runTestCase10(runner *task.Runner, mainUser *model.User) error {
 		return err
 	}
 
-	logger.Info("Uploading %s to Main Account (Streamed)...", test10Name)
+	logger.Info("[SIMULATE USER ACTION] Uploading %s to Main Account (Streamed, 3GB)...", test10Name)
 	// Calculate hash while uploading
 	hasher := sha256.New()
 	reader := io.LimitReader(rand.Reader, test10Size)
@@ -1244,18 +1282,16 @@ func runTestCase10(runner *task.Runner, mainUser *model.User) error {
 	test10Hash = hex.EncodeToString(hasher.Sum(nil))
 	logger.Info("Test file hash calculated: %s", test10Hash)
 
-	logger.Info("Updating Metadata...")
-	if err := runner.GetMetadata(); err != nil {
+	if err := runCLIGetMetadata(runner); err != nil {
 		return fmt.Errorf("metadata update failed: %w", err)
 	}
 
-	logger.Info("Running Sync (Very Big File)...")
-	if err := SyncAction(runner, false); err != nil {
+	if err := runCLISync(runner); err != nil {
 		logger.Warning("Sync (Very Big File) had error: %v. Continuing...", err)
 	}
 
-	logger.Info("Verifying very big file...")
-	return verifyFile(db, "/"+test10Name, test10Size)
+	logger.Info("[VERIFICATION] Verifying very big file...")
+	return verifyFileInDB("/" + test10Name)
 }
 
 func runTestCase7(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
@@ -1311,40 +1347,38 @@ func runTestCase7(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		return fmt.Errorf("test_5.txt not found in soft-deleted folder")
 	}
 
-	logger.Info("Restoring test_5.txt on Main (Google): Moving from soft-deleted to root...")
+	logger.Info("[SIMULATE USER ACTION] Restoring test_5.txt on Main (Google): Moving from soft-deleted to root...")
 	if err := mainClient.MoveFile(test5NativeID, mainSyncID); err != nil {
 		return fmt.Errorf("failed to move test_5.txt back to root: %w", err)
 	}
 
-	logger.Info("Updating Metadata...")
-	if err := runner.GetMetadata(); err != nil {
+	if err := runCLIGetMetadata(runner); err != nil {
 		return err
 	}
 
 	// At this point, the system should detect the move (restore)
-	logger.Info("Running Sync to propagate restore...")
-	if err := SyncAction(runner, false); err != nil {
+	if err := runCLISync(runner); err != nil {
 		return err
 	}
 
 	// Verify test_5.txt is active in DB
-	if err := verifyFile(db, "/test_5.txt", 0); err != nil {
+	logger.Info("[VERIFICATION] Verifying restored file...")
+	if err := verifyFileInDB("/test_5.txt"); err != nil {
 		return fmt.Errorf("verification of restored file in DB failed: %w", err)
 	}
 	// Verify it's considered Active (not stuck in trash)
-	f, _ := db.GetFileByPath("/test_5.txt")
-	if f.Status != "active" {
-		return fmt.Errorf("test_5.txt status is %s, expected active", f.Status)
+	if err := verifyFileStatus(db, "/test_5.txt", "active", false); err != nil {
+		return err
 	}
 
 	// Verify test_4.txt is NOT restored (still soft-deleted/deleted)
-	f4, _ := db.GetFileByPath("/test_4.txt")
-	if f4 != nil && f4.Status == "active" {
-		return fmt.Errorf("test_4.txt should still be soft-deleted/inactive but is %s", f4.Status)
+	logger.Info("[VERIFICATION] Verifying test_4.txt remains soft-deleted...")
+	if err := verifyFileStatus(db, "/test_4.txt", "active", true); err != nil {
+		return err
 	}
 
 	// Verify test_4.txt is physically in soft-deleted for all providers (cloud check)
-	logger.Info("Verifying test_4.txt persisted in soft-deleted on all providers...")
+	logger.Info("[VERIFICATION] Verifying test_4.txt persisted in soft-deleted on all providers...")
 	allUsers := append([]*model.User{mainUser}, backups...)
 	for _, u := range allUsers {
 		if u.Provider == model.ProviderTelegram {
@@ -1425,7 +1459,7 @@ func runTestCase11(runner *task.Runner, mainUser *model.User, backups []*model.U
 
 	googleNativeID := getNativeID(f10, mainUser)
 	if googleNativeID != "" {
-		logger.Info("Deleting test_10.txt from Google Main directly...")
+		logger.Info("[SIMULATE USER ACTION] Deleting test_10.txt from Google Main directly...")
 		if err := mainClient.DeleteFile(googleNativeID); err != nil {
 			return fmt.Errorf("failed to delete from google: %w", err)
 		}
@@ -1449,7 +1483,7 @@ func runTestCase11(runner *task.Runner, mainUser *model.User, backups []*model.U
 		}
 		msNativeID := getNativeID(f10, u)
 		if msNativeID != "" {
-			logger.Info("Deleting test_10.txt from Microsoft Backup (%s) directly...", u.Email)
+			logger.Info("[SIMULATE USER ACTION] Deleting test_10.txt from Microsoft Backup (%s) directly...", u.Email)
 			if err := msClient.DeleteFile(msNativeID); err != nil {
 				return fmt.Errorf("failed to delete from microsoft: %w", err)
 			}
@@ -1466,8 +1500,7 @@ func runTestCase11(runner *task.Runner, mainUser *model.User, backups []*model.U
 	}
 
 	// 3. Sync
-	logger.Info("Running Sync (Attempting Restore from Fragments)...")
-	if err := SyncAction(runner, false); err != nil {
+	if err := runCLISync(runner); err != nil {
 		return err
 	}
 
@@ -1475,6 +1508,7 @@ func runTestCase11(runner *task.Runner, mainUser *model.User, backups []*model.U
 	// Check if file is back active on Google/MS
 
 	// Reload file from DB to see replica status
+	logger.Info("[VERIFICATION] Checking if file was restored from fragments...")
 	f10, err = db.GetFileByPath("/test_10.txt")
 	if err != nil {
 		return err
@@ -1496,7 +1530,7 @@ func runTestCase11(runner *task.Runner, mainUser *model.User, backups []*model.U
 
 	// Verify Hash
 	if test10Hash != "" {
-		logger.Info("Verifying restored file integrity...")
+		logger.Info("[VERIFICATION] Verifying restored file integrity...")
 
 		// Find the new Google replica
 		var googleReplica *model.Replica
@@ -1559,7 +1593,7 @@ func runTestCase12(runner *task.Runner, mainUser *model.User, backups []*model.U
 	testFileName := "ownership_transfer_test.txt"
 	testData := []byte("Testing ownership transfer with pending owner flow")
 
-	logger.Info("Step 1: Uploading test file to main account...")
+	logger.Info("[SIMULATE USER ACTION] Step 1: Uploading test file to main account...")
 	uploadedFile, err := mainClient.UploadFile(mainSyncID, testFileName, bytes.NewReader(testData), int64(len(testData)))
 	if err != nil {
 		return fmt.Errorf("failed to upload test file: %w", err)
@@ -1569,12 +1603,13 @@ func runTestCase12(runner *task.Runner, mainUser *model.User, backups []*model.U
 	logger.Info("Uploaded file with ID: %s", fileID)
 
 	// Test direct transfer (expected to fail with consent error for consumer accounts)
-	logger.Info("\nStep 2: Testing direct ownership transfer...")
+	logger.Info("\n[SIMULATE USER ACTION] Step 2: Testing direct ownership transfer...")
 	err = mainClient.TransferOwnership(fileID, targetBackup.Email)
 
 	if err == nil {
 		logger.Info("✓ Direct transfer succeeded!")
 		// Verify ownership changed
+		logger.Info("[VERIFICATION] Verifying ownership changed...")
 		metadata, err := mainClient.GetFileMetadata(fileID)
 		if err != nil {
 			return fmt.Errorf("failed to get file metadata: %w", err)
@@ -1582,7 +1617,7 @@ func runTestCase12(runner *task.Runner, mainUser *model.User, backups []*model.U
 		if len(metadata.Replicas) > 0 && metadata.Replicas[0].Owner == targetBackup.Email {
 			logger.Info("✓ Ownership verified: %s", targetBackup.Email)
 			// Clean up
-			logger.Info("Cleaning up test file...")
+			logger.Info("[SIMULATE USER ACTION] Cleaning up test file...")
 			targetClient.DeleteFile(fileID)
 			logger.Info("\n✓ Ownership Transfer Test PASSED (Direct transfer worked)")
 			return nil
@@ -1595,7 +1630,7 @@ func runTestCase12(runner *task.Runner, mainUser *model.User, backups []*model.U
 		logger.Info("✓ Got pending transfer signal")
 
 		// Test acceptance
-		logger.Info("\nStep 3: Testing ownership acceptance...")
+		logger.Info("\n[SIMULATE USER ACTION] Step 3: Testing ownership acceptance...")
 		err = targetClient.AcceptOwnership(fileID)
 		if err != nil {
 			return fmt.Errorf("failed to accept ownership: %w", err)
@@ -1603,7 +1638,7 @@ func runTestCase12(runner *task.Runner, mainUser *model.User, backups []*model.U
 		logger.Info("✓ Ownership acceptance succeeded")
 
 		// Verify ownership changed
-		logger.Info("\nStep 4: Verifying ownership transfer...")
+		logger.Info("\n[VERIFICATION] Step 4: Verifying ownership transfer...")
 		time.Sleep(2 * time.Second) // Give Google a moment to propagate
 
 		metadata, err := targetClient.GetFileMetadata(fileID)
@@ -1619,7 +1654,7 @@ func runTestCase12(runner *task.Runner, mainUser *model.User, backups []*model.U
 		}
 
 		// Clean up
-		logger.Info("\nStep 5: Cleaning up test file...")
+		logger.Info("\n[SIMULATE USER ACTION] Step 5: Cleaning up test file...")
 		if err := targetClient.DeleteFile(fileID); err != nil {
 			logger.Warning("Failed to clean up test file: %v", err)
 		}
@@ -1635,7 +1670,7 @@ func runTestCase12(runner *task.Runner, mainUser *model.User, backups []*model.U
 		logger.Info("   This is expected behavior - the system will use Copy+Delete fallback")
 
 		// Clean up
-		logger.Info("\nCleaning up test file...")
+		logger.Info("\n[SIMULATE USER ACTION] Cleaning up test file...")
 		if err := mainClient.DeleteFile(fileID); err != nil {
 			logger.Warning("Failed to clean up test file: %v", err)
 		}
@@ -1673,7 +1708,7 @@ func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.Us
 			return err
 		}
 		for _, f := range files {
-			logger.Info("Deleting %s from soft-deleted on %s...", f.Name, u.Email)
+			logger.Info("[SIMULATE USER ACTION] Deleting %s from soft-deleted on %s...", f.Name, u.Email)
 			c.DeleteFile(f.ID)
 		}
 		return nil
@@ -1697,12 +1732,11 @@ func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		deleteSoftContent(c, sid, u)
 	}
 
-	logger.Info("Updating Metadata...")
-	if err := runner.GetMetadata(); err != nil {
+	if err := runCLIGetMetadata(runner); err != nil {
 		return err
 	}
-	logger.Info("Running Sync...")
-	return SyncAction(runner, false)
+
+	return runCLISync(runner)
 }
 
 func testMetadata(runner *task.Runner) error {

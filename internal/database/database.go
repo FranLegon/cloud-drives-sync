@@ -824,6 +824,51 @@ func (db *DB) DeleteReplica(id int64) error {
 	return err
 }
 
+// DeleteStaleReplicasByNativeID marks as deleted all replicas pointing to a stale native_id
+// after a file has been transferred/moved. This prevents 404 errors when trying to download
+// from replicas that reference a file that no longer exists.
+func (db *DB) DeleteStaleReplicasByNativeID(provider model.Provider, oldNativeID string, excludeReplicaID int64) error {
+	query := `
+	UPDATE replicas
+	SET status = 'deleted'
+	WHERE provider = ? AND native_id = ? AND id != ? AND status = 'active'
+	`
+	_, err := db.conn.Exec(query, string(provider), oldNativeID, excludeReplicaID)
+	return err
+}
+
+// UpdateSoftDeletedFileStatus marks files as softdeleted if ALL active replicas are in soft-deleted path
+func (db *DB) UpdateSoftDeletedFileStatus() error {
+	query := `
+	UPDATE files
+	SET status = 'softdeleted'
+	WHERE status = 'active'
+	AND id IN (
+		SELECT f.id
+		FROM files f
+		WHERE f.status = 'active'
+		-- File has at least one active replica
+		AND EXISTS (
+			SELECT 1
+			FROM replicas r
+			WHERE r.file_id = f.id 
+			AND r.status = 'active'
+		)
+		-- ALL active replicas are in soft-deleted path (no replicas outside soft-deleted)
+		AND NOT EXISTS (
+			SELECT 1
+			FROM replicas r
+			WHERE r.file_id = f.id 
+			AND r.status = 'active'
+			AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
+			AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
+		)
+	)
+	`
+	_, err := db.conn.Exec(query)
+	return err
+}
+
 // DBExists checks if the database file exists
 func DBExists() bool {
 	dbPath := GetDBPath()

@@ -156,6 +156,11 @@ func (r *Runner) GetMetadata() error {
 		return fmt.Errorf("failed to update logical files: %w", err)
 	}
 
+	logger.Info("Updating soft-deleted file status...")
+	if err := r.db.UpdateSoftDeletedFileStatus(); err != nil {
+		return fmt.Errorf("failed to update soft-deleted status: %w", err)
+	}
+
 	logger.Info("Linking replicas to logical files...")
 	if err := r.db.LinkOrphanedReplicas(); err != nil {
 		return fmt.Errorf("failed to link orphaned replicas: %w", err)
@@ -853,6 +858,7 @@ func (r *Runner) FreeMain() error {
 							}
 						} else if deleteSucceeded {
 							// Normal case: update existing replica with new ID and owner
+							oldNativeID := oldReplicaDB.NativeID // Save old ID before updating
 							oldReplicaDB.NativeID = newReplica.NativeID
 							oldReplicaDB.AccountID = target.User.Email
 							oldReplicaDB.Owner = target.User.Email
@@ -861,6 +867,12 @@ func (r *Runner) FreeMain() error {
 							logger.Info("Updating replica DB: OldID=%s, NewID=%s, NewOwner=%s", file.ID, newReplica.NativeID, target.User.Email)
 							if dbErr := r.db.UpdateReplica(oldReplicaDB); dbErr != nil {
 								logger.Warning("Failed to update replica details in DB: %v", dbErr)
+							} else {
+								// Mark any other replicas with the old NativeID as deleted since the file no longer exists
+								logger.Info("Cleaning stale replicas with OldID=%s...", oldNativeID)
+								if dbErr := r.db.DeleteStaleReplicasByNativeID(model.ProviderGoogle, oldNativeID, oldReplicaDB.ID); dbErr != nil {
+									logger.Warning("Failed to clean stale replicas: %v", dbErr)
+								}
 							}
 						} else {
 							// Delete failed, so source still exists. Record copied target as an additional active replica.
