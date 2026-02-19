@@ -223,6 +223,7 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 	// Upsert replicas using ON CONFLICT logic to preserve file_id if it exists.
 	// We rely on the unique index (provider, account_id, native_id).
 	// usage of RETURNING id requires SQLite 3.35+
+	// IMPORTANT: Don't resurrect 'deleted' replicas with stale native_id after file transfers
 	now := time.Now().Unix()
 	replicaQuery := `
 		INSERT INTO replicas (
@@ -235,7 +236,12 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 			size=excluded.size,
 			native_hash=excluded.native_hash,
 			mod_time=excluded.mod_time,
-			status=excluded.status,
+			-- Only update status to 'active' if the replica was not previously marked as 'deleted' due to stale native_id
+			-- or if the file content has actually changed (different hash/size)
+			status=CASE 
+				WHEN replicas.status = 'deleted' AND (replicas.native_hash = excluded.native_hash OR excluded.native_hash = '' OR replicas.native_hash = '') THEN 'deleted'
+				ELSE excluded.status 
+			END,
 			fragmented=excluded.fragmented,
 			last_seen_at=excluded.last_seen_at,
 			owner=excluded.owner
@@ -837,36 +843,112 @@ func (db *DB) DeleteStaleReplicasByNativeID(provider model.Provider, oldNativeID
 	return err
 }
 
-// UpdateSoftDeletedFileStatus marks files as softdeleted if ALL active replicas are in soft-deleted path
-func (db *DB) UpdateSoftDeletedFileStatus() error {
-	query := `
+// UpdateSoftDeletedFileStatus marks files as softdeleted or active based on replica locations
+// Priority: Google provider state takes precedence when replicas disagree
+// Only considers recently scanned replicas (last_seen_at >= query start time)
+func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
+	minTimestamp := scanStartTime.Unix()
+
+	// Single-pass update: Determine the correct status based on current replica locations
+	// A file should be 'active' if ANY recently scanned Google replica is outside soft-deleted folder
+	// A file should be 'softdeleted' only if ALL recently scanned Google replicas are in soft-deleted folder
+	// For files without Google replicas, use the same logic but check all providers
+
+	updateQuery := `
 	UPDATE files
-	SET status = 'softdeleted'
-	WHERE status = 'active'
-	AND id IN (
-		SELECT f.id
-		FROM files f
-		WHERE f.status = 'active'
-		-- File has at least one active replica
-		AND EXISTS (
+	SET status = CASE
+		-- First check: Does file have any recently scanned Google replica NOT in soft-deleted?
+		-- If yes, mark as 'active'
+		WHEN EXISTS (
 			SELECT 1
 			FROM replicas r
-			WHERE r.file_id = f.id 
+			WHERE r.file_id = files.id
 			AND r.status = 'active'
-		)
-		-- ALL active replicas are in soft-deleted path (no replicas outside soft-deleted)
-		AND NOT EXISTS (
-			SELECT 1
-			FROM replicas r
-			WHERE r.file_id = f.id 
-			AND r.status = 'active'
+			AND r.provider = 'google'
+			AND r.last_seen_at >= ?
 			AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
 			AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
-		)
+		) THEN 'active'
+		
+		-- Second check: If file has Google replicas and ALL are in soft-deleted, mark as 'softdeleted'
+		WHEN EXISTS (
+			SELECT 1
+			FROM replicas r
+			WHERE r.file_id = files.id
+			AND r.status = 'active'
+			AND r.provider = 'google'
+			AND r.last_seen_at >= ?
+		) AND NOT EXISTS (
+			SELECT 1
+			FROM replicas r
+			WHERE r.file_id = files.id
+			AND r.status = 'active'
+			AND r.provider = 'google'
+			AND r.last_seen_at >= ?
+			AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
+			AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
+		) THEN 'softdeleted'
+		
+		-- Third check: For files without Google replicas, check other providers
+		-- If any non-Google replica is NOT in soft-deleted, mark as 'active'
+		WHEN NOT EXISTS (
+			SELECT 1
+			FROM replicas r
+			WHERE r.file_id = files.id
+			AND r.status = 'active'
+			AND r.provider = 'google'
+			AND r.last_seen_at >= ?
+		) AND EXISTS (
+			SELECT 1
+			FROM replicas r
+			WHERE r.file_id = files.id
+			AND r.status = 'active'
+			AND r.last_seen_at >= ?
+			AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
+			AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
+		) THEN 'active'
+		
+		-- Fourth check: For files without Google replicas, if ALL other replicas are in soft-deleted
+		WHEN NOT EXISTS (
+			SELECT 1
+			FROM replicas r
+			WHERE r.file_id = files.id
+			AND r.status = 'active'
+			AND r.provider = 'google'
+			AND r.last_seen_at >= ?
+		) AND EXISTS (
+			SELECT 1
+			FROM replicas r
+			WHERE r.file_id = files.id
+			AND r.status = 'active'
+			AND r.last_seen_at >= ?
+		) AND NOT EXISTS (
+			SELECT 1
+			FROM replicas r
+			WHERE r.file_id = files.id
+			AND r.status = 'active'
+			AND r.last_seen_at >= ?
+			AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
+			AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
+		) THEN 'softdeleted'
+		
+		-- Default: Keep existing status
+		ELSE status
+	END
+	WHERE EXISTS (
+		SELECT 1
+		FROM replicas r
+		WHERE r.file_id = files.id
+		AND r.status = 'active'
+		AND r.last_seen_at >= ?
 	)
 	`
-	_, err := db.conn.Exec(query)
-	return err
+
+	if _, err := db.conn.Exec(updateQuery, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp); err != nil {
+		return fmt.Errorf("failed to update soft-deleted status: %w", err)
+	}
+
+	return nil
 }
 
 // DBExists checks if the database file exists
@@ -1152,17 +1234,24 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 }
 
 // UpdateLogicalFilesFromReplicas updates file metadata from the latest active replica
+// Improved move detection: prioritize replicas with changed paths and consider calculated_id/hash matching
 func (db *DB) UpdateLogicalFilesFromReplicas() error {
 	// SQLite 3.33+ supported UPDATE FROM.
 	// We want to pick the latest active replica for each file.
 	// We prioritize replicas that indicate a change (path difference) if timestamps are equal.
+	// Enhanced to better detect moves by considering calculated_id and hash matches
 	query := `
 	WITH RankedReplicas AS (
 		SELECT r.file_id, r.size, r.mod_time, r.calculated_id, r.name, r.path,
 			ROW_NUMBER() OVER (
 				PARTITION BY r.file_id 
-				ORDER BY r.mod_time DESC, 
-				         CASE WHEN r.path != f.path THEN 1 ELSE 0 END DESC
+				ORDER BY 
+					-- Prioritize replicas where path changed (likely a move)
+					CASE WHEN r.path != f.path THEN 0 ELSE 1 END,
+					-- Then by modification time (most recent first)
+					r.mod_time DESC,
+					-- Then by calculated_id match (same content)
+					CASE WHEN r.calculated_id = f.calculated_id THEN 0 ELSE 1 END
 			) as rn
 		FROM replicas r
 		JOIN files f ON f.id = r.file_id
@@ -1178,7 +1267,6 @@ func (db *DB) UpdateLogicalFilesFromReplicas() error {
 	FROM RankedReplicas rr
 	WHERE files.id = rr.file_id
 	AND rr.rn = 1
-	AND rr.mod_time >= files.mod_time
 	`
 	_, err := db.conn.Exec(query)
 	return err

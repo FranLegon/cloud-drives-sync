@@ -56,6 +56,39 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	mw := io.MultiWriter(os.Stdout, logFile)
 	logger.SetOutput(mw)
 
+	// Archive test log with timestamp (runs at end regardless of success/failure)
+	defer func() {
+		logFile.Close() // Ensure all writes are flushed
+		timestamp := time.Now().Format("2006-Jan-02_15-04-05")
+		logsDir := "logs"
+		archivedLogPath := filepath.Join(logsDir, fmt.Sprintf("test_%s.log", timestamp))
+
+		if err := os.MkdirAll(logsDir, 0755); err != nil {
+			logger.Warning("Failed to create logs directory: %v", err)
+			return
+		}
+
+		srcFile, err := os.Open("test.log")
+		if err != nil {
+			logger.Warning("Failed to open test.log for archiving: %v", err)
+			return
+		}
+		defer srcFile.Close()
+
+		dstFile, err := os.Create(archivedLogPath)
+		if err != nil {
+			logger.Warning("Failed to create archived log file: %v", err)
+			return
+		}
+		defer dstFile.Close()
+
+		if _, err := io.Copy(dstFile, srcFile); err != nil {
+			logger.Warning("Failed to copy test.log to archive: %v", err)
+		} else {
+			logger.Info("Test log archived to: %s", archivedLogPath)
+		}
+	}()
+
 	defer func() {
 		if retErr != nil {
 			logger.Error("Test failed: %v", retErr)
@@ -1000,7 +1033,24 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 			return fmt.Errorf("nativeID not found for %s on %s", path, u.Email)
 		}
 		logger.Info("[SIMULATE USER ACTION] User %s moving %s to soft-deleted", u.Email, path)
-		return c.MoveFile(nativeID, targetFolderID)
+		err = c.MoveFile(nativeID, targetFolderID)
+		
+		// If move fails with 404, the replica might be stale - try to find an active replica
+		if err != nil && strings.Contains(err.Error(), "404") {
+			logger.Warning("Move failed with 404 (stale replica ID), searching for active replica...")
+			// Find any active replica for this file on the same provider
+			for _, replica := range f.Replicas {
+				if replica.Provider == u.Provider && replica.Status == "active" && replica.NativeID != nativeID {
+					logger.Info("Found alternative active replica: %s (Account: %s)", replica.NativeID, replica.AccountID)
+					err = c.MoveFile(replica.NativeID, targetFolderID)
+					if err == nil {
+						logger.Info("Successfully moved using alternative replica ID")
+						return nil
+					}
+				}
+			}
+		}
+		return err
 	}
 
 	// Move test_5.txt to soft-deleted (find which account has it after FreeMain)

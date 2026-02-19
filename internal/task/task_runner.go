@@ -156,11 +156,6 @@ func (r *Runner) GetMetadata() error {
 		return fmt.Errorf("failed to update logical files: %w", err)
 	}
 
-	logger.Info("Updating soft-deleted file status...")
-	if err := r.db.UpdateSoftDeletedFileStatus(); err != nil {
-		return fmt.Errorf("failed to update soft-deleted status: %w", err)
-	}
-
 	logger.Info("Linking replicas to logical files...")
 	if err := r.db.LinkOrphanedReplicas(); err != nil {
 		return fmt.Errorf("failed to link orphaned replicas: %w", err)
@@ -169,6 +164,11 @@ func (r *Runner) GetMetadata() error {
 	logger.Info("Creating new logical files for unmatched replicas...")
 	if err := r.db.PromoteOrphanedReplicasToFiles(); err != nil {
 		return fmt.Errorf("failed to promote orphaned replicas: %w", err)
+	}
+
+	logger.Info("Updating soft-deleted file status...")
+	if err := r.db.UpdateSoftDeletedFileStatus(startTime); err != nil {
+		return fmt.Errorf("failed to update soft-deleted status: %w", err)
 	}
 
 	logger.Info("Marking missing replicas as deleted...")
@@ -872,6 +872,27 @@ func (r *Runner) FreeMain() error {
 								logger.Info("Cleaning stale replicas with OldID=%s...", oldNativeID)
 								if dbErr := r.db.DeleteStaleReplicasByNativeID(model.ProviderGoogle, oldNativeID, oldReplicaDB.ID); dbErr != nil {
 									logger.Warning("Failed to clean stale replicas: %v", dbErr)
+								}
+
+								// CRITICAL FIX: Delete the file from all other shared backup accounts
+								// When using Google's shared folder model, all backup accounts have access to the file
+								// After transfer, we need to physically delete it from their drives to prevent stale references
+								logger.Info("Deleting stale shared copies from other backup accounts...")
+								for i := range r.config.Users {
+									backupUser := &r.config.Users[i]
+									if backupUser.Provider != model.ProviderGoogle || backupUser.Email == target.User.Email || backupUser.Email == mainUser.Email {
+										continue
+									}
+									backupClient, clientErr := r.GetOrCreateClient(backupUser)
+									if clientErr != nil {
+										logger.Warning("[%s] Failed to get client for cleanup: %v", backupUser.Email, clientErr)
+										continue
+									}
+									if delErr := backupClient.DeleteFile(oldNativeID); delErr != nil {
+										logger.Info("[%s] Cleanup: file %s already removed or not accessible", backupUser.Email, oldNativeID)
+									} else {
+										logger.Info("[%s] Deleted stale shared copy %s", backupUser.Email, file.Name)
+									}
 								}
 							}
 						} else {
