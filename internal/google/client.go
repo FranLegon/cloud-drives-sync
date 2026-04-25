@@ -640,9 +640,8 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 		}
 
 		// 3. Update to pending owner
-		// NOTE: TransferOwnership parameter should NOT be used with Permissions.Update() for pending owner.
-		// It's only needed for direct transfers via Permissions.Create().
-		// The pending owner must then accept via Permissions.Update() to complete the transfer.
+		// NOTE: TransferOwnership(true) is required when setting role to "owner", even for pending owner.
+		// The pending owner must then accept via Permissions.Update() with TransferOwnership(true) to complete the transfer.
 		// NOTE: Permissions.Update() does not support SendNotificationEmail() - notifications only work on Create()
 		updatePerm := &drive.Permission{
 			Role:         "owner",
@@ -650,7 +649,7 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 		}
 
 		logger.InfoTagged([]string{"Google", c.user.Email}, "Setting pending owner for permission ID %s...", permID)
-		_, err = c.service.Permissions.Update(fileID, permID, updatePerm).Do()
+		_, err = c.service.Permissions.Update(fileID, permID, updatePerm).TransferOwnership(true).Do()
 		if err != nil {
 			logger.Error("Failed to set pending owner: %v", err)
 			return fmt.Errorf("failed to set pending owner: %w", err)
@@ -691,8 +690,8 @@ func (c *Client) AcceptOwnership(fileID string) error {
 	}
 
 	// Update permission to owner (accepting the pending transfer)
-	// NOTE: TransferOwnership parameter is not used when accepting - only when creating pending owner
-	_, err = c.service.Permissions.Update(fileID, permID, &drive.Permission{Role: "owner"}).Do()
+	// NOTE: TransferOwnership(true) is required by the Google Drive API when setting role to "owner"
+	_, err = c.service.Permissions.Update(fileID, permID, &drive.Permission{Role: "owner"}).TransferOwnership(true).Do()
 	if err != nil {
 		return fmt.Errorf("failed to accept ownership: %w", err)
 	}
