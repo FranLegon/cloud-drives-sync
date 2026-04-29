@@ -1712,12 +1712,41 @@ func (r *Runner) ProcessHardDeletes() error {
 	logger.Info("Checking %d soft-deleted files for hard deletion...", len(files))
 
 	for _, file := range files {
+		// DEBUG: Log file state for hard delete analysis
+		logger.Info("[DEBUG-HD] File ID=%s, Path=%s, CalcID=%s, Status=%s, Replicas=%d",
+			file.ID, file.Path, file.CalculatedID, file.Status, len(file.Replicas))
+		for _, rep := range file.Replicas {
+			logger.Info("[DEBUG-HD]   Replica ID=%d, Provider=%s, Account=%s, NativeID=%s, Status=%s, Path=%s, FileID=%s",
+				rep.ID, rep.Provider, rep.AccountID, rep.NativeID, rep.Status, rep.Path, rep.FileID)
+		}
+
 		// Check if file is still present in any Google account (active)
 		hasGoogleReplica := false
 		for _, rep := range file.Replicas {
 			if rep.Provider == model.ProviderGoogle && rep.Status == "active" {
 				hasGoogleReplica = true
 				break
+			}
+		}
+
+		logger.Info("[DEBUG-HD] hasGoogleReplica=%v for %s", hasGoogleReplica, file.Path)
+
+		// Safety check: query DB directly by calculated_id to catch cases where
+		// replicas may not be linked to this file record (file_id mismatch after moves)
+		if !hasGoogleReplica && file.CalculatedID != "" {
+			found, err := r.db.HasActiveGoogleReplicaOutsideSoftDeleted(file.CalculatedID)
+			logger.Info("[DEBUG-HD] Safety check HasActiveGoogleReplicaOutsideSoftDeleted(%s) = %v, err=%v", file.CalculatedID, found, err)
+			if err != nil {
+				logger.Warning("Failed safety check for %s: %v", file.Path, err)
+			} else if found {
+				// There's an active Google replica for this content outside soft-deleted.
+				// The file was likely restored; mark as active instead of hard-deleting.
+				logger.Info("Skipping hard delete for %s: active Google replica found by calculated_id (likely restored)", file.Path)
+				file.Status = "active"
+				if err := r.db.UpdateFile(file); err != nil {
+					logger.Error("Failed to update file status for %s: %v", file.Path, err)
+				}
+				continue
 			}
 		}
 

@@ -975,6 +975,25 @@ func (db *DB) DeleteStaleReplicasByNativeID(provider model.Provider, oldNativeID
 	return err
 }
 
+// HasActiveGoogleReplicaOutsideSoftDeleted checks if there's any active Google replica
+// with the given calculated_id that is NOT in the soft-deleted folder path.
+// This is used as a safety check during hard-delete to catch file_id linkage issues.
+func (db *DB) HasActiveGoogleReplicaOutsideSoftDeleted(calculatedID string) (bool, error) {
+	query := `
+	SELECT EXISTS(
+		SELECT 1 FROM replicas
+		WHERE calculated_id = ?
+		AND provider = 'google'
+		AND status = 'active'
+		AND path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
+		AND path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
+	)
+	`
+	var exists bool
+	err := db.conn.QueryRow(query, calculatedID).Scan(&exists)
+	return exists, err
+}
+
 // UpdateSoftDeletedFileStatus marks files as softdeleted or active based on replica locations
 // Priority: Google provider state takes precedence when replicas disagree
 // Only considers recently scanned replicas (last_seen_at >= query start time)
@@ -1078,6 +1097,39 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 
 	if _, err := db.conn.Exec(updateQuery, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp); err != nil {
 		return fmt.Errorf("failed to update soft-deleted status: %w", err)
+	}
+
+	// Second pass: catch files that remain 'softdeleted' due to file_id linkage issues
+	// by checking replicas via calculated_id (content-based match)
+	fallbackQuery := `
+	UPDATE files
+	SET status = 'active',
+		path = COALESCE(
+			(SELECT r.path FROM replicas r
+			 WHERE r.calculated_id = files.calculated_id
+			 AND r.status = 'active'
+			 AND r.provider = 'google'
+			 AND r.last_seen_at >= ?
+			 AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
+			 AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
+			 ORDER BY r.mod_time DESC
+			 LIMIT 1),
+			files.path)
+	WHERE status = 'softdeleted'
+	AND calculated_id != ''
+	AND EXISTS (
+		SELECT 1
+		FROM replicas r
+		WHERE r.calculated_id = files.calculated_id
+		AND r.status = 'active'
+		AND r.provider = 'google'
+		AND r.last_seen_at >= ?
+		AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
+		AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
+	)
+	`
+	if _, err := db.conn.Exec(fallbackQuery, minTimestamp, minTimestamp); err != nil {
+		return fmt.Errorf("failed to update soft-deleted status (fallback): %w", err)
 	}
 
 	return nil
@@ -1276,7 +1328,7 @@ func (db *DB) LinkOrphanedReplicas() error {
 		WHERE files.calculated_id = replicas.calculated_id 
 		LIMIT 1
 	)
-	WHERE file_id IS NULL OR file_id = ''
+	WHERE (file_id IS NULL OR file_id = '')
 	AND EXISTS (
 		SELECT 1 FROM files 
 		WHERE files.calculated_id = replicas.calculated_id
