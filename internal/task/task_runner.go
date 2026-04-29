@@ -734,6 +734,23 @@ func (r *Runner) FreeMain() error {
 					err = fmt.Errorf("acceptance failed: %w", acceptErr)
 				} else {
 					err = nil // Clear error as acceptance succeeded
+
+					// Move file to target's sync folder (it's currently in root after pending owner flow)
+					dir := filepath.Dir(file.Path)
+					dir = strings.ReplaceAll(dir, "\\", "/")
+					if dir == "." || dir == "" {
+						dir = "/"
+					}
+					targetFolderID, folderErr := r.ensureFolderStructure(target.Client, dir, target.User.Provider)
+					if folderErr != nil {
+						logger.Warning("Failed to resolve target sync folder for %s: %v", file.Name, folderErr)
+					} else {
+						if mvErr := target.Client.MoveFile(file.ID, targetFolderID); mvErr != nil {
+							logger.Warning("Failed to move transferred file %s to sync folder: %v", file.Name, mvErr)
+						} else {
+							logger.InfoTagged([]string{"Google", target.User.Email}, "Moved %s to sync folder", file.Name)
+						}
+					}
 				}
 			}
 

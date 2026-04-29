@@ -588,7 +588,8 @@ func cleanupCloudFiles(r *task.Runner) error {
 			}
 		}
 
-		if u.Provider == model.ProviderTelegram {
+		switch u.Provider {
+		case model.ProviderTelegram:
 			if tgClient, ok := client.(*telegram.Client); ok {
 				logger.Info("Cleaning Telegram messages for %s...", u.Email)
 				if err := client.PreFlightCheck(); err != nil {
@@ -598,14 +599,14 @@ func cleanupCloudFiles(r *task.Runner) error {
 					logger.Warning("Failed to delete Telegram messages: %v", err)
 				}
 			}
-		} else if u.Provider == model.ProviderGoogle {
+		case model.ProviderGoogle:
 			if gClient, ok := client.(*google.Client); ok {
 				if err := gClient.EmptySyncFolder(); err != nil {
 					logger.Warning("Failed to empty Google folder for %s: %v", u.Email, err)
 				}
 				deleteAuxFolder(client, u)
 			}
-		} else if u.Provider == model.ProviderMicrosoft {
+		case model.ProviderMicrosoft:
 			if mClient, ok := client.(*microsoft.Client); ok {
 				logger.Info("Cleaning Microsoft folder for %s...", u.Email)
 				if err := mClient.EmptySyncFolder(); err != nil {
@@ -672,14 +673,25 @@ func printAllFiles(db *database.DB) {
 }
 
 func getNativeID(f *model.File, u *model.User) string {
+	// Prefer active replicas
+	var fallbackID string
 	for _, r := range f.Replicas {
 		if r.Provider == u.Provider && (r.AccountID == u.Email || r.AccountID == u.Phone) {
-			return r.NativeID
+			if r.Status == "active" {
+				return r.NativeID
+			}
+			if fallbackID == "" {
+				fallbackID = r.NativeID
+			}
 		}
+	}
+	if fallbackID != "" {
+		logger.Warning("getNativeID: no active replica found for file %s on %s, using stale replica", f.Path, u.Email)
+		return fallbackID
 	}
 	logger.Warning("NativeID not found for file %s. User: %s (%s). Replicas: %d", f.Path, u.Email, u.Provider, len(f.Replicas))
 	for i, r := range f.Replicas {
-		logger.Warning(" - Replica %d: Provider=%s, Account=%s, NativeID=%s", i, r.Provider, r.AccountID, r.NativeID)
+		logger.Warning(" - Replica %d: Provider=%s, Account=%s, NativeID=%s, Status=%s", i, r.Provider, r.AccountID, r.NativeID, r.Status)
 	}
 	return ""
 }
@@ -693,15 +705,26 @@ func getUserForReplica(db *database.DB, path string, provider model.Provider, us
 		return nil, fmt.Errorf("file %s not found", path)
 	}
 
+	// Prefer users with active replicas
+	var fallbackUser *model.User
 	for _, r := range f.Replicas {
 		if r.Provider == provider {
 			for i := range users {
 				u := &users[i]
 				if u.Provider == r.Provider && (u.Email == r.AccountID || u.Phone == r.AccountID) {
-					return u, nil
+					if r.Status == "active" {
+						return u, nil
+					}
+					if fallbackUser == nil {
+						fallbackUser = u
+					}
 				}
 			}
 		}
+	}
+	if fallbackUser != nil {
+		logger.Warning("getUserForReplica: no active replica for %s on provider %s, using account with stale replica: %s", path, provider, fallbackUser.Email)
+		return fallbackUser, nil
 	}
 	return nil, fmt.Errorf("no replica found for provider %s", provider)
 }
@@ -719,16 +742,6 @@ var testFileContents = map[string]string{
 func simulateUserUploadFile(client api.CloudClient, folderID, fileName string, data []byte, userEmail string) (*model.File, error) {
 	logger.Info("[SIMULATE USER ACTION] User %s uploading file '%s' (%d bytes)", userEmail, fileName, len(data))
 	return client.UploadFile(folderID, fileName, bytes.NewReader(data), int64(len(data)))
-}
-
-func simulateUserMoveFile(client api.CloudClient, fileID, targetFolderID, fileName, userEmail string) error {
-	logger.Info("[SIMULATE USER ACTION] User %s moving file '%s' to folder %s", userEmail, fileName, targetFolderID)
-	return client.MoveFile(fileID, targetFolderID)
-}
-
-func simulateUserDeleteFile(client api.CloudClient, fileID, fileName, userEmail string) error {
-	logger.Info("[SIMULATE USER ACTION] User %s deleting file '%s'", userEmail, fileName)
-	return client.DeleteFile(fileID)
 }
 
 func simulateUserCreateFolder(client api.CloudClient, parentID, folderName, userEmail string) (*model.Folder, error) {
@@ -761,7 +774,16 @@ func verifyFileStatus(db *database.DB, path, expectedStatus string, shouldBeInac
 		logger.Info("[VERIFICATION] Checking file '%s' is NOT '%s' (should be soft-deleted/inactive)", path, expectedStatus)
 		f, _ := db.GetFileByPath(path)
 		if f != nil && f.Status == expectedStatus {
+			logger.Error("[VERIFICATION] File %s has status '%s' but should be inactive. Replicas:", path, f.Status)
+			for i, r := range f.Replicas {
+				logger.Error("[VERIFICATION]   Replica %d: Provider=%s, Account=%s, NativeID=%s, Status=%s, Path=%s", i, r.Provider, r.AccountID, r.NativeID, r.Status, r.Path)
+			}
 			return fmt.Errorf("file %s should be soft-deleted/inactive but is %s", path, f.Status)
+		}
+		if f != nil {
+			logger.Info("[VERIFICATION] File %s has status '%s' (OK)", path, f.Status)
+		} else {
+			logger.Info("[VERIFICATION] File %s not found in DB (OK - treated as inactive)", path)
 		}
 		return nil
 	}
@@ -1008,7 +1030,7 @@ func runTestCase4(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	return nil
 }
 
-func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
+func runTestCase5(runner *task.Runner, _ *model.User, backups []*model.User) error {
 	logger.Info("\n--- Test Case 5: Soft Deletion ---")
 
 	getSoftID := func(c api.CloudClient, rootID string) (string, error) {
@@ -1036,22 +1058,29 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 			return fmt.Errorf("nativeID not found for %s on %s", path, u.Email)
 		}
 		logger.Info("[SIMULATE USER ACTION] User %s moving %s to soft-deleted", u.Email, path)
+		logger.Info("[DEBUG] File %s: status=%s, nativeID=%s, replicas=%d", path, f.Status, nativeID, len(f.Replicas))
+		for i, r := range f.Replicas {
+			logger.Info("[DEBUG]   Replica %d: Provider=%s, Account=%s, NativeID=%s, Status=%s", i, r.Provider, r.AccountID, r.NativeID, r.Status)
+		}
 		err = c.MoveFile(nativeID, targetFolderID)
 
 		// If move fails with 404, the replica might be stale - try to find an active replica
 		if err != nil && strings.Contains(err.Error(), "404") {
-			logger.Warning("Move failed with 404 (stale replica ID), searching for active replica...")
-			// Find any active replica for this file on the same provider
+			logger.Warning("Move failed with 404 (stale replica ID %s), searching for active replica...", nativeID)
+			// Find any active replica for this file on the same provider (any account)
 			for _, replica := range f.Replicas {
 				if replica.Provider == u.Provider && replica.Status == "active" && replica.NativeID != nativeID {
 					logger.Info("Found alternative active replica: %s (Account: %s)", replica.NativeID, replica.AccountID)
-					err = c.MoveFile(replica.NativeID, targetFolderID)
-					if err == nil {
+					// Try with the same client first (shared folder scenario)
+					altErr := c.MoveFile(replica.NativeID, targetFolderID)
+					if altErr == nil {
 						logger.Info("Successfully moved using alternative replica ID")
 						return nil
 					}
+					logger.Warning("Alternative replica move also failed: %v", altErr)
 				}
 			}
+			logger.Warning("No alternative active replicas found for %s on provider %s", path, u.Provider)
 		}
 		return err
 	}
@@ -1951,8 +1980,9 @@ func testMetadata(runner *task.Runner) error {
 		// Compare Cloud -> DB (Remaining files are unexpected)
 		for nativeID, f := range cloudFiles {
 			// Check if this file is a replica for ANY account on this provider (Shared folder case)
-			anyReplica, err := db.GetReplicaByNativeID(user.Provider, nativeID)
-			if err == nil && anyReplica != nil && anyReplica.Status == "active" {
+			// Use HasActiveReplicaByNativeID to properly check across all accounts sharing the same file
+			hasActive, err := db.HasActiveReplicaByNativeID(user.Provider, nativeID)
+			if err == nil && hasActive {
 				continue
 			}
 
@@ -1962,7 +1992,16 @@ func testMetadata(runner *task.Runner) error {
 				continue
 			}
 
-			logger.Error("Unexpected file on cloud: %s (ID: %s, Name: %s)", f.Path, nativeID, f.Name)
+			// Also check if this file belongs to a soft-deleted logical file (legitimately on cloud pending hard-delete)
+			anyReplica, _ := db.GetReplicaByNativeID(user.Provider, nativeID)
+			if anyReplica != nil && anyReplica.FileID != "" {
+				file, _ := db.GetFileByID(anyReplica.FileID)
+				if file != nil && file.Status == "softdeleted" {
+					continue
+				}
+			}
+
+			logger.Error("Unexpected file on cloud: %s (ID: %s, Name: %s, Account: %s)", f.Path, nativeID, f.Name, accountID)
 			errCount++
 		}
 	}

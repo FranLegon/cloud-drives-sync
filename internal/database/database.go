@@ -873,6 +873,18 @@ func (db *DB) GetReplicaByNativeID(provider model.Provider, nativeID string) (*m
 	return r, nil
 }
 
+// HasActiveReplicaByNativeID checks if any active replica exists with the given native ID and provider.
+// This is useful for shared files where multiple replicas (some deleted) may share the same NativeID.
+func (db *DB) HasActiveReplicaByNativeID(provider model.Provider, nativeID string) (bool, error) {
+	query := `SELECT COUNT(*) FROM replicas WHERE provider = ? AND native_id = ? AND status = 'active'`
+	var count int
+	err := db.conn.QueryRow(query, string(provider), nativeID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // GetReplicaByNativeFragmentID returns the parent replica of a fragment by the fragment's native ID
 func (db *DB) GetReplicaByNativeFragmentID(nativeFragmentID string) (*model.Replica, error) {
 	// Join with fragments

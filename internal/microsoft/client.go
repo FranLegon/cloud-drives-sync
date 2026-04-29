@@ -607,36 +607,10 @@ func (c *Client) deleteItemRecursive(ctx context.Context, itemID string) error {
 	// 1. List children
 	var allItems []models.DriveItemable
 	// Standard iterator for all children
-	for {
-		result, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(itemID).Children().Get(ctx, nil)
-		if err != nil {
-			// If we can't list, maybe it's not a folder, or gone. Try direct delete at end.
-			break
-		}
+	result, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(itemID).Children().Get(ctx, nil)
+	if err == nil {
 		items := result.GetValue()
-		if len(items) == 0 {
-			break
-		}
 		allItems = append(allItems, items...)
-
-		// Pagination handling for MS Graph is complex if using iterator, but simple list often returns nextLink.
-		// For simplicity avoiding complex pagination here or assuming small test data.
-		// If needed, check ODataNextLink.
-		// The SDK usually handles it if configured or we need manual loop.
-		// Here we assume "result" is one page. Microsoft Graph default page size is usually small.
-		// Ideally we should follow NextLink.
-		if result.GetOdataNextLink() == nil {
-			break
-		}
-		// Creating next request is complex without helper.
-		// Given this is a test cleanup, we might assume items fit in one page or we just delete what we see.
-		// BUT if we leave items, the folder delete will fail.
-		// Let's implement basic NextLink logic if possible, or trust SDK iterator but here we used raw Get.
-		// Let's rely on the fact that if we delete some, next call to this function (if we re-list) would separate them.
-		// But we don't loop here.
-		// A potential issue: if > 200 items, we might miss some.
-		// Let's try to just use what we have.
-		break
 	}
 
 	// 2. Separate Files and Folders
