@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -190,7 +192,12 @@ func GetMicrosoftUserEmail(ctx context.Context, token *oauth2.Token, config *oau
 	return userInfo.UserPrincipalName, nil
 }
 
-// GenerateStateToken generates a random state token for OAuth
+// GenerateStateToken generates a cryptographically random state token for OAuth
 func GenerateStateToken() string {
-	return fmt.Sprintf("state-%d", time.Now().UnixNano())
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		// Fallback should never happen with crypto/rand
+		panic("failed to generate random state token: " + err.Error())
+	}
+	return hex.EncodeToString(b)
 }

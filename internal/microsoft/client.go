@@ -255,18 +255,43 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 	return allFiles, nil
 }
 
-// DownloadFile downloads a file
+// DownloadFile downloads a file using streaming to avoid buffering large files in memory
 func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
 	ctx := context.Background()
-	// Download content as bytes
-	data, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(fileID).Content().Get(ctx, nil)
+
+	// Get the drive item to obtain the download URL
+	item, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(fileID).Get(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("microsoft download failed: %w", err)
+		return fmt.Errorf("microsoft get item failed: %w", err)
 	}
 
-	// Copy to writer
-	if _, err := io.Copy(writer, bytes.NewReader(data)); err != nil {
-		return fmt.Errorf("failed to write to writer: %w", err)
+	downloadURL, ok := item.GetAdditionalData()["@microsoft.graph.downloadUrl"]
+	if !ok {
+		return fmt.Errorf("no download URL available for item %s", fileID)
+	}
+
+	urlStr, ok := downloadURL.(*string)
+	if !ok || urlStr == nil {
+		return fmt.Errorf("invalid download URL type for item %s", fileID)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, *urlStr, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create download request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("microsoft download request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("microsoft download returned status %d", resp.StatusCode)
+	}
+
+	if _, err := io.Copy(writer, resp.Body); err != nil {
+		return fmt.Errorf("failed to stream download to writer: %w", err)
 	}
 	return nil
 }
@@ -450,26 +475,47 @@ func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
 			break
 		}
 
-		req, err := http.NewRequest("PUT", uploadUrl, bytes.NewReader(buf[:n]))
-		if err != nil {
-			return fmt.Errorf("failed to create request: %w", err)
-		}
-		req.ContentLength = int64(n)
-		start := offset
-		end := offset + int64(n) - 1
-		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+		var uploadErr error
+		maxRetries := 3
+		for i := 0; i < maxRetries; i++ {
+			if i > 0 {
+				logger.Info("Retrying chunk upload (update)... (Attempt %d/%d)", i+1, maxRetries)
+				time.Sleep(time.Duration(i*2) * time.Second)
+			}
 
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("failed to upload chunk: %w", err)
-		}
+			req, err := http.NewRequest("PUT", uploadUrl, bytes.NewReader(buf[:n]))
+			if err != nil {
+				uploadErr = fmt.Errorf("failed to create request: %w", err)
+				break
+			}
+			req.ContentLength = int64(n)
+			start := offset
+			end := offset + int64(n) - 1
+			req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			body, _ := io.ReadAll(resp.Body)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				uploadErr = fmt.Errorf("failed to upload chunk: %w", err)
+				continue
+			}
+
+			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				uploadErr = fmt.Errorf("chunk upload failed status %s: %s", resp.Status, string(body))
+				if resp.StatusCode >= 500 {
+					continue
+				}
+				break
+			}
 			resp.Body.Close()
-			return fmt.Errorf("chunk upload failed status %s: %s", resp.Status, string(body))
+			uploadErr = nil
+			break
 		}
-		resp.Body.Close()
+
+		if uploadErr != nil {
+			return uploadErr
+		}
 
 		offset += int64(n)
 	}

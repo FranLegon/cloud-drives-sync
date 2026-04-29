@@ -21,6 +21,8 @@ const (
 )
 
 func createClient(user *model.User, cfg *model.Config) (api.CloudClient, error) {
+	// Re-use the same factory logic as Runner.GetOrCreateClient but without caching,
+	// since this is called during startup before a Runner is available.
 	var c api.CloudClient
 	var err error
 
@@ -41,7 +43,6 @@ func createClient(user *model.User, cfg *model.Config) (api.CloudClient, error) 
 		return nil, err
 	}
 
-	// Always run PreFlightCheck to ensure readiness (e.g. Telegram channel initialization)
 	if err := c.PreFlightCheck(); err != nil {
 		return nil, fmt.Errorf("preflight check failed: %w", err)
 	}

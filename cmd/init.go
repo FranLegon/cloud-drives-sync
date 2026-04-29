@@ -1,10 +1,8 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/auth"
 	"github.com/FranLegon/cloud-drives-sync/internal/config"
@@ -15,7 +13,6 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/task"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
-	"golang.org/x/oauth2"
 )
 
 var (
@@ -368,57 +365,9 @@ func updateMainAccount(cfg *model.Config, password string) error {
 	fmt.Println("Adding Google as the main account provider.")
 
 	// Perform OAuth flow
-	ctx := context.Background()
-	var oauthConfig *oauth2.Config
-	var email string
-
-	switch provider {
-	case "Google":
-		oauthConfig = auth.GetGoogleOAuthConfig(cfg.GoogleClient.ID, cfg.GoogleClient.Secret)
-	case "Microsoft":
-		oauthConfig = auth.GetMicrosoftOAuthConfig(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret)
-	default:
-		return fmt.Errorf("unsupported provider: %s", provider)
-	}
-
-	// Start OAuth server
-	server := auth.NewOAuthServer()
-	if err := server.Start(); err != nil {
-		return fmt.Errorf("failed to start OAuth server: %w", err)
-	}
-	defer server.Stop()
-
-	// Generate state and auth URL
-	state := auth.GenerateStateToken()
-	authURL := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
-
-	logger.Info("Please visit the following URL to authorize:")
-	fmt.Println(authURL)
-
-	// Wait for callback
-	code, err := server.WaitForCode(state, 120*time.Second)
+	token, email, err := performOAuthFlow(provider, cfg)
 	if err != nil {
-		return fmt.Errorf("authorization failed: %w", err)
-	}
-
-	// Exchange code for token
-	token, err := auth.ExchangeCode(ctx, oauthConfig, code)
-	if err != nil {
-		return fmt.Errorf("failed to exchange code: %w", err)
-	}
-
-	// Get user email
-	switch provider {
-	case "Google":
-		email, err = auth.GetGoogleUserEmail(ctx, token, oauthConfig)
-		if err != nil {
-			return fmt.Errorf("failed to get user email: %w", err)
-		}
-	case "Microsoft":
-		email, err = auth.GetMicrosoftUserEmail(ctx, token, oauthConfig)
-		if err != nil {
-			return fmt.Errorf("failed to get user email: %w", err)
-		}
+		return err
 	}
 
 	logger.Info("Authorized as: %s", email)
@@ -447,6 +396,7 @@ func updateMainAccount(cfg *model.Config, password string) error {
 
 	// For Google, create the sync folder
 	if provider == "Google" {
+		oauthConfig := auth.GetGoogleOAuthConfig(cfg.GoogleClient.ID, cfg.GoogleClient.Secret)
 		client, err := google.NewClient(&user, oauthConfig)
 		if err != nil {
 			return fmt.Errorf("failed to create client: %w", err)

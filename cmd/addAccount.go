@@ -1,9 +1,7 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
-	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/auth"
 	"github.com/FranLegon/cloud-drives-sync/internal/config"
@@ -14,7 +12,6 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/telegram"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
-	"golang.org/x/oauth2"
 )
 
 var addAccountCmd = &cobra.Command{
@@ -53,54 +50,9 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 	}
 
 	// Perform OAuth flow
-	ctx := context.Background()
-	var oauthConfig *oauth2.Config
-	var email string
-
-	switch provider {
-	case "Google":
-		oauthConfig = auth.GetGoogleOAuthConfig(cfg.GoogleClient.ID, cfg.GoogleClient.Secret)
-	case "Microsoft":
-		oauthConfig = auth.GetMicrosoftOAuthConfig(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret)
-	default:
-		return fmt.Errorf("unsupported provider: %s", provider)
-	}
-
-	// Start OAuth server
-	server := auth.NewOAuthServer()
-	if err := server.Start(); err != nil {
-		return fmt.Errorf("failed to start OAuth server: %w", err)
-	}
-	defer server.Stop()
-
-	// Generate state and auth URL
-	state := auth.GenerateStateToken()
-	authURL := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
-
-	logger.Info("Please visit the following URL to authorize:")
-	fmt.Println(authURL)
-
-	// Wait for callback
-	code, err := server.WaitForCode(state, 120*time.Second)
+	token, email, err := performOAuthFlow(provider, cfg)
 	if err != nil {
-		return fmt.Errorf("authorization failed: %w", err)
-	}
-
-	// Exchange code for token
-	token, err := auth.ExchangeCode(ctx, oauthConfig, code)
-	if err != nil {
-		return fmt.Errorf("failed to exchange code: %w", err)
-	}
-
-	// Get user email
-	switch provider {
-	case "Google":
-		email, err = auth.GetGoogleUserEmail(ctx, token, oauthConfig)
-	case "Microsoft":
-		email, err = auth.GetMicrosoftUserEmail(ctx, token, oauthConfig)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to get user email: %w", err)
+		return err
 	}
 
 	// Check if this email is already registered as a main account
@@ -128,6 +80,7 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 	case "Google":
 		// Share main account's folder with backup account
 		mainUser := config.GetMainAccount(cfg, model.ProviderGoogle)
+		oauthConfig := auth.GetGoogleOAuthConfig(cfg.GoogleClient.ID, cfg.GoogleClient.Secret)
 		mainClient, err := google.NewClient(mainUser, oauthConfig)
 		if err != nil {
 			return fmt.Errorf("failed to create main client: %w", err)
@@ -152,6 +105,7 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 
 		// Create folder in backup account
 		if !safeMode {
+			oauthConfig := auth.GetMicrosoftOAuthConfig(cfg.MicrosoftClient.ID, cfg.MicrosoftClient.Secret)
 			client, err := microsoft.NewClient(&user, oauthConfig)
 			if err != nil {
 				return fmt.Errorf("failed to create microsoft client: %w", err)

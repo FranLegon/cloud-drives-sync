@@ -27,6 +27,9 @@ const (
 	syncChannelName = "sync-cloud-drives"
 )
 
+// ErrNotSupported is returned by operations that Telegram does not support
+var ErrNotSupported = errors.New("not supported by Telegram")
+
 var defaultMaxPartSize int64 = 2000 * 1024 * 1024 // 2GB Telegram limit
 
 // SetDefaultMaxPartSize overrides the default max part size for new clients.
@@ -987,7 +990,7 @@ func (c *Client) DeleteFile(fileID string) error {
 // Unused methods for Telegram (no folders)
 
 func (c *Client) MoveFile(fileID, targetFolderID string) error {
-	return errors.New("not supported - Telegram doesn't have folders")
+	return ErrNotSupported
 }
 
 func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
@@ -1109,7 +1112,7 @@ func (c *Client) DeleteSyncChannel() error {
 }
 
 func (c *Client) DeleteFolder(folderID string) error {
-	return errors.New("not supported - Telegram doesn't have folders")
+	return ErrNotSupported
 }
 
 func (c *Client) GetSyncFolderID() (string, error) {
@@ -1117,7 +1120,7 @@ func (c *Client) GetSyncFolderID() (string, error) {
 }
 
 func (c *Client) ShareFolder(folderID, email string, role string) error {
-	return errors.New("not supported - Telegram doesn't have folder sharing")
+	return ErrNotSupported
 }
 
 func (c *Client) VerifyPermissions() error {
@@ -1133,16 +1136,15 @@ func (c *Client) GetQuota() (*api.QuotaInfo, error) {
 }
 
 func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
-	// Reuse ListFiles logic or GetMessages
-	return nil, fmt.Errorf("not implemented")
+	return nil, ErrNotSupported
 }
 
 func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
-	return errors.New("not supported")
+	return ErrNotSupported
 }
 
 func (c *Client) AcceptOwnership(fileID string) error {
-	return errors.New("not supported")
+	return ErrNotSupported
 }
 
 func (c *Client) GetUserEmail() string {
@@ -1160,5 +1162,5 @@ func (c *Client) GetDriveID() (string, error) {
 
 // CreateShortcut creates a shortcut (not supported in Telegram)
 func (c *Client) CreateShortcut(parentID, name, targetID, targetDriveID string) (*model.File, error) {
-	return nil, fmt.Errorf("not supported - Telegram does not support shortcuts")
+	return nil, ErrNotSupported
 }
