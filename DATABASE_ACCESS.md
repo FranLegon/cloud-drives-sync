@@ -74,16 +74,19 @@ rows, err := db.Query("SELECT * FROM files LIMIT 10")
 
 ## Database Schema
 
-The database contains three main tables:
+The database contains four main tables:
 
 ### files
-Stores metadata about files across all providers.
+Stores logical metadata about files across all providers (path, name, size, calculated_id, status).
 
-### folders  
-Stores metadata about folders across all providers.
+### replicas
+Stores physical copies on cloud providers (provider, account_id, native_id, native_hash, owner, fragmented, last_seen_at).
 
-### files_fragments
-Stores information about split files (primarily for Telegram).
+### replica_fragments
+Stores information about split files (primarily for Telegram files exceeding the 2 GB limit).
+
+### folders
+Stores folder structure metadata across providers.
 
 ## Security Notes
 

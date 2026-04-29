@@ -38,7 +38,7 @@ The application must only interact with files and folders contained within speci
 
 #### **3. Architecture & Design Principles**
 
-*   **Modularity:** Structure the code into logical packages (e.g., `cmd`, `google`, `microsoft`, `telegram`, `database`, `crypto`). All database and cloud provider interactions shall be implemented behind interfaces to allow for future extensions (such as implementing new providers).
+*   **Modularity:** Structure the code into logical packages (e.g., `cmd`, `internal/api`, `internal/auth`, `internal/config`, `internal/crypto`, `internal/database`, `internal/google`, `internal/logger`, `internal/microsoft`, `internal/model`, `internal/task`, `internal/telegram`). All database and cloud provider interactions shall be implemented behind interfaces to allow for future extensions (such as implementing new providers).
 *   **Concurrency:** Use concurrency where it provides a performance benefit without risk, such as making independent, read-only API calls to multiple accounts simultaneously. All database write operations must be performed sequentially from a single thread or goroutine to prevent race conditions and ensure data integrity.
 *   **Configuration Management:** All configuration data (API credentials, user tokens) will be stored in a single encrypted file: `config.json.enc`, located in the same directory as the binary.
 *   **Security:**
@@ -93,6 +93,7 @@ The database uses a **Normalized Schema** to better handle multiple accounts, de
 - `status` (TEXT): `active`, `softdeleted`, `deleted`.
 - `fragmented` (BOOL): True if split (Telegram).
 - `last_seen_at` (INTEGER): Timestamp of last verification (for deletion detection).
+- `owner` (TEXT): Email of the account that owns the file (may differ from account_id for shared files).
 
 **replica_fragments Table (Telegram Split Files):**
 - `id` (INTEGER, PK).
@@ -180,6 +181,8 @@ The database uses a **Normalized Schema** to better handle multiple accounts, de
 - `mod_time` (INTEGER NOT NULL): Modification timestamp
 - `status` (TEXT NOT NULL): active, softdeleted, deleted
 - `fragmented` (BOOLEAN NOT NULL DEFAULT 0): true for Telegram files split into parts
+- `last_seen_at` (INTEGER NOT NULL DEFAULT 0): Timestamp of last verification (for deletion detection)
+- `owner` (TEXT DEFAULT ''): Email of the account that owns the file (may differ from account_id for shared files)
 
 **replica_fragments Table (Telegram-specific for files split into 2GB chunks):**
 - `id` (INTEGER, PK, AutoIncrement)
@@ -228,6 +231,8 @@ CREATE TABLE IF NOT EXISTS replicas (
     mod_time INTEGER NOT NULL,
     status TEXT NOT NULL,
     fragmented BOOLEAN NOT NULL DEFAULT 0,
+    last_seen_at INTEGER NOT NULL DEFAULT 0,
+    owner TEXT DEFAULT '',
     FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
 );
 
@@ -237,6 +242,7 @@ CREATE INDEX IF NOT EXISTS idx_replicas_provider ON replicas(provider);
 CREATE INDEX IF NOT EXISTS idx_replicas_account_id ON replicas(account_id);
 CREATE INDEX IF NOT EXISTS idx_replicas_native_id ON replicas(native_id);
 CREATE INDEX IF NOT EXISTS idx_replicas_status ON replicas(status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_replicas_unique ON replicas(provider, account_id, native_id);
 
 CREATE TABLE IF NOT EXISTS replica_fragments (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -336,6 +342,25 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 *   **`check-tokens`**
     *   Iterates through all refresh tokens in the config. For each, it attempts a simple, read-only API call. It reports any tokens that have expired or been revoked, indicating which account needs re-authentication.
     *   Includes Telegram session validation.
+
+*   **`reauth`**
+    *   Re-authenticates accounts whose tokens have expired or become invalid.
+    *   By default only broken connections are re-authenticated (detected via a pre-flight check attempt).
+    *   Use `--all` flag to force re-authentication of every account.
+    *   Initiates the OAuth 2.0 flow for Google/Microsoft or Telegram phone authentication.
+    *   Verifies the re-authenticated email matches the original account to prevent accidental account swaps.
+
+*   **`quota`**
+    *   Calculates and prints the total used quota and total available quota for each provider, aggregating all accounts.
+    *   Performs a cross-check to ensure the used quota for any provider does not exceed the available quota of any other provider.
+
+*   **`sync`**
+    *   A composite command that runs a complete synchronization sequence in order:
+        1.  `quota`: Check storage quotas.
+        2.  `free-main`: Transfer files from main account to backup.
+        3.  `remove-duplicates-unsafe` (or `remove-duplicates` if `--safe`): Clean up duplicates.
+        4.  `sync-providers`: Synchronize files across providers.
+        5.  `balance-storage`: Re-distribute files to balance usage across backup accounts.
 
 *   **`delete-unsynced-files`**
     *   Deletes all files in backup accounts that are not inside the `sync-cloud-drives` folder or its subfolders.
