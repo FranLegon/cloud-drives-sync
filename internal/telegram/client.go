@@ -25,8 +25,15 @@ import (
 
 const (
 	syncChannelName = "sync-cloud-drives"
-	maxFileSize     = 2000 * 1024 * 1024 // 2GB Telegram limit
 )
+
+var defaultMaxPartSize int64 = 2000 * 1024 * 1024 // 2GB Telegram limit
+
+// SetDefaultMaxPartSize overrides the default max part size for new clients.
+// Useful for testing with smaller files.
+func SetDefaultMaxPartSize(size int64) {
+	defaultMaxPartSize = size
+}
 
 // CaptionMetadata represents the metadata stored in the caption
 type CaptionMetadata struct {
@@ -154,6 +161,7 @@ type Client struct {
 	wg            sync.WaitGroup
 	channelID     int64
 	accessHash    int64
+	maxPartSize   int64
 	uploader      *uploader.Uploader
 	downloader    *downloader.Downloader
 	sender        *message.Sender
@@ -177,12 +185,13 @@ func NewClient(user *model.User, apiIDStr string, apiHash string) (*Client, erro
 	})
 
 	c := &Client{
-		user:    user,
-		apiID:   apiID,
-		apiHash: apiHash,
-		client:  client,
-		ctx:     ctx,
-		cancel:  cancel,
+		user:        user,
+		apiID:       apiID,
+		apiHash:     apiHash,
+		client:      client,
+		ctx:         ctx,
+		cancel:      cancel,
+		maxPartSize: defaultMaxPartSize,
 	}
 
 	ready := make(chan struct{})
@@ -613,8 +622,6 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		return nil, fmt.Errorf("channel not initialized")
 	}
 
-	const maxPartSize = 2000 * 1024 * 1024 // 2GB
-
 	generatedID := fmt.Sprintf("%s-%d", name, size)
 	calculatedID := generatedID
 	modTime := time.Now()
@@ -650,10 +657,10 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		NativeHash:   "",
 		ModTime:      modTime,
 		Status:       "active",
-		Fragmented:   size > maxPartSize,
+		Fragmented:   size > c.maxPartSize,
 	}
 
-	if size <= maxPartSize {
+	if size <= c.maxPartSize {
 		// Single part
 		msgID, err := c.uploadPart(folderID, name, reader, replica, nil)
 		if err != nil {
@@ -675,13 +682,13 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	}
 
 	// Split upload
-	totalParts := int(math.Ceil(float64(size) / float64(maxPartSize)))
+	totalParts := int(math.Ceil(float64(size) / float64(c.maxPartSize)))
 	fragments := make([]*model.ReplicaFragment, 0, totalParts)
 
 	for i := 1; i <= totalParts; i++ {
-		partSize := int64(maxPartSize)
+		partSize := c.maxPartSize
 		if i == totalParts {
-			partSize = size - int64(i-1)*maxPartSize
+			partSize = size - int64(i-1)*c.maxPartSize
 		}
 
 		partReader := io.LimitReader(reader, partSize)

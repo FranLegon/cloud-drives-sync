@@ -103,6 +103,9 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	}()
 	logger.Info("Starting Test Command...")
 
+	// Use smaller fragment limit for tests (2MB instead of 2GB)
+	telegram.SetDefaultMaxPartSize(2 * 1024 * 1024)
+
 	runner := task.NewRunner(cfg, nil, false) // Temporary runner for cleanup
 
 	// Run Setup (Phase 0 + Init)
@@ -873,9 +876,9 @@ func runTestCase2(runner *task.Runner, backups []*model.User) error {
 }
 
 func runTestCase3(runner *task.Runner, mainUser *model.User) error {
-	logger.Info("\n--- Test Case 3: Large File (50MB) ---")
+	logger.Info("\n--- Test Case 3: Large File (0.5MB) ---")
 	test5Name := "test_5.txt"
-	test5Size := int64(50) * 1024 * 1024
+	test5Size := int64(512) * 1024
 
 	mainClient, err := runner.GetOrCreateClient(mainUser)
 	if err != nil {
@@ -886,7 +889,7 @@ func runTestCase3(runner *task.Runner, mainUser *model.User) error {
 		return err
 	}
 
-	logger.Info("[SIMULATE USER ACTION] Uploading %s to Main Account (Streamed, 50MB)...", test5Name)
+	logger.Info("[SIMULATE USER ACTION] Uploading %s to Main Account (Streamed, 0.5MB)...", test5Name)
 	if _, err := mainClient.UploadFile(mainSyncID, test5Name, io.LimitReader(rand.Reader, test5Size), test5Size); err != nil {
 		logger.Error("Upload failed: %v", err)
 		return fmt.Errorf("upload large file failed: %w", err)
@@ -1306,9 +1309,9 @@ func runTestCase6(runner *task.Runner, mainUser *model.User, backups []*model.Us
 }
 
 func runTestCase10(runner *task.Runner, mainUser *model.User) error {
-	logger.Info("\n--- Test Case 10: Very Big File (3GB) ---")
+	logger.Info("\n--- Test Case 10: Very Big File (3MB) ---")
 	test10Name := "test_10.txt"
-	test10Size := int64(3) * 1024 * 1024 * 1024
+	test10Size := int64(3) * 1024 * 1024
 
 	mainClient, err := runner.GetOrCreateClient(mainUser)
 	if err != nil {
@@ -1319,7 +1322,7 @@ func runTestCase10(runner *task.Runner, mainUser *model.User) error {
 		return err
 	}
 
-	logger.Info("[SIMULATE USER ACTION] Uploading %s to Main Account (Streamed, 3GB)...", test10Name)
+	logger.Info("[SIMULATE USER ACTION] Uploading %s to Main Account (Streamed, 3MB)...", test10Name)
 	// Calculate hash while uploading
 	hasher := sha256.New()
 	reader := io.LimitReader(rand.Reader, test10Size)
@@ -1489,7 +1492,7 @@ func runTestCase7(runner *task.Runner, mainUser *model.User, backups []*model.Us
 
 func runTestCase11(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
 	logger.Info("\n--- Test Case 11: Restoring Fragmented File ---")
-	// Scenario: test_10.txt (3GB) was uploaded in TC10.
+	// Scenario: test_10.txt (3MB) was uploaded in TC10.
 	// It should exist on Google (Main), Microsoft (Backup), and fragmented on Telegram.
 	// We will delete it from Google and Microsoft, then Sync to see if it heals from Telegram.
 
