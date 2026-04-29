@@ -22,7 +22,7 @@ The application must only interact with files and folders contained within speci
 - A single folder named `sync-cloud-drives` resides in each backup account.
 - Each backup account owns its own `sync-cloud-drives` folder and all subfolders within it.
 - Files are distributed across backup accounts. To maintain a consistent directory structure across all accounts, if a file is owned by Account A, Account B will contain a shortcut to that file in the corresponding location within its own `sync-cloud-drives` structure.
-- **Fallback for Shortcuts:** If creating a native OneDrive shortcut fails (e.g. due to cross-tenant permission issues or API limitations), the system creates a "Fake Shortcut" (placeholder file) named with the pattern `filename.ext.sz-<size>.shortcut`. This 0-byte placeholder carries existence and metadata info and is treated as a valid shortcut by the system to prevent data duplication.
+- **Fallback for Shortcuts:** If creating a native OneDrive shortcut fails (e.g. due to cross-tenant permission issues or API limitations), the system creates a "Fake Shortcut" (placeholder file) named with the pattern `filename.ext.sz-<size>.placeholder`. This 0-byte placeholder carries existence and metadata info and is treated as a valid shortcut by the system to prevent data duplication.
 - **Folder Synchronization:** The system ensures that the complete directory structure is mirrored across all backup accounts (except Telegram). This includes empty folders or folders used only for hierarchy. If a folder exists in the Main account (Google) or in the Database `folders` table, it will be created in the corresponding path in Microsoft backup accounts.
 - Folder owner is always the file owner in OneDrive.
 
@@ -456,7 +456,7 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 - Each backup account owns its own `sync-cloud-drives` folder.
 - Folder owner is always the file owner.
 - Consistency is maintained via shortcuts. If Account A owns a file, Account B holds a shortcut to it.
-- **Placeholder Mechanism:** If the system cannot create a native shortcut (common in cross-tenant scenarios), it falls back to creating a 0-byte placeholder file with a specific extension (`.shortcut`) that encodes the original file's size in its name (`.sz-<size>.shortcut`). The system reads these placeholders as valid replicas/shortcuts within the metadata.
+- **Placeholder Mechanism:** If the system cannot create a native shortcut (common in cross-tenant scenarios), it falls back to creating a 0-byte placeholder file with a specific extension (`.placeholder`) that encodes the original file's size in its name (`.sz-<size>.placeholder`). The system reads these placeholders as valid replicas/shortcuts within the metadata.
 - Each backup account effectively has a full view of the directory structure via a mix of owned files, native shortcuts and placeholder shortcuts.
 
 **Telegram:**

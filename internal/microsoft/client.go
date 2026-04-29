@@ -28,10 +28,10 @@ import (
 
 const (
 	syncFolderPrefix      = "sync-cloud-drives"
-	FakeShortcutExtension = ".shortcut"
+	FakeShortcutExtension = ".placeholder"
 )
 
-var fakeShortcutRegex = regexp.MustCompile(`^(.*)\.sz-(\d+)\.shortcut$`)
+var fakeShortcutRegex = regexp.MustCompile(`^(.*)\.sz-(\d+)` + regexp.QuoteMeta(FakeShortcutExtension) + `$`)
 
 // Client represents a Microsoft OneDrive client
 type Client struct {
