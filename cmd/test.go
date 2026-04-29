@@ -1753,10 +1753,17 @@ func runTestCase12(runner *task.Runner, mainUser *model.User, backups []*model.U
 			return fmt.Errorf("failed to get file metadata: %w", err)
 		}
 
-		if len(metadata.Replicas) > 0 && metadata.Replicas[0].Owner == targetBackup.Email {
+		if len(metadata.Replicas) == 0 {
+			return fmt.Errorf("verification failed: GetFileMetadata returned no replicas for file %s", fileID)
+		}
+
+		logger.Info("[VERIFICATION] File: %s, NativeID: %s, Owner: %q, AccountID: %s",
+			metadata.Name, metadata.Replicas[0].NativeID, metadata.Replicas[0].Owner, metadata.Replicas[0].AccountID)
+
+		if metadata.Replicas[0].Owner == targetBackup.Email {
 			logger.Info("✓ Ownership verified: file now owned by %s", targetBackup.Email)
 		} else {
-			logger.Warning("Owner field: %s (expected: %s)", metadata.Replicas[0].Owner, targetBackup.Email)
+			logger.Warning("Owner field: %q (expected: %q)", metadata.Replicas[0].Owner, targetBackup.Email)
 			return fmt.Errorf("ownership not transferred correctly")
 		}
 

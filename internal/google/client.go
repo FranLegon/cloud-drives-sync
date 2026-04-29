@@ -566,6 +566,12 @@ func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
 		Fragmented:   false,
 	}
 
+	if len(f.Owners) > 0 {
+		replica.Owner = f.Owners[0].EmailAddress
+	} else {
+		replica.Owner = c.user.Email
+	}
+
 	file.Replicas = []*model.Replica{replica}
 
 	// If no MD5 hash (e.g., Google Docs), log a warning
