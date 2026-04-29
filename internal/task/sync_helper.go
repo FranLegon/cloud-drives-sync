@@ -130,10 +130,10 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		return fmt.Errorf("file has no replicas")
 	}
 
-	// Filter viable replicas (ignore shortcuts)
+	// Filter viable replicas (ignore shortcuts and deleted replicas)
 	var viableReplicas []*model.Replica
 	for _, rep := range masterFile.Replicas {
-		if rep.NativeHash != model.NativeHashShortcut {
+		if rep.NativeHash != model.NativeHashShortcut && rep.Status == "active" {
 			viableReplicas = append(viableReplicas, rep)
 		}
 	}
@@ -333,7 +333,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 
 	var sourceReplica *model.Replica
 	for _, replica := range sourceFile.Replicas {
-		if replica.Provider == targetUser.Provider {
+		if replica.Provider == targetUser.Provider && replica.Status == "active" {
 			sourceReplica = replica
 			break
 		}
