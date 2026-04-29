@@ -595,17 +595,14 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 	if isConsentRequiredError(err) {
 		logger.InfoTagged([]string{"Google", c.user.Email}, "Direct transfer failed, attempting pending owner flow...")
 
-		// For consumer accounts with files in shared folders:
-		// The target user has inherited writer access from the shared folder, which prevents
-		// setting pendingOwner (API error: pendingOwnerWriterRequired). The inherited permission
-		// can't be modified at the file level.
-		//
-		// Solution: Move the file to owner's root first (removes inherited permissions),
-		// then create a fresh writer permission with pendingOwner=true.
-		// After the new owner accepts, the file lands in their Drive.
+		// Consumer account transfer flow (2-step):
+		// 1. Grant writer access (target must have direct writer role first)
+		// 2. Update that permission to set pendingOwner=true
+		// The file must NOT be in a shared folder during this process, as inherited
+		// permissions prevent setting pendingOwner on a direct permission.
 		// See: https://developers.google.com/workspace/drive/api/guides/transfer-file#transfer-consumer-account
 
-		// Step 1: Get current parent and move file to root to clear inherited permissions
+		// Step 1: Move file to owner's root to remove inherited permissions
 		file, getErr := c.service.Files.Get(fileID).Fields("parents").Do()
 		if getErr != nil {
 			return fmt.Errorf("failed to get file parents: %w", getErr)
@@ -623,37 +620,47 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 			}
 		}
 
-		// Step 2: Create writer permission with pendingOwner=true
-		// Now that the file is in root, the target has no inherited access
-		logger.InfoTagged([]string{"Google", c.user.Email}, "Step 2: Creating writer permission with pendingOwner=true for %s...", newOwnerEmail)
-		newPerm := &drive.Permission{
-			Type:            "user",
-			Role:            "writer",
-			EmailAddress:    newOwnerEmail,
-			PendingOwner:    true,
-			ForceSendFields: []string{"PendingOwner"},
+		// Step 2: Grant direct writer permission to target user
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Step 2: Granting direct writer permission to %s...", newOwnerEmail)
+		writerPerm := &drive.Permission{
+			Type:         "user",
+			Role:         "writer",
+			EmailAddress: newOwnerEmail,
 		}
-		createdPerm, createErr := c.service.Permissions.Create(fileID, newPerm).Fields("id, role, pendingOwner").SendNotificationEmail(true).Do()
+		createdPerm, createErr := c.service.Permissions.Create(fileID, writerPerm).Fields("id, role").SendNotificationEmail(true).Do()
 		if createErr != nil {
 			// Move back on failure
 			if originalParent != "" && originalParent != "root" {
 				c.service.Files.Update(fileID, &drive.File{}).AddParents(originalParent).RemoveParents("root").Do()
 			}
-			logger.Error("Failed to create pending owner permission: %v", createErr)
-			return fmt.Errorf("failed to set pending owner: %w", createErr)
+			logger.Error("Failed to grant writer permission: %v", createErr)
+			return fmt.Errorf("failed to grant writer permission: %w", createErr)
 		}
-		logger.InfoTagged([]string{"Google", c.user.Email}, "Created permission: ID=%s, role=%s, pendingOwner=%v", createdPerm.Id, createdPerm.Role, createdPerm.PendingOwner)
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Granted writer: ID=%s, role=%s", createdPerm.Id, createdPerm.Role)
 
-		// Step 3: Move file back to shared folder so it remains accessible
-		if originalParent != "" && originalParent != "root" {
-			logger.InfoTagged([]string{"Google", c.user.Email}, "Step 3: Moving file back to sync folder...")
-			_, moveBackErr := c.service.Files.Update(fileID, &drive.File{}).AddParents(originalParent).RemoveParents("root").Do()
-			if moveBackErr != nil {
-				logger.WarningTagged([]string{"Google", c.user.Email}, "Failed to move file back: %v (file is in owner's root)", moveBackErr)
+		// Step 3: Update that permission to set pendingOwner=true
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Step 3: Setting pendingOwner=true on permission %s...", createdPerm.Id)
+		updatePerm := &drive.Permission{
+			Role:            "writer",
+			PendingOwner:    true,
+			ForceSendFields: []string{"PendingOwner"},
+		}
+		updatedPerm, updateErr := c.service.Permissions.Update(fileID, createdPerm.Id, updatePerm).Fields("id, role, pendingOwner").Do()
+		if updateErr != nil {
+			// Move back on failure
+			if originalParent != "" && originalParent != "root" {
+				c.service.Files.Update(fileID, &drive.File{}).AddParents(originalParent).RemoveParents("root").Do()
 			}
+			logger.Error("Failed to set pendingOwner: %v", updateErr)
+			return fmt.Errorf("failed to set pending owner: %w", updateErr)
 		}
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Updated permission: pendingOwner=%v", updatedPerm.PendingOwner)
 
-		logger.InfoTagged([]string{"Google", c.user.Email}, "Pending owner set successfully, requires acceptance by %s", newOwnerEmail)
+		// Do NOT move the file back to the shared folder — that would re-inherit
+		// permissions and potentially clear pendingOwner. Leave it in root.
+		// After ownership is accepted, the new owner can place it wherever they want.
+
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Pending owner set, file left in root. Requires acceptance by %s", newOwnerEmail)
 		return api.ErrOwnershipTransferPending
 	}
 
@@ -662,16 +669,9 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 
 // AcceptOwnership accepts a pending ownership transfer
 func (c *Client) AcceptOwnership(fileID string) error {
-	// First check if we can accept ownership via file capabilities
-	file, err := c.service.Files.Get(fileID).Fields("capabilities(canAcceptOwnership)").Do()
-	if err != nil {
-		return fmt.Errorf("failed to get file capabilities: %w", err)
-	}
-	logger.InfoTagged([]string{"Google", c.user.Email}, "File capabilities: canAcceptOwnership=%v", file.Capabilities.CanAcceptOwnership)
-
-	if !file.Capabilities.CanAcceptOwnership {
-		return errors.New("cannot accept ownership: canAcceptOwnership is false (pending owner may not be set)")
-	}
+	// The prospective owner accepts by creating or updating their permission with
+	// role=owner and transferOwnership=true
+	// See: https://developers.google.com/workspace/drive/api/guides/transfer-file#transfer-consumer-account
 
 	// List permissions to find my permission on this file
 	perms, err := c.service.Permissions.List(fileID).Fields("permissions(id, role, emailAddress, pendingOwner)").Do()
@@ -681,25 +681,32 @@ func (c *Client) AcceptOwnership(fileID string) error {
 
 	var permID string
 	for _, p := range perms.Permissions {
-		logger.InfoTagged([]string{"Google", c.user.Email}, "Checking permission: ID=%s, Role=%s, Email=%s, PendingOwner=%v", p.Id, p.Role, p.EmailAddress, p.PendingOwner)
-
-		// Find my own permission (writer role from the pending owner grant)
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Permission: ID=%s, Role=%s, Email=%s, PendingOwner=%v", p.Id, p.Role, p.EmailAddress, p.PendingOwner)
 		if strings.EqualFold(p.EmailAddress, c.user.Email) {
 			permID = p.Id
 			break
 		}
 	}
 
-	if permID == "" {
-		return errors.New("no permission found for current user to accept ownership")
-	}
-
-	// Accept ownership by updating my permission to owner
-	// The prospective owner accepts by setting role=owner with transferOwnership=true
-	// See: https://developers.google.com/workspace/drive/api/guides/transfer-file#transfer-consumer-account
-	_, err = c.service.Permissions.Update(fileID, permID, &drive.Permission{Role: "owner"}).TransferOwnership(true).Do()
-	if err != nil {
-		return fmt.Errorf("failed to accept ownership: %w", err)
+	if permID != "" {
+		// Update existing permission to owner
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Accepting ownership via permissions.update (permID=%s)...", permID)
+		_, err = c.service.Permissions.Update(fileID, permID, &drive.Permission{Role: "owner"}).TransferOwnership(true).Do()
+		if err != nil {
+			return fmt.Errorf("failed to accept ownership via update: %w", err)
+		}
+	} else {
+		// No existing permission found — accept by creating owner permission
+		logger.InfoTagged([]string{"Google", c.user.Email}, "Accepting ownership via permissions.create...")
+		ownerPerm := &drive.Permission{
+			Type:         "user",
+			Role:         "owner",
+			EmailAddress: c.user.Email,
+		}
+		_, err = c.service.Permissions.Create(fileID, ownerPerm).TransferOwnership(true).SendNotificationEmail(true).Do()
+		if err != nil {
+			return fmt.Errorf("failed to accept ownership via create: %w", err)
+		}
 	}
 
 	logger.InfoTagged([]string{"Google", c.user.Email}, "Accepted ownership of file %s", fileID)
