@@ -1034,7 +1034,7 @@ func runTestCase5(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		}
 		logger.Info("[SIMULATE USER ACTION] User %s moving %s to soft-deleted", u.Email, path)
 		err = c.MoveFile(nativeID, targetFolderID)
-		
+
 		// If move fails with 404, the replica might be stale - try to find an active replica
 		if err != nil && strings.Contains(err.Error(), "404") {
 			logger.Warning("Move failed with 404 (stale replica ID), searching for active replica...")
@@ -1493,7 +1493,7 @@ func runTestCase11(runner *task.Runner, mainUser *model.User, backups []*model.U
 	// It should exist on Google (Main), Microsoft (Backup), and fragmented on Telegram.
 	// We will delete it from Google and Microsoft, then Sync to see if it heals from Telegram.
 
-	// 1. Delete from Google (Main)
+	// 1. Delete from Google (current active replica owner, not always Main)
 	mainClient, err := runner.GetOrCreateClient(mainUser)
 	if err != nil {
 		return err
@@ -1507,19 +1507,73 @@ func runTestCase11(runner *task.Runner, mainUser *model.User, backups []*model.U
 		return fmt.Errorf("test_10.txt missing from DB before test case 11")
 	}
 
-	googleNativeID := getNativeID(f10, mainUser)
-	if googleNativeID != "" {
-		logger.Info("[SIMULATE USER ACTION] Deleting test_10.txt from Google Main directly...")
-		if err := mainClient.DeleteFile(googleNativeID); err != nil {
-			return fmt.Errorf("failed to delete from google: %w", err)
+	googleCandidates := make([]*model.User, 0)
+	seenAccounts := make(map[string]bool)
+	for _, r := range f10.Replicas {
+		if r.Provider != model.ProviderGoogle || r.Status != "active" {
+			continue
 		}
-		// Manually delete ALL Google replicas from DB because Google uses a shared folder model.
-		// Deleting the file from Main (Owner) removes it for everyone.
-		for _, r := range f10.Replicas {
-			if r.Provider == model.ProviderGoogle {
-				if err := db.DeleteReplica(r.ID); err != nil {
-					return fmt.Errorf("failed to delete Google replica from DB: %w", err)
-				}
+		for i := range cfg.Users {
+			u := &cfg.Users[i]
+			if u.Provider != model.ProviderGoogle {
+				continue
+			}
+			if (u.Email == r.AccountID || u.Phone == r.AccountID) && !seenAccounts[r.AccountID] {
+				seenAccounts[r.AccountID] = true
+				googleCandidates = append(googleCandidates, u)
+				break
+			}
+		}
+	}
+
+	if len(googleCandidates) == 0 {
+		for i := range cfg.Users {
+			u := &cfg.Users[i]
+			if u.Provider == model.ProviderGoogle {
+				googleCandidates = append(googleCandidates, u)
+			}
+		}
+	}
+
+	googleDeleted := false
+	var lastGoogleDeleteErr error
+	for _, candidate := range googleCandidates {
+		googleNativeID := getNativeID(f10, candidate)
+		if googleNativeID == "" {
+			continue
+		}
+
+		candidateClient, err := runner.GetOrCreateClient(candidate)
+		if err != nil {
+			lastGoogleDeleteErr = err
+			logger.Warning("Could not create Google client for %s: %v", candidate.Email, err)
+			continue
+		}
+
+		logger.Info("[SIMULATE USER ACTION] Deleting test_10.txt from Google (%s) directly...", candidate.Email)
+		if err := candidateClient.DeleteFile(googleNativeID); err != nil {
+			lastGoogleDeleteErr = err
+			logger.Warning("Failed deleting test_10.txt from Google (%s): %v", candidate.Email, err)
+			continue
+		}
+
+		googleDeleted = true
+		break
+	}
+
+	if !googleDeleted {
+		if lastGoogleDeleteErr != nil {
+			return fmt.Errorf("failed to delete from google with any candidate account: %w", lastGoogleDeleteErr)
+		}
+		return fmt.Errorf("failed to delete from google: no candidate account with a valid test_10.txt replica was found")
+	}
+
+	// Manually delete ALL Google replicas from DB because Google uses a shared folder model.
+	// Deleting the file from owner removes it for everyone.
+	for _, r := range f10.Replicas {
+		if r.Provider == model.ProviderGoogle {
+			if err := db.DeleteReplica(r.ID); err != nil {
+				return fmt.Errorf("failed to delete Google replica from DB: %w", err)
 			}
 		}
 	}
