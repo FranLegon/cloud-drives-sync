@@ -64,8 +64,8 @@ and Telegram.`,
 			return fmt.Errorf("failed to load configuration: %w", err)
 		}
 
-		// Skip DB/Metadata setup for test command as it manages its own lifecycle
-		if cmd.Name() == "test" {
+		// Skip DB/Metadata setup for commands that manage their own lifecycle or don't need it
+		if cmd.Name() == "test" || cmd.Name() == "reauth" {
 			return nil
 		}
 
