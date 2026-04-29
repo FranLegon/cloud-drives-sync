@@ -1362,10 +1362,19 @@ func (r *Runner) distributeShortcuts(files []*model.File) error {
 		}
 	}
 
-	if len(msUsers) < 2 {
-		return nil // No need to distribute if only 0 or 1 MS account
+	if len(msUsers) >= 2 {
+		r.distributeShortcutsAcrossMSAccounts(msUsers, filesByPath)
 	}
 
+	// Distribute Folders (for empty folders)
+	if err := r.syncFolderStructures(); err != nil {
+		logger.Error("Failed to sync folder structures: %v", err)
+	}
+
+	return nil
+}
+
+func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, filesByPath map[string][]*model.File) {
 	for path, pathFiles := range filesByPath {
 		// Check if this path exists in Microsoft
 		var msFiles []*model.File
@@ -1407,9 +1416,6 @@ func (r *Runner) distributeShortcuts(files []*model.File) error {
 				if !r.safeMode {
 					if err := r.createShortcut(sourceFile, &user); err != nil {
 						logger.Error("Failed to create shortcut for %s in %s: %v", path, user.Email, err)
-						if r.stopOnError {
-							return fmt.Errorf("failed to create shortcut for %s: %w", path, err)
-						}
 					}
 				} else {
 					// Get source account from first replica
@@ -1422,111 +1428,113 @@ func (r *Runner) distributeShortcuts(files []*model.File) error {
 			}
 		}
 	}
+}
 
-	// Distribute Folders (for empty folders)
+// syncFolderStructures ensures empty folder structures are replicated across providers
+func (r *Runner) syncFolderStructures() error {
 	logger.Info("Syncing folder structures...")
 	allFolders, err := r.db.GetAllFolders()
-	if err == nil {
-		paths := make([]string, 0)
-		seen := make(map[string]bool)
-		for _, f := range allFolders {
-			if f.Name == MetadataFileName || f.Name == AuxFolder || f.Name == SoftDeletedFolder || strings.Contains(f.Path, AuxFolder) {
-				continue
-			}
-			if !seen[f.Path] {
-				paths = append(paths, f.Path)
-				seen[f.Path] = true
-			}
+	if err != nil {
+		return fmt.Errorf("failed to get folders from DB: %w", err)
+	}
+
+	paths := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, f := range allFolders {
+		if f.Name == MetadataFileName || f.Name == AuxFolder || f.Name == SoftDeletedFolder || strings.Contains(f.Path, AuxFolder) {
+			continue
+		}
+		if !seen[f.Path] {
+			paths = append(paths, f.Path)
+			seen[f.Path] = true
+		}
+	}
+
+	for i := range r.config.Users {
+		u := &r.config.Users[i]
+		if u.Provider == model.ProviderTelegram {
+			continue
 		}
 
-		for i := range r.config.Users {
-			u := &r.config.Users[i]
-			if u.Provider == model.ProviderTelegram {
-				continue
-			}
+		logger.InfoTagged([]string{string(u.Provider), u.Email}, "Verifying folder structure...")
+		client, err := r.GetOrCreateClient(u)
+		if err != nil {
+			continue
+		}
+		rootID, err := client.GetSyncFolderID()
+		if err != nil {
+			continue
+		}
 
-			logger.InfoTagged([]string{string(u.Provider), u.Email}, "Verifying folder structure...")
-			client, err := r.GetOrCreateClient(u)
-			if err != nil {
-				continue
-			}
-			rootID, err := client.GetSyncFolderID()
-			if err != nil {
-				continue
-			}
+		// Cache for this user: parentID -> map[name]id
+		cache := make(map[string]map[string]string)
 
-			// Cache for this user: parentID -> map[name]id
-			cache := make(map[string]map[string]string)
-
-			var getFolderID func(string, string) (string, error)
-			getFolderID = func(parentID, name string) (string, error) {
-				if m, ok := cache[parentID]; ok {
-					if id, ok := m[name]; ok {
-						return id, nil
-					}
-				}
-
-				// List
-				items, err := client.ListFolders(parentID)
-				if err != nil {
-					return "", err
-				}
-
-				m := make(map[string]string)
-				for _, item := range items {
-					m[item.Name] = item.ID
-				}
-				cache[parentID] = m
-
+		var getFolderID func(string, string) (string, error)
+		getFolderID = func(parentID, name string) (string, error) {
+			if m, ok := cache[parentID]; ok {
 				if id, ok := m[name]; ok {
 					return id, nil
 				}
-				return "", nil // Not found
 			}
 
-			for _, path := range paths {
-				relPath := strings.TrimPrefix(path, "/")
-				if relPath == "" {
+			// List
+			items, err := client.ListFolders(parentID)
+			if err != nil {
+				return "", err
+			}
+
+			m := make(map[string]string)
+			for _, item := range items {
+				m[item.Name] = item.ID
+			}
+			cache[parentID] = m
+
+			if id, ok := m[name]; ok {
+				return id, nil
+			}
+			return "", nil // Not found
+		}
+
+		for _, path := range paths {
+			relPath := strings.TrimPrefix(path, "/")
+			if relPath == "" {
+				continue
+			}
+			parts := strings.Split(relPath, "/")
+
+			currentID := rootID
+			for _, part := range parts {
+				if part == "" {
 					continue
 				}
-				parts := strings.Split(relPath, "/")
 
-				currentID := rootID
-				for _, part := range parts {
-					if part == "" {
-						continue
-					}
+				id, err := getFolderID(currentID, part)
+				if err != nil {
+					break
+				} // Error listing
 
-					id, err := getFolderID(currentID, part)
-					if err != nil {
-						break
-					} // Error listing
-
-					if id == "" {
-						// Create
-						if !r.safeMode {
-							newF, err := client.CreateFolder(currentID, part)
-							if err != nil {
-								logger.Warning("Failed to create folder %s: %v", part, err)
-								break
-							}
-							id = newF.ID
-							// Update cache
-							if cache[currentID] == nil {
-								cache[currentID] = make(map[string]string)
-							}
-							cache[currentID][part] = id
-						} else {
-							logger.DryRun("Would create folder %s in %s", part, currentID)
-							break // Can't proceed safely
+				if id == "" {
+					// Create
+					if !r.safeMode {
+						newF, err := client.CreateFolder(currentID, part)
+						if err != nil {
+							logger.Warning("Failed to create folder %s: %v", part, err)
+							break
 						}
+						id = newF.ID
+						// Update cache
+						if cache[currentID] == nil {
+							cache[currentID] = make(map[string]string)
+						}
+						cache[currentID][part] = id
+					} else {
+						logger.DryRun("Would create folder %s in %s", part, currentID)
+						break // Can't proceed safely
 					}
-					currentID = id
 				}
+				currentID = id
 			}
 		}
-	} else {
-		logger.Error("Failed to get folders from DB: %v", err)
 	}
 
 	return nil
