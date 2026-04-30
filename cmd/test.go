@@ -761,8 +761,7 @@ func runCLISync(runner *task.Runner) error {
 
 func runCLIFreeMain(runner *task.Runner) error {
 	logger.Info("[CLI COMMAND] Running: FreeMain")
-	_, err := runner.FreeMain()
-	return err
+	return runner.FreeMain()
 }
 
 func verifyFileInDB(path string) error {
