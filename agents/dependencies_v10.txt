@@ -13,6 +13,9 @@ go get golang.org/x/oauth2@v0.21.0
 # The official Microsoft Graph SDK for Go (used for OneDrive for Business)
 go get github.com/microsoftgraph/msgraph-sdk-go@v1.92.0
 
+# Microsoft Graph core helpers used by the Graph SDK client pipeline
+go get github.com/microsoftgraph/msgraph-sdk-go-core@v1.4.0
+
 # Telegram API client for Go (Native Go implementation)
 go get github.com/gotd/td@v0.136.0
 
@@ -21,3 +24,9 @@ go get github.com/mutecomm/go-sqlcipher/v4@v4.4.2
 
 # Provides cryptographic functions, including Argon2id for key derivation
 go get golang.org/x/crypto@v0.45.0
+
+# Azure core primitives used by the Microsoft Graph authentication/runtime stack
+go get github.com/Azure/azure-sdk-for-go/sdk/azcore@v1.20.0
+
+# UUID generation for logical file identifiers
+go get github.com/google/uuid@v1.6.0

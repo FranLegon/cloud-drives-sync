@@ -118,8 +118,7 @@ The database uses a **Normalized Schema** to better handle multiple accounts, de
   },
   "telegram_client": {
     "api_id": "YOUR_TELEGRAM_API_ID",
-    "api_hash": "YOUR_TELEGRAM_API_HASH",
-    "phone": "YOUR_PHONE_NUMBER"
+    "api_hash": "YOUR_TELEGRAM_API_HASH"
   },
   "users": [
     {
@@ -183,6 +182,8 @@ The database uses a **Normalized Schema** to better handle multiple accounts, de
 - `fragmented` (BOOLEAN NOT NULL DEFAULT 0): true for Telegram files split into parts
 - `last_seen_at` (INTEGER NOT NULL DEFAULT 0): Timestamp of last verification (for deletion detection)
 - `owner` (TEXT DEFAULT ''): Email of the account that owns the file (may differ from account_id for shared files)
+
+**Implementation note:** In the current codebase, `last_seen_at` and `owner` are also added as compatibility migrations for older databases during initialization.
 
 **replica_fragments Table (Telegram-specific for files split into 2GB chunks):**
 - `id` (INTEGER, PK, AutoIncrement)
@@ -293,6 +294,11 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
     *   **Microsoft OneDrive:** Upon successful authorization, creates a `sync-cloud-drives` folder in the backup account's root if it doesn't exist.
     *   **Telegram:** Allows adding Telegram account for backup storage purposes.
 
+*   **`remove-account`**
+    *   Removes a configured backup account from the encrypted configuration.
+    *   Main accounts can only be removed when no backup accounts remain for that provider.
+    *   This updates local configuration only; it does not delete cloud data from the provider.
+
 *   **`get-metadata`**
     *   After passing the pre-flight checks, it recursively scans the designated sync folders for every account.
     *   **Google Drive:** Scans the `sync-cloud-drives` folder and all shared content within it.
@@ -375,8 +381,7 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
         *   `--force`: Skips confirmation prompt.
         *   `--stop-on-error`, `-s`: Stop test execution immediately if an error occurs.
         *   `--test-case`, `-t`: Run specific test case and its dependencies (0 = all).
-        *   `--password`: Master password.
-        *   `--help`: Help information.
+        *   Inherits global `--password`, `-p` and standard Cobra help handling from the root command.
     *   **Process:**
         1.  **Cleanup (Unsafe Mode):** If `--safe` is not provided:
             *   Deletes `sync-cloud-drives`, all subfolders, and files from all accounts (main and backups, all providers).
@@ -424,7 +429,7 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
             *   Verifies files are permanently removed from DB and Cloud.
 
 *   **`help`**
-    *   Lists all available commands, their purpose, and example usage.
+    *   Help output is provided by Cobra's built-in command/help handling and lists available commands, their purpose, and usage.
 
 #### **5B. Detailed Functionality (Command-Line flags)**
 
