@@ -23,7 +23,7 @@ func runFreeMain(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := runner.FreeMain(); err != nil {
+	if _, err := runner.FreeMain(); err != nil {
 		return err
 	}
 

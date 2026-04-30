@@ -44,12 +44,14 @@ func SyncAction(runner *task.Runner, isSafeMode bool) error {
 
 	// 2. Free Main
 	logger.Info("[Step 2/5] Freeing Main Account...")
-	if err := runner.FreeMain(); err != nil {
+	moved, err := runner.FreeMain()
+	if err != nil {
 		return err
 	}
 
 	// 3. Remove Duplicates
 	logger.Info("[Step 3/5] Removing Duplicates...")
+	var deleted int
 	if isSafeMode {
 		// If safe mode, run interactive remove-duplicates (with false for metadata update)
 		if err := RemoveDuplicatesAction(runner, false); err != nil {
@@ -57,15 +59,21 @@ func SyncAction(runner *task.Runner, isSafeMode bool) error {
 		}
 	} else {
 		// Normal mode, run unsafe automatic removal (with false for metadata update)
-		if err := RemoveDuplicatesUnsafeAction(runner, false); err != nil {
+		deleted, err = RemoveDuplicatesUnsafeAction(runner, false)
+		if err != nil {
 			return err
 		}
 	}
 
 	// 4. Sync Providers
 	logger.Info("[Step 4/5] Syncing Providers...")
-	// Refresh metadata after FreeMain to avoid stale replica IDs before provider sync.
-	if err := SyncProvidersAction(runner, true); err != nil {
+	// Only refresh metadata if FreeMain or RemoveDuplicates actually changed files,
+	// otherwise the DB from Step 1 is still accurate.
+	needsMetadataRefresh := moved > 0 || deleted > 0 || isSafeMode
+	if !needsMetadataRefresh {
+		logger.Info("Skipping metadata refresh (no files moved or deleted)")
+	}
+	if err := SyncProvidersAction(runner, needsMetadataRefresh); err != nil {
 		return err
 	}
 

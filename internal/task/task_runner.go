@@ -598,8 +598,9 @@ func (r *Runner) BalanceStorage() error {
 	return nil
 }
 
-// FreeMain transfers all files from main account to backup accounts
-func (r *Runner) FreeMain() error {
+// FreeMain transfers all files from main account to backup accounts.
+// Returns the number of files moved and any error.
+func (r *Runner) FreeMain() (int, error) {
 	logger.Info("Freeing up main account storage...")
 
 	// Find main account (Google)
@@ -613,7 +614,7 @@ func (r *Runner) FreeMain() error {
 
 	if mainUser == nil {
 		logger.Warning("No Google main account found")
-		return nil
+		return 0, nil
 	}
 
 	// Find backup accounts for Google
@@ -626,7 +627,7 @@ func (r *Runner) FreeMain() error {
 
 	if len(backupUsers) == 0 {
 		logger.Warning("No Google backup accounts found")
-		return nil
+		return 0, nil
 	}
 
 	logger.Info("Processing Google (Main: %s)", mainUser.Email)
@@ -635,7 +636,7 @@ func (r *Runner) FreeMain() error {
 	mainClient, err := r.GetOrCreateClient(mainUser)
 	if err != nil {
 		logger.Error("Failed to create client for main account: %v", err)
-		return err
+		return 0, err
 	}
 
 	// Get backup accounts status
@@ -668,20 +669,20 @@ func (r *Runner) FreeMain() error {
 
 	if len(targets) == 0 {
 		logger.Warning("No backup accounts with free space available for Google")
-		return nil
+		return 0, nil
 	}
 
 	// List files in main account
 	syncFolderID, err := mainClient.GetSyncFolderID()
 	if err != nil {
 		logger.Error("Failed to get sync folder: %v", err)
-		return err
+		return 0, err
 	}
 
 	files, err := r.getAllFilesRecursive(mainClient, syncFolderID, "/")
 	if err != nil {
 		logger.Error("Failed to list files recursively: %v", err)
-		return err
+		return 0, err
 	}
 
 	// Filter files owned by main user
@@ -705,7 +706,7 @@ func (r *Runner) FreeMain() error {
 
 	if len(candidates) == 0 {
 		logger.Info("No files found in main account to move")
-		return nil
+		return 0, nil
 	}
 
 	// Sort files by size (descending) to move big chunks first
@@ -714,6 +715,7 @@ func (r *Runner) FreeMain() error {
 	})
 
 	// Move files
+	moved := 0
 	for _, file := range candidates {
 		// Sort targets by free space (descending) - re-sort each time as space changes
 		sort.Slice(targets, func(i, j int) bool {
@@ -794,12 +796,14 @@ func (r *Runner) FreeMain() error {
 			logger.DryRunTagged([]string{"Google", mainUser.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
 		}
 
+		moved++
+
 		// Update local state
 		target.Free -= file.Size
 		target.Quota.Used += file.Size
 	}
 
-	return nil
+	return moved, nil
 }
 
 // fallbackCopyDelete performs a download+upload+delete transfer when ownership transfer is not supported

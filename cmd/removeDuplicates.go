@@ -152,15 +152,16 @@ func runRemoveDuplicatesUnsafe(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	return RemoveDuplicatesUnsafeAction(runner, true)
+	_, err := RemoveDuplicatesUnsafeAction(runner, true)
+	return err
 }
 
-func RemoveDuplicatesUnsafeAction(runner *task.Runner, updateMetadata bool) error {
+func RemoveDuplicatesUnsafeAction(runner *task.Runner, updateMetadata bool) (int, error) {
 	if updateMetadata {
 		// First, update metadata
 		logger.Info("Updating metadata before checking for duplicates...")
 		if err := runner.GetMetadata(); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
@@ -168,12 +169,12 @@ func RemoveDuplicatesUnsafeAction(runner *task.Runner, updateMetadata bool) erro
 	ids, err := db.GetDuplicateCalculatedIDs()
 	if err != nil {
 		logger.Error("Failed to query duplicates: %v", err)
-		return err
+		return 0, err
 	}
 
 	if len(ids) == 0 {
 		logger.Info("No duplicates found")
-		return nil
+		return 0, nil
 	}
 
 	totalDeleted := 0
@@ -232,5 +233,5 @@ func RemoveDuplicatesUnsafeAction(runner *task.Runner, updateMetadata bool) erro
 	} else {
 		logger.Info("Deleted %d duplicate files", totalDeleted)
 	}
-	return nil
+	return totalDeleted, nil
 }
