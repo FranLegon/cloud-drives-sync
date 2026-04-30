@@ -61,24 +61,25 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 	return nil, nil, fmt.Errorf("no account found for %s with enough space", provider)
 }
 
-// ensureFolderStructure ensures that the folder structure exists in the destination
+// ensureFolderStructure ensures that the folder structure exists in the destination.
+// It is safe to call concurrently; a mutex prevents duplicate folder creation.
 func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, provider model.Provider) (string, error) {
+	// Telegram doesn't support folders, so just return the path
+	if provider == model.ProviderTelegram {
+		if !strings.HasPrefix(path, "/") {
+			path = "/" + path
+		}
+		path = strings.ReplaceAll(path, "\\", "/")
+		return path, nil
+	}
+
+	r.folderMu.Lock()
+	defer r.folderMu.Unlock()
+
 	// Get root sync folder
 	currentID, err := client.GetSyncFolderID()
 	if err != nil {
 		return "", err
-	}
-
-	// Telegram doesn't support folders, so just return the sync channel ID
-	if provider == model.ProviderTelegram {
-		// For Telegram, we return the path itself as the "ID" so it can be stored in metadata
-		// Ensure path starts with /
-		if !strings.HasPrefix(path, "/") {
-			path = "/" + path
-		}
-		// Replace backslashes with forward slashes
-		path = strings.ReplaceAll(path, "\\", "/")
-		return path, nil
 	}
 
 	// Clean path and split

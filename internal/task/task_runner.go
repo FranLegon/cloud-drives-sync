@@ -35,6 +35,8 @@ type Runner struct {
 	safeMode              bool
 	stopOnError           bool
 	clients               map[string]api.CloudClient
+	clientsMu             sync.RWMutex
+	folderMu              sync.Mutex      // protects ensureFolderStructure from concurrent creates
 	msShareFailureCache   map[string]bool // Cache of failed Microsoft sharing attempts (sourceAccount:targetAccount)
 	msShareFailureCacheMu sync.RWMutex
 }
@@ -58,6 +60,17 @@ func (r *Runner) SetStopOnError(stop bool) {
 func (r *Runner) GetOrCreateClient(user *model.User) (api.CloudClient, error) {
 	key := string(user.Provider) + ":" + user.Email + user.Phone
 
+	r.clientsMu.RLock()
+	if client, exists := r.clients[key]; exists {
+		r.clientsMu.RUnlock()
+		return client, nil
+	}
+	r.clientsMu.RUnlock()
+
+	r.clientsMu.Lock()
+	defer r.clientsMu.Unlock()
+
+	// Double-check after acquiring write lock
 	if client, exists := r.clients[key]; exists {
 		return client, nil
 	}
@@ -1237,14 +1250,45 @@ func (r *Runner) moveReplicaToPath(replica *model.Replica, fileName, targetPath 
 	}
 }
 
+// copyJob represents a file copy operation to be executed by a worker
+type copyJob struct {
+	masterFile *model.File
+	provider   model.Provider
+	targetName string // empty for normal copy, non-empty for conflict resolution
+	path       string // for error reporting
+}
+
 // syncMissingAndConflicts copies missing files across providers, resolves conflicts, and enforces soft-delete placement
 func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string) error {
 	providers := []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram}
 
+	// Phase 1: Handle soft-deleted placements (sequential, fast)
 	for path, fileMap := range filesByPath {
+		if !strings.Contains(path, softDeletedPath) {
+			continue
+		}
 		var masterFile *model.File
-		isSoftDeleted := strings.Contains(path, softDeletedPath)
+		if f, ok := fileMap[model.ProviderGoogle]; ok {
+			masterFile = f
+		} else if f, ok := fileMap[model.ProviderMicrosoft]; ok {
+			masterFile = f
+		} else if f, ok := fileMap[model.ProviderTelegram]; ok {
+			masterFile = f
+		}
+		if masterFile != nil {
+			r.enforceSoftDeletedPlacement(masterFile, softDeletedPath)
+		}
+	}
 
+	// Phase 2: Collect copy jobs for missing files and conflicts
+	var jobs []copyJob
+
+	for path, fileMap := range filesByPath {
+		if strings.Contains(path, softDeletedPath) {
+			continue
+		}
+
+		var masterFile *model.File
 		if f, ok := fileMap[model.ProviderGoogle]; ok {
 			masterFile = f
 		} else if f, ok := fileMap[model.ProviderMicrosoft]; ok {
@@ -1257,28 +1301,23 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 			continue
 		}
 
-		if isSoftDeleted {
-			r.enforceSoftDeletedPlacement(masterFile, softDeletedPath)
-			continue
-		}
-
 		for _, provider := range providers {
 			if _, exists := fileMap[provider]; !exists {
 				logger.Info("File %s missing in %s", path, provider)
 
-				if !r.safeMode {
-					if err := r.copyFile(masterFile, provider, ""); err != nil {
-						logger.Error("Failed to copy file: %v", err)
-						if r.stopOnError {
-							return fmt.Errorf("failed to copy file %s to %s: %w", path, provider, err)
-						}
-					}
-				} else {
+				if r.safeMode {
 					sourceProvider := ""
 					if len(masterFile.Replicas) > 0 {
 						sourceProvider = string(masterFile.Replicas[0].Provider)
 					}
 					logger.DryRun("Would copy %s from %s to %s", path, sourceProvider, provider)
+				} else {
+					jobs = append(jobs, copyJob{
+						masterFile: masterFile,
+						provider:   provider,
+						targetName: "",
+						path:       path,
+					})
 				}
 			} else {
 				existingFile := fileMap[provider]
@@ -1290,20 +1329,61 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 					timestamp := time.Now().Format("2006-01-02_15-04-05")
 					conflictName := fmt.Sprintf("%s_conflict_%s%s", nameWithoutExt, timestamp, ext)
 
-					if !r.safeMode {
-						logger.Info("Resolving conflict by uploading as %s", conflictName)
-						if err := r.copyFile(masterFile, provider, conflictName); err != nil {
-							logger.Error("Failed to resolve conflict: %v", err)
-							if r.stopOnError {
-								return fmt.Errorf("failed to resolve conflict for %s in %s: %w", path, provider, err)
-							}
-						}
-					} else {
+					if r.safeMode {
 						logger.DryRun("Would resolve conflict by uploading %s as %s to %s", path, conflictName, provider)
+					} else {
+						logger.Info("Resolving conflict by uploading as %s", conflictName)
+						jobs = append(jobs, copyJob{
+							masterFile: masterFile,
+							provider:   provider,
+							targetName: conflictName,
+							path:       path,
+						})
 					}
 				}
 			}
 		}
+	}
+
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	// Phase 3: Execute copy jobs in parallel
+	const maxWorkers = 4
+	logger.Info("Executing %d file copy operations with %d workers...", len(jobs), maxWorkers)
+
+	jobChan := make(chan copyJob, len(jobs))
+	for _, j := range jobs {
+		jobChan <- j
+	}
+	close(jobChan)
+
+	var copyWg sync.WaitGroup
+	errChan := make(chan error, len(jobs))
+
+	for w := 0; w < maxWorkers; w++ {
+		copyWg.Add(1)
+		go func() {
+			defer copyWg.Done()
+			for job := range jobChan {
+				if err := r.copyFile(job.masterFile, job.provider, job.targetName); err != nil {
+					logger.Error("Failed to copy file %s to %s: %v", job.path, job.provider, err)
+					if r.stopOnError {
+						errChan <- fmt.Errorf("failed to copy file %s to %s: %w", job.path, job.provider, err)
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	copyWg.Wait()
+	close(errChan)
+
+	// Return first error if stopOnError was set
+	if err, ok := <-errChan; ok {
+		return err
 	}
 
 	return nil
@@ -1391,12 +1471,20 @@ func (r *Runner) distributeShortcuts(files []*model.File) error {
 	return nil
 }
 
+// shortcutJob represents a shortcut creation task
+type shortcutJob struct {
+	sourceFile *model.File
+	user       model.User
+	path       string
+}
+
 func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, filesByPath map[string][]*model.File) {
+	var jobs []shortcutJob
+
 	for path, pathFiles := range filesByPath {
 		// Check if this path exists in Microsoft
 		var msFiles []*model.File
 		for _, f := range pathFiles {
-			// Check if file has a Microsoft replica
 			for _, replica := range f.Replicas {
 				if replica.Provider == model.ProviderMicrosoft {
 					msFiles = append(msFiles, f)
@@ -1409,15 +1497,11 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 			continue
 		}
 
-		// Pick a source file (preferably one that's not a shortcut if we knew, otherwise first)
 		sourceFile := msFiles[0]
 
-		// Ensure all other MS users have it
 		for _, user := range msUsers {
-			// Check if user has it
 			hasIt := false
 			for _, f := range msFiles {
-				// Check if this file has a replica for this user
 				for _, replica := range f.Replicas {
 					if replica.Provider == model.ProviderMicrosoft && replica.AccountID == user.Email {
 						hasIt = true
@@ -1430,21 +1514,50 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 			}
 
 			if !hasIt {
-				if !r.safeMode {
-					if err := r.createShortcut(sourceFile, &user); err != nil {
-						logger.Error("Failed to create shortcut for %s in %s: %v", path, user.Email, err)
-					}
-				} else {
-					// Get source account from first replica
+				if r.safeMode {
 					sourceAccount := ""
 					if len(sourceFile.Replicas) > 0 {
 						sourceAccount = sourceFile.Replicas[0].AccountID
 					}
 					logger.DryRun("Would create shortcut for %s in %s -> %s", path, user.Email, sourceAccount)
+				} else {
+					jobs = append(jobs, shortcutJob{
+						sourceFile: sourceFile,
+						user:       user,
+						path:       path,
+					})
 				}
 			}
 		}
 	}
+
+	if len(jobs) == 0 {
+		return
+	}
+
+	const maxWorkers = 4
+	logger.Info("Creating %d shortcuts with %d workers...", len(jobs), maxWorkers)
+
+	jobChan := make(chan shortcutJob, len(jobs))
+	for _, j := range jobs {
+		jobChan <- j
+	}
+	close(jobChan)
+
+	var wg sync.WaitGroup
+	for w := 0; w < maxWorkers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobChan {
+				if err := r.createShortcut(job.sourceFile, &job.user); err != nil {
+					logger.Error("Failed to create shortcut for %s in %s: %v", job.path, job.user.Email, err)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
 }
 
 // syncFolderStructures ensures empty folder structures are replicated across providers
