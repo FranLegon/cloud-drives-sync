@@ -12,18 +12,20 @@ go env GOCACHE
 
 # Set `$env:SYNC_CLOUD_DRIVES_PASS`
 ```powershell
-#Set the password for testing (must be the same as in .env):
+#Set the password for testing in .env:
 $env:SYNC_CLOUD_DRIVES_PASS="your_password_here"
+if (-not (Test-Path -Path .env)) { New-Item -Path .env -ItemType File -Value "SYNC_CLOUD_DRIVES_PASS=$env:SYNC_CLOUD_DRIVES_PASS" }
+if (-not (Select-String -Path .gitignore -Pattern "^\.env$" -Quiet)) { Add-Content -Path .gitignore -Value ".env" }
 ```
 
 # Test
 ```powershell
 #Run tests:
-go build -o cloud-drives-sync.exe .; .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS
+go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS
 ```
 
 # Compare current vs last commit results:
 ```powershell
 #Compare execution time of current code vs last commit:
-git stash; git checkout main~1; go build -o cloud-drives-sync.exe .; Write-Host "=== BEFORE ==="; measure-command { .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS }; git checkout main; git stash pop; go build -o cloud-drives-sync.exe .; Write-Host "=== AFTER ==="; measure-command { .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS }   
+git stash && git checkout main~1 && go build -o cloud-drives-sync.exe . && Write-Host "=== BEFORE ===" && measure-command { .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS } && write-host (Get-ChildItem -Path logs -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Select-Object -ExpandProperty FullName) && git checkout main && git stash pop && go build -o cloud-drives-sync.exe . && Write-Host "=== AFTER ===" && measure-command { .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS } && write-host (Get-ChildItem -Path logs -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Select-Object -ExpandProperty FullName)
 ```
