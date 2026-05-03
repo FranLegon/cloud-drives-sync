@@ -19,6 +19,7 @@ var (
 	cfg            *model.Config
 	db             *database.DB
 	masterPassword string
+	initialDBHash  string
 )
 
 // rootCmd represents the base command
@@ -85,11 +86,19 @@ and Telegram.`,
 			return fmt.Errorf("failed to initialize database: %w", err)
 		}
 
+		if hash, err := db.GetMetadataHash(); err == nil {
+			initialDBHash = hash
+		}
+
 		return nil
 	},
 	PersistentPostRunE: func(cmd *cobra.Command, args []string) error {
-		// Close database
+		// Check if DB had changes before closing
+		dbHasChanges := true // Default to true if hash check fails
 		if db != nil {
+			if finalHash, err := db.GetMetadataHash(); err == nil && initialDBHash != "" {
+				dbHasChanges = finalHash != initialDBHash
+			}
 			db.Close()
 		}
 
@@ -107,6 +116,10 @@ and Telegram.`,
 		}
 
 		if writingCommands[cmd.Name()] && cfg != nil {
+			if !dbHasChanges {
+				logger.Info("No metadata changes detected, skipping upload.")
+				return nil
+			}
 			if err := task.UploadMetadataDB(cfg, database.GetDBPath()); err != nil {
 				return fmt.Errorf("failed to upload metadata.db: %w", err)
 			}

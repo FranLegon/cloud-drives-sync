@@ -28,11 +28,11 @@ func runQuota(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	return QuotaAction(runner)
+	return QuotaAction(runner, true)
 }
 
-func QuotaAction(runner *task.Runner) error {
-	quotas, err := runner.GetProviderQuotasFromDB() // Changed to use DB (triggers SyncMetadata)
+func QuotaAction(runner *task.Runner, updateMetadata bool) error {
+	quotas, err := runner.GetProviderQuotasFromDB(updateMetadata) // Changed to use DB (triggers SyncMetadata)
 	if err != nil {
 		return err
 	}

@@ -77,6 +77,24 @@ func (db *DB) Reset() error {
 	return nil
 }
 
+// GetMetadataHash computes a fast hash of the current logical state of the database,
+// ignoring transient fields like last_seen_at.
+func (db *DB) GetMetadataHash() (string, error) {
+	// We hash the files table and replicas table using a simple polynomial sum to minimize collisions
+	query := `
+	SELECT 
+		(SELECT COALESCE(SUM((LENGTH(id)*3) + (LENGTH(path)*7) + (LENGTH(name)*11) + (size*13) + (LENGTH(COALESCE(calculated_id,''))*17) + (mod_time*19) + (LENGTH(status)*23)), 0) FROM files),
+		(SELECT COALESCE(SUM((LENGTH(COALESCE(file_id,''))*3) + (LENGTH(COALESCE(calculated_id,''))*7) + (LENGTH(path)*11) + (LENGTH(name)*13) + (size*17) + (LENGTH(provider)*19) + (LENGTH(account_id)*23) + (LENGTH(native_id)*29) + (LENGTH(COALESCE(native_hash,''))*31) + (mod_time*37) + (LENGTH(status)*41) + (fragmented*43) + (LENGTH(COALESCE(owner,''))*47)), 0) FROM replicas),
+		(SELECT COALESCE(SUM((LENGTH(id)*3) + (LENGTH(name)*7) + (LENGTH(path)*11) + (LENGTH(provider)*13) + (LENGTH(COALESCE(user_email,''))*17) + (LENGTH(COALESCE(user_phone,''))*19) + (LENGTH(COALESCE(parent_folder_id,''))*23) + (LENGTH(COALESCE(owner_email,''))*29)), 0) FROM folders)
+	`
+	var hash1, hash2, hash3 int64
+	err := db.conn.QueryRow(query).Scan(&hash1, &hash2, &hash3)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%d-%d-%d", hash1, hash2, hash3), nil
+}
+
 // Close closes the database connection
 func (db *DB) Close() error {
 	if db.conn != nil {
@@ -236,8 +254,6 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 			size=excluded.size,
 			native_hash=excluded.native_hash,
 			mod_time=excluded.mod_time,
-			-- Only update status to 'active' if the replica was not previously marked as 'deleted' due to stale native_id
-			-- or if the file content has actually changed (different hash/size)
 			status=CASE 
 				WHEN replicas.status = 'deleted' AND (replicas.native_hash = excluded.native_hash OR excluded.native_hash = '' OR replicas.native_hash = '') THEN 'deleted'
 				ELSE excluded.status 
@@ -1107,7 +1123,7 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 	)
 	`
 
-	if _, err := db.conn.Exec(updateQuery, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp); err != nil {
+	if _, err := db.conn.Exec(updateQuery, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp); err != nil {
 		return fmt.Errorf("failed to update soft-deleted status: %w", err)
 	}
 
@@ -1128,7 +1144,7 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 			 LIMIT 1),
 			files.path)
 	WHERE status = 'softdeleted'
-	AND calculated_id != ''
+	AND (calculated_id != '' AND calculated_id IS NOT NULL)
 	AND EXISTS (
 		SELECT 1
 		FROM replicas r

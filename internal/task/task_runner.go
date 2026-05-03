@@ -599,8 +599,10 @@ func (r *Runner) BalanceStorage() error {
 }
 
 // FreeMain transfers all files from main account to backup accounts
-func (r *Runner) FreeMain() error {
+func (r *Runner) FreeMain() (bool, error) {
 	logger.Info("Freeing up main account storage...")
+
+	filesMoved := false
 
 	// Find main account (Google)
 	var mainUser *model.User
@@ -613,7 +615,7 @@ func (r *Runner) FreeMain() error {
 
 	if mainUser == nil {
 		logger.Warning("No Google main account found")
-		return nil
+		return filesMoved, nil
 	}
 
 	// Find backup accounts for Google
@@ -626,7 +628,7 @@ func (r *Runner) FreeMain() error {
 
 	if len(backupUsers) == 0 {
 		logger.Warning("No Google backup accounts found")
-		return nil
+		return filesMoved, nil
 	}
 
 	logger.Info("Processing Google (Main: %s)", mainUser.Email)
@@ -635,7 +637,7 @@ func (r *Runner) FreeMain() error {
 	mainClient, err := r.GetOrCreateClient(mainUser)
 	if err != nil {
 		logger.Error("Failed to create client for main account: %v", err)
-		return err
+		return filesMoved, err
 	}
 
 	// Get backup accounts status
@@ -668,20 +670,20 @@ func (r *Runner) FreeMain() error {
 
 	if len(targets) == 0 {
 		logger.Warning("No backup accounts with free space available for Google")
-		return nil
+		return filesMoved, nil
 	}
 
 	// List files in main account
 	syncFolderID, err := mainClient.GetSyncFolderID()
 	if err != nil {
 		logger.Error("Failed to get sync folder: %v", err)
-		return err
+		return filesMoved, err
 	}
 
 	files, err := r.getAllFilesRecursive(mainClient, syncFolderID, "/")
 	if err != nil {
 		logger.Error("Failed to list files recursively: %v", err)
-		return err
+		return filesMoved, err
 	}
 
 	// Filter files owned by main user
@@ -705,7 +707,7 @@ func (r *Runner) FreeMain() error {
 
 	if len(candidates) == 0 {
 		logger.Info("No files found in main account to move")
-		return nil
+		return filesMoved, nil
 	}
 
 	// Sort files by size (descending) to move big chunks first
@@ -777,6 +779,7 @@ func (r *Runner) FreeMain() error {
 						logger.Error("Fallback transfer failed: %v", fallbackErr)
 						continue
 					}
+					filesMoved = true
 					err = nil // Cleared
 				} else {
 					logger.Error("Failed to transfer ownership: %v", err)
@@ -789,17 +792,21 @@ func (r *Runner) FreeMain() error {
 				if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainUser.Email, file.ID, target.User.Email); dbErr != nil {
 					logger.Warning("Failed to update local DB for %s: %v", file.Name, dbErr)
 				}
+				filesMoved = true
 			}
 		} else {
 			logger.DryRunTagged([]string{"Google", mainUser.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+			filesMoved = true // simulate move in dry run
 		}
 
 		// Update local state
-		target.Free -= file.Size
-		target.Quota.Used += file.Size
+		if filesMoved {
+			target.Free -= file.Size
+			target.Quota.Used += file.Size
+		}
 	}
 
-	return nil
+	return filesMoved, nil
 }
 
 // fallbackCopyDelete performs a download+upload+delete transfer when ownership transfer is not supported
@@ -1799,10 +1806,12 @@ func (r *Runner) GetProviderQuotasFromAPI() ([]*model.ProviderQuota, error) {
 }
 
 // GetProviderQuotasFromDB calculates aggregated quotas using DB for usage and API for limits
-func (r *Runner) GetProviderQuotasFromDB() ([]*model.ProviderQuota, error) {
-	// First, update metadata
-	if err := r.GetMetadata(); err != nil {
-		return nil, fmt.Errorf("failed to sync metadata: %w", err)
+func (r *Runner) GetProviderQuotasFromDB(updateMetadata bool) ([]*model.ProviderQuota, error) {
+	// First, update metadata if requested
+	if updateMetadata {
+		if err := r.GetMetadata(); err != nil {
+			return nil, fmt.Errorf("failed to sync metadata: %w", err)
+		}
 	}
 
 	// Get base quotas (Limits) from API

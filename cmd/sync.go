@@ -38,13 +38,14 @@ func runSync(cmd *cobra.Command, args []string) error {
 func SyncAction(runner *task.Runner, isSafeMode bool) error {
 	// 1. Quota
 	logger.Info("[Step 1/5] Checking Quota...")
-	if err := QuotaAction(runner); err != nil {
+	if err := QuotaAction(runner, true); err != nil {
 		return err
 	}
 
 	// 2. Free Main
 	logger.Info("[Step 2/5] Freeing Main Account...")
-	if err := runner.FreeMain(); err != nil {
+	_, err := runner.FreeMain()
+	if err != nil {
 		return err
 	}
 

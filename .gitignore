@@ -40,3 +40,6 @@ install_deps.sh
 
 # Environment variables file
 .env
+
+# 
+opencode.json

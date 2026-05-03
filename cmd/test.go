@@ -299,7 +299,7 @@ func runTestCase9(r *task.Runner) error {
 	logger.Info("\n=== Running Test Case 9: Quota Similarity Check ===")
 
 	logger.Info("Getting DB-based quotas...")
-	dbQuotas, err := r.GetProviderQuotasFromDB()
+	dbQuotas, err := r.GetProviderQuotasFromDB(true)
 	if err != nil {
 		return fmt.Errorf("failed to get DB quotas: %w", err)
 	}
@@ -761,7 +761,8 @@ func runCLISync(runner *task.Runner) error {
 
 func runCLIFreeMain(runner *task.Runner) error {
 	logger.Info("[CLI COMMAND] Running: FreeMain")
-	return runner.FreeMain()
+	_, err := runner.FreeMain()
+	return err
 }
 
 func verifyFileInDB(path string) error {
