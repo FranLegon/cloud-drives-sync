@@ -296,12 +296,31 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 		return err
 	}
 
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(folders))
+	// Bounded concurrency to avoid rate limits
+	sem := make(chan struct{}, 4)
+
 	for _, folder := range folders {
 		folder.Path = pathPrefix + "/" + folder.Name
 		folderChan <- folder
 
-		// Recurse
-		if err := r.scanFolder(client, user, folder.ID, folder.Path, fileChan, folderChan); err != nil {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(f *model.Folder) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := r.scanFolder(client, user, f.ID, f.Path, fileChan, folderChan); err != nil {
+				errCh <- err
+			}
+		}(folder)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
 			return err
 		}
 	}
@@ -511,15 +530,9 @@ func (r *Runner) BalanceStorage() error {
 		for _, source := range sources {
 			logger.InfoTagged([]string{string(provider), source.User.Email}, "Account is over quota, looking for files to move...")
 
-			syncFolderID, err := source.Client.GetSyncFolderID()
+			files, err := r.db.GetAllFiles()
 			if err != nil {
-				logger.Error("Failed to get sync folder: %v", err)
-				continue
-			}
-
-			files, err := r.getAllFilesRecursive(source.Client, syncFolderID, "/")
-			if err != nil {
-				logger.Error("Failed to list files recursively: %v", err)
+				logger.Error("Failed to get files from DB: %v", err)
 				continue
 			}
 
@@ -673,16 +686,10 @@ func (r *Runner) FreeMain() (bool, error) {
 		return filesMoved, nil
 	}
 
-	// List files in main account
-	syncFolderID, err := mainClient.GetSyncFolderID()
+	// List files in main account using DB
+	files, err := r.db.GetAllFiles()
 	if err != nil {
-		logger.Error("Failed to get sync folder: %v", err)
-		return filesMoved, err
-	}
-
-	files, err := r.getAllFilesRecursive(mainClient, syncFolderID, "/")
-	if err != nil {
-		logger.Error("Failed to list files recursively: %v", err)
+		logger.Error("Failed to get files from DB: %v", err)
 		return filesMoved, err
 	}
 
@@ -1751,6 +1758,7 @@ func (r *Runner) GetProviderQuotasFromAPI() ([]*model.ProviderQuota, error) {
 	logger.Info("Calculating provider quotas using API (Account Usage)...")
 
 	quotas := make(map[model.Provider]*model.ProviderQuota)
+	var mu sync.Mutex
 
 	// Initialize map
 	for _, p := range []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram} {
@@ -1762,35 +1770,53 @@ func (r *Runner) GetProviderQuotasFromAPI() ([]*model.ProviderQuota, error) {
 		}
 	}
 
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(r.config.Users))
+
 	for i := range r.config.Users {
-		user := &r.config.Users[i]
-		client, err := r.GetOrCreateClient(user)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create client for %s: %w", user.Email+user.Phone, err)
-		}
-
-		q, err := client.GetQuota()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get quota for %s: %w", user.Email+user.Phone, err)
-		}
-
-		pq := quotas[user.Provider]
-
-		// Aggregate Used
-		pq.Used += q.Used
-
-		// Aggregate Total and Free (skip for main account)
-		if !user.IsMain {
-			if pq.Total == -1 {
-				// Already unlimited, stay unlimited
-			} else if q.Total == -1 {
-				// Found an unlimited account, set provider to unlimited
-				pq.Total = -1
-				pq.Free = -1
-			} else {
-				pq.Total += q.Total
-				pq.Free += q.Free
+		wg.Add(1)
+		go func(user *model.User) {
+			defer wg.Done()
+			client, err := r.GetOrCreateClient(user)
+			if err != nil {
+				errCh <- fmt.Errorf("failed to create client for %s: %w", user.Email+user.Phone, err)
+				return
 			}
+
+			q, err := client.GetQuota()
+			if err != nil {
+				errCh <- fmt.Errorf("failed to get quota for %s: %w", user.Email+user.Phone, err)
+				return
+			}
+
+			mu.Lock()
+			pq := quotas[user.Provider]
+			// Aggregate Used
+			pq.Used += q.Used
+
+			// Aggregate Total and Free (skip for main account)
+			if !user.IsMain {
+				if pq.Total == -1 {
+					// Already unlimited, stay unlimited
+				} else if q.Total == -1 {
+					// Found an unlimited account, set provider to unlimited
+					pq.Total = -1
+					pq.Free = -1
+				} else {
+					pq.Total += q.Total
+					pq.Free += q.Free
+				}
+			}
+			mu.Unlock()
+		}(&r.config.Users[i])
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			return nil, err
 		}
 	}
 
