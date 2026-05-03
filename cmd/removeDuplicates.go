@@ -40,30 +40,36 @@ func runRemoveDuplicates(cmd *cobra.Command, args []string) error {
 	return RemoveDuplicatesAction(runner, true)
 }
 
-// RemoveDuplicatesAction runs interactive duplicate removal
-func RemoveDuplicatesAction(runner *task.Runner, updateMetadata bool) error {
+// prepareDuplicatesCheck handles metadata updates and duplicate ID retrieval
+func prepareDuplicatesCheck(runner *task.Runner, updateMetadata bool) ([]string, error) {
 	if updateMetadata {
-		// First, update metadata
 		logger.Info("Updating metadata before checking for duplicates...")
 		if err := runner.GetMetadata(); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	// Find duplicates
-	// Note: In normalized schema, duplicates are at file level, not provider level
 	ids, err := db.GetDuplicateCalculatedIDs()
 	if err != nil {
 		logger.Error("Failed to query duplicates: %v", err)
-		return err
+		return nil, err
 	}
 
 	if len(ids) == 0 {
 		logger.Info("No duplicates found")
-		return nil
+		return nil, nil
 	}
 
 	logger.Info("Found %d duplicate file groups", len(ids))
+	return ids, nil
+}
+
+// RemoveDuplicatesAction runs interactive duplicate removal
+func RemoveDuplicatesAction(runner *task.Runner, updateMetadata bool) error {
+	ids, err := prepareDuplicatesCheck(runner, updateMetadata)
+	if err != nil || len(ids) == 0 {
+		return err
+	}
 
 	for _, id := range ids {
 		files, err := db.GetFilesByCalculatedID(id)
@@ -156,29 +162,12 @@ func runRemoveDuplicatesUnsafe(cmd *cobra.Command, args []string) error {
 }
 
 func RemoveDuplicatesUnsafeAction(runner *task.Runner, updateMetadata bool) error {
-	if updateMetadata {
-		// First, update metadata
-		logger.Info("Updating metadata before checking for duplicates...")
-		if err := runner.GetMetadata(); err != nil {
-			return err
-		}
-	}
-
-	// Find and remove duplicates
-	ids, err := db.GetDuplicateCalculatedIDs()
-	if err != nil {
-		logger.Error("Failed to query duplicates: %v", err)
+	ids, err := prepareDuplicatesCheck(runner, updateMetadata)
+	if err != nil || len(ids) == 0 {
 		return err
 	}
 
-	if len(ids) == 0 {
-		logger.Info("No duplicates found")
-		return nil
-	}
-
 	totalDeleted := 0
-
-	logger.Info("Found %d duplicate file groups", len(ids))
 
 	for _, id := range ids {
 		files, err := db.GetFilesByCalculatedID(id)

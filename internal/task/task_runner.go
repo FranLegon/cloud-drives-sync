@@ -548,9 +548,7 @@ func (r *Runner) BalanceStorage() error {
 				}
 			}
 
-			sort.Slice(candidates, func(i, j int) bool {
-				return candidates[i].Size > candidates[j].Size
-			})
+			sortFilesBySizeDesc(candidates)
 
 			for _, file := range candidates {
 				// Stop if source is safe
@@ -718,9 +716,7 @@ func (r *Runner) FreeMain() (bool, error) {
 	}
 
 	// Sort files by size (descending) to move big chunks first
-	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].Size > candidates[j].Size
-	})
+	sortFilesBySizeDesc(candidates)
 
 	// Move files
 	for _, file := range candidates {
@@ -1272,6 +1268,25 @@ type copyJob struct {
 	path       string // for error reporting
 }
 
+// getMasterFile resolves the primary file from a file map using priority logic
+func getMasterFile(fileMap map[model.Provider]*model.File) *model.File {
+	if f, ok := fileMap[model.ProviderGoogle]; ok {
+		return f
+	} else if f, ok := fileMap[model.ProviderMicrosoft]; ok {
+		return f
+	} else if f, ok := fileMap[model.ProviderTelegram]; ok {
+		return f
+	}
+	return nil
+}
+
+// sortFilesBySizeDesc sorts a slice of files by size in descending order
+func sortFilesBySizeDesc(files []*model.File) {
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Size > files[j].Size
+	})
+}
+
 // syncMissingAndConflicts copies missing files across providers, resolves conflicts, and enforces soft-delete placement
 func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string) error {
 	providers := []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram}
@@ -1281,15 +1296,8 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 		if !strings.Contains(path, softDeletedPath) {
 			continue
 		}
-		var masterFile *model.File
-		if f, ok := fileMap[model.ProviderGoogle]; ok {
-			masterFile = f
-		} else if f, ok := fileMap[model.ProviderMicrosoft]; ok {
-			masterFile = f
-		} else if f, ok := fileMap[model.ProviderTelegram]; ok {
-			masterFile = f
-		}
-		if masterFile != nil {
+		
+		if masterFile := getMasterFile(fileMap); masterFile != nil {
 			r.enforceSoftDeletedPlacement(masterFile, softDeletedPath)
 		}
 	}
@@ -1302,15 +1310,7 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 			continue
 		}
 
-		var masterFile *model.File
-		if f, ok := fileMap[model.ProviderGoogle]; ok {
-			masterFile = f
-		} else if f, ok := fileMap[model.ProviderMicrosoft]; ok {
-			masterFile = f
-		} else if f, ok := fileMap[model.ProviderTelegram]; ok {
-			masterFile = f
-		}
-
+		masterFile := getMasterFile(fileMap)
 		if masterFile == nil {
 			continue
 		}
