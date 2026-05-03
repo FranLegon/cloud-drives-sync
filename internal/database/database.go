@@ -142,9 +142,13 @@ func (db *DB) Initialize() error {
 	CREATE INDEX IF NOT EXISTS idx_replicas_calculated_id ON replicas(calculated_id);
 	CREATE INDEX IF NOT EXISTS idx_replicas_provider ON replicas(provider);
 	CREATE INDEX IF NOT EXISTS idx_replicas_account_id ON replicas(account_id);
-	CREATE INDEX IF NOT EXISTS idx_replicas_native_id ON replicas(native_id);
+	CREATE INDEX IF NOT EXISTS idx_replicas_native_id_old ON replicas(native_id);
 	CREATE INDEX IF NOT EXISTS idx_replicas_status ON replicas(status);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_replicas_unique ON replicas(provider, account_id, native_id);
+
+	CREATE INDEX IF NOT EXISTS idx_replicas_native_id ON replicas(provider, native_id);
+	CREATE INDEX IF NOT EXISTS idx_replicas_provider_status ON replicas(provider, status);
+	CREATE INDEX IF NOT EXISTS idx_replicas_last_seen ON replicas(last_seen_at);
 
 	CREATE TABLE IF NOT EXISTS replica_fragments (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -157,6 +161,7 @@ func (db *DB) Initialize() error {
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_replica_fragments_replica_id ON replica_fragments(replica_id);
+	CREATE INDEX IF NOT EXISTS idx_replica_fragments_native_id ON replica_fragments(native_fragment_id);
 
 	CREATE TABLE IF NOT EXISTS folders (
 		id TEXT PRIMARY KEY,
@@ -494,6 +499,28 @@ func (db *DB) GetAllFolders() ([]*model.Folder, error) {
 		folders = append(folders, &f)
 	}
 	return folders, nil
+}
+
+// GetFolderByPathAndAccount retrieves a folder by its path, provider, and account identifier
+func (db *DB) GetFolderByPathAndAccount(path string, provider model.Provider, accountID string) (*model.Folder, error) {
+	query := `
+	SELECT id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email
+	FROM folders
+	WHERE path = ? AND provider = ? AND (user_email = ? OR user_phone = ?)
+	`
+	row := db.conn.QueryRow(query, path, string(provider), accountID, accountID)
+
+	var f model.Folder
+	var prov string
+	err := row.Scan(&f.ID, &f.Name, &f.Path, &prov, &f.UserEmail, &f.UserPhone, &f.ParentFolderID, &f.OwnerEmail)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil // not found
+		}
+		return nil, err
+	}
+	f.Provider = model.Provider(prov)
+	return &f, nil
 }
 
 // GetFilesByCalculatedID returns all files with a specific calculated_id

@@ -88,13 +88,25 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		return currentID, nil
 	}
 
+	accountID := client.GetUserIdentifier()
+	currentPath := ""
 	parts := strings.Split(path, "/")
+
 	for _, part := range parts {
 		if part == "" {
 			continue
 		}
 
-		// Check if folder exists
+		currentPath += "/" + part
+		
+		// First check local DB for the folder
+		dbFolder, err := r.db.GetFolderByPathAndAccount(currentPath, provider, accountID)
+		if err == nil && dbFolder != nil && dbFolder.ID != "" {
+			currentID = dbFolder.ID
+			continue
+		}
+
+		// Fallback to API if not in DB (or if it was just created by another thread/process and not synced yet)
 		folders, err := client.ListFolders(currentID)
 		if err != nil {
 			return "", err
@@ -109,7 +121,18 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		}
 
 		if foundID != "" {
+			parentID := currentID
 			currentID = foundID
+			// Opportunistically insert to DB for subsequent lookups
+			r.db.InsertFolder(&model.Folder{
+				ID:             foundID,
+				Name:           part,
+				Path:           currentPath,
+				Provider:       provider,
+				UserEmail:      client.GetUserEmail(),
+				UserPhone:      accountID, // fallback
+				ParentFolderID: parentID,
+			})
 		} else {
 			// Create folder
 			logger.Info("Creating folder '%s'...", part)
@@ -118,6 +141,15 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 				return "", err
 			}
 			currentID = folder.ID
+			
+			// Insert newly created folder into DB
+			folder.Path = currentPath
+			folder.Provider = provider
+			folder.UserEmail = client.GetUserEmail()
+			if provider == model.ProviderTelegram {
+				folder.UserPhone = accountID
+			}
+			r.db.InsertFolder(folder)
 		}
 	}
 
