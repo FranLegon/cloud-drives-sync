@@ -115,6 +115,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		return err
 	}
 
+	logger.Info("[TEST] Re-init runner with DB after setup")
 	// Re-init runner with DB after setup
 	if db == nil {
 		var err error
@@ -126,12 +127,13 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	runner = task.NewRunner(cfg, db, false)
 	runner.SetStopOnError(testStopOnError)
 
+	logger.Info("[TEST] Ensure sync folders exist")
 	// Ensure folders exist
 	if err := recreateSyncFolders(runner, cfg); err != nil {
 		return fmt.Errorf("failed to recreate sync folders: %w", err)
 	}
 
-	logger.Info("Running GetMetadata...")
+	logger.Info("[TEST] Running initial GetMetadata...")
 	if err := runner.GetMetadata(); err != nil {
 		return fmt.Errorf("GetMetadata failed: %w", err)
 	}

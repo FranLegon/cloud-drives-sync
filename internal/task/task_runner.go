@@ -136,6 +136,7 @@ func (r *Runner) GetMetadata() error {
 	}()
 
 	var wg sync.WaitGroup
+	apiSem := make(chan struct{}, 8) // Limit concurrent API calls globally
 
 	for i := range r.config.Users {
 		wg.Add(1)
@@ -161,7 +162,7 @@ func (r *Runner) GetMetadata() error {
 			}
 
 			// Scan files
-			if err := r.scanFolder(client, user, syncFolderID, "", fileChan, folderChan); err != nil {
+			if err := r.scanFolder(client, user, syncFolderID, "", fileChan, folderChan, apiSem); err != nil {
 				logger.ErrorTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to scan folder: %v", err)
 			}
 		}(&r.config.Users[i])
@@ -270,9 +271,11 @@ func (r *Runner) dbWriter(fileChan <-chan *model.File, folderChan <-chan *model.
 	flushFolders()
 }
 
-func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, pathPrefix string, fileChan chan<- *model.File, folderChan chan<- *model.Folder) error {
+func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, pathPrefix string, fileChan chan<- *model.File, folderChan chan<- *model.Folder, apiSem chan struct{}) error {
 	// List and store files
+	apiSem <- struct{}{}
 	files, err := client.ListFiles(folderID)
+	<-apiSem
 	if err != nil {
 		return err
 	}
@@ -291,26 +294,24 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 	logger.InfoTagged([]string{string(user.Provider), user.Email + user.Phone}, "Found %d files in folder %s", len(files), folderID)
 
 	// Recursively scan subfolders
+	apiSem <- struct{}{}
 	folders, err := client.ListFolders(folderID)
+	<-apiSem
 	if err != nil {
 		return err
 	}
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(folders))
-	// Bounded concurrency to avoid rate limits
-	sem := make(chan struct{}, 4)
 
 	for _, folder := range folders {
 		folder.Path = pathPrefix + "/" + folder.Name
 		folderChan <- folder
 
 		wg.Add(1)
-		sem <- struct{}{}
 		go func(f *model.Folder) {
 			defer wg.Done()
-			defer func() { <-sem }()
-			if err := r.scanFolder(client, user, f.ID, f.Path, fileChan, folderChan); err != nil {
+			if err := r.scanFolder(client, user, f.ID, f.Path, fileChan, folderChan, apiSem); err != nil {
 				errCh <- err
 			}
 		}(folder)
