@@ -526,10 +526,12 @@ func (db *DB) GetFolderByPathAndAccount(path string, provider model.Provider, ac
 // GetFilesByCalculatedID returns all files with a specific calculated_id
 func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error) {
 	query := `
-	SELECT id, path, name, size, calculated_id, mod_time, status
-	FROM files
-	WHERE calculated_id = ?
-	ORDER BY mod_time ASC
+	SELECT f.id, f.path, f.name, f.size, f.calculated_id, f.mod_time, f.status,
+	       r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
+	FROM files f
+	LEFT JOIN replicas r ON r.file_id = f.id
+	WHERE f.calculated_id = ?
+	ORDER BY f.mod_time ASC, r.id ASC
 	`
 
 	rows, err := db.conn.Query(query, calculatedID)
@@ -538,29 +540,83 @@ func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error)
 	}
 	defer rows.Close()
 
+	fileMap := make(map[string]*model.File)
 	var files []*model.File
+	var allReplicas []*model.Replica
+
 	for rows.Next() {
-		file := &model.File{}
-		var modTime int64
+		var fileID, filePath, fileName, fileCalcID, fileStatus string
+		var fileSize, fileModTime int64
+
+		// Replica fields (nullable due to LEFT JOIN)
+		var rID sql.NullInt64
+		var rFileID, rCalcID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus, rOwner sql.NullString
+		var rSize, rModTime sql.NullInt64
+		var rFragmented sql.NullBool
+
 		err := rows.Scan(
-			&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status,
+			&fileID, &filePath, &fileName, &fileSize, &fileCalcID, &fileModTime, &fileStatus,
+			&rID, &rFileID, &rCalcID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner,
 		)
 		if err != nil {
 			return nil, err
 		}
-		file.ModTime = time.Unix(modTime, 0)
 
-		// Load Replicas
-		replicas, err := db.GetReplicas(file.ID)
-		if err != nil {
-			return nil, err
+		file, exists := fileMap[fileID]
+		if !exists {
+			file = &model.File{
+				ID:           fileID,
+				Path:         filePath,
+				Name:         fileName,
+				Size:         fileSize,
+				CalculatedID: fileCalcID,
+				ModTime:      time.Unix(fileModTime, 0),
+				Status:       fileStatus,
+			}
+			fileMap[fileID] = file
+			files = append(files, file)
 		}
-		file.Replicas = replicas
 
-		files = append(files, file)
+		if rID.Valid {
+			replica := &model.Replica{
+				ID:           rID.Int64,
+				FileID:       rFileID.String,
+				CalculatedID: rCalcID.String,
+				Path:         rPath.String,
+				Name:         rName.String,
+				Size:         rSize.Int64,
+				Provider:     model.Provider(rProvider.String),
+				AccountID:    rAccountID.String,
+				NativeID:     rNativeID.String,
+				NativeHash:   rNativeHash.String,
+				ModTime:      time.Unix(rModTime.Int64, 0),
+				Status:       rStatus.String,
+				Fragmented:   rFragmented.Bool,
+				Owner:        rOwner.String,
+			}
+			file.Replicas = append(file.Replicas, replica)
+			allReplicas = append(allReplicas, replica)
+		}
+	}
+	
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
-	return files, rows.Err()
+	// Load fragments for fragmented replicas in batch
+	fragmented := make([]*model.Replica, 0)
+	for _, r := range allReplicas {
+		if r.Fragmented {
+			fragmented = append(fragmented, r)
+		}
+	}
+	if len(fragmented) > 0 {
+		if err := db.batchLoadFragments(fragmented); err != nil {
+			return nil, err
+		}
+	}
+
+	return files, nil
 }
 
 // GetAllFiles returns all files with replicas loaded in a single batch query
@@ -718,6 +774,7 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 
 	fileMap := make(map[string]*model.File)
 	var files []*model.File
+	var allReplicas []*model.Replica
 
 	for rows.Next() {
 		var fileID, filePath, fileName, fileCalcID, fileStatus string
@@ -770,10 +827,28 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 				Owner:        rOwner.String,
 			}
 			file.Replicas = append(file.Replicas, replica)
+			allReplicas = append(allReplicas, replica)
+		}
+	}
+	
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Load fragments for fragmented replicas in batch
+	fragmented := make([]*model.Replica, 0)
+	for _, r := range allReplicas {
+		if r.Fragmented {
+			fragmented = append(fragmented, r)
+		}
+	}
+	if len(fragmented) > 0 {
+		if err := db.batchLoadFragments(fragmented); err != nil {
+			return nil, err
 		}
 	}
 
-	return files, rows.Err()
+	return files, nil
 }
 
 // GetAllFilesAcrossProviders returns all files (alias for GetAllFiles for backwards compatibility)

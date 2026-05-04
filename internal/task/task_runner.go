@@ -526,15 +526,16 @@ func (r *Runner) BalanceStorage() error {
 			return freeI > freeJ
 		})
 
+		// Pre-fetch files once for all sources
+		files, err := r.db.GetAllFiles()
+		if err != nil {
+			logger.Error("Failed to get files from DB for balancing: %v", err)
+			continue
+		}
+
 		// Process sources
 		for _, source := range sources {
 			logger.InfoTagged([]string{string(provider), source.User.Email}, "Account is over quota, looking for files to move...")
-
-			files, err := r.db.GetAllFiles()
-			if err != nil {
-				logger.Error("Failed to get files from DB: %v", err)
-				continue
-			}
 
 			// Filter files owned by user and sort by size (descending)
 			var candidates []*model.File
