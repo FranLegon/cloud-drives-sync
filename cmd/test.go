@@ -536,7 +536,7 @@ func runGit(args ...string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("git %s failed: %w\nstderr: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
-	return strings.TrimSpace(stdout.String()), nil
+	return strings.TrimRight(stdout.String(), "\r\n"), nil
 }
 
 func runSetup(r *task.Runner) error {
