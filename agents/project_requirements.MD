@@ -381,7 +381,7 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
         *   `--force`: Skips confirmation prompt.
         *   `--stop-on-error`, `-s`: Stop test execution immediately if an error occurs.
         *   `--test-case`, `-t`: Run specific test case and its dependencies (0 = all).
-        *   `--with-commit`, `-c`: Commit `.go` files to a `test` branch and merge to `main` on success. Pre-checks that remote origin is `https://github.com/FranLegon/cloud-drives-sync.git` and HEAD is on `main`. If non-`.go` files are modified, they are stashed and restored after tests. If no `.go` files changed, uses current HEAD hash. At end of log, prints `Git commit tested: <hash>`. If all tests pass, merges `test` into `main`; otherwise returns to `main` without merging.
+        *   `--with-commit`, `-c`: Commit `.go` files to a `test` branch and merge to `main` on success. Pre-checks that remote origin is `https://github.com/FranLegon/cloud-drives-sync.git` and HEAD is on `main`. If non-`.go` files are modified, they are stashed and restored after tests. If no `.go` files changed, uses current HEAD hash. At end of log, prints `Git commit tested: <hash>`. If all tests pass, merges `test` into `main`; otherwise returns to `main` with `.go` changes restored as uncommitted modifications in the working tree (via squash-merge + reset).
         *   Inherits global `--password`, `-p` and standard Cobra help handling from the root command.
     *   **Process:**
         1.  **Cleanup (Unsafe Mode):** If `--safe` is not provided:

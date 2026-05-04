@@ -67,10 +67,7 @@ while ($iteration -le $maxIterations) {
     $testErrorLines = Get-Content test.log | Where-Object { $_ -match "ERROR|FATAL|PANIC"}
     if ($testExitCode -ne 0) { 
         Write-Host "Tests failed. Output:" -ForegroundColor Red
-        # --with-commit reverts .go changes on failure (they're on test branch). Restore them so AI can fix.
-        $diff = git diff main test -- "*.go" 2>&1
-        if ($diff) { $diff | git apply 2>$null }
-        $prompt += "The tests failed with the following output: $testOutput. Your .go changes have been restored in the working tree. Analyze the error and fix them before proceeding."
+        $prompt += "The tests failed with the following output: $testOutput. Your .go changes are still in the working tree (uncommitted). Analyze the error and fix them before proceeding."
         continue
     } elseif ($testErrorLines) {
         Write-Host "Tests passed but errors were found in logs. Lines:" -ForegroundColor Yellow

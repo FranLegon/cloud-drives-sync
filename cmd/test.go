@@ -114,9 +114,15 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 					logger.Info("[GIT] Successfully merged test into main")
 				}
 			} else {
-				logger.Warning("[GIT] Tests failed, skipping merge. Returning to main...")
+				logger.Warning("[GIT] Tests failed, skipping merge. Restoring .go changes to working tree...")
 				if _, err := runGit("checkout", "main"); err != nil {
 					logger.Error("[GIT] Failed to checkout main: %v", err)
+				} else if _, err := runGit("merge", "--squash", "test"); err != nil {
+					logger.Error("[GIT] Failed to squash-merge test changes: %v", err)
+				} else if _, err := runGit("reset"); err != nil {
+					logger.Error("[GIT] Failed to unstage changes: %v", err)
+				} else {
+					logger.Info("[GIT] .go changes restored as uncommitted in working tree")
 				}
 			}
 		}
