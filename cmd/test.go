@@ -1592,6 +1592,12 @@ func runTestCase11(runner *task.Runner, mainUser *model.User, backups []*model.U
 			continue
 		}
 
+		// Only attempt delete if candidate is the owner, to avoid 403 errors on shared files
+		if candidate.Email != f10.Replicas[0].Owner && f10.Replicas[0].Owner != "" {
+			logger.Info("Skipping delete for candidate %s as they are not the owner (Owner is %s)", candidate.Email, f10.Replicas[0].Owner)
+			continue
+		}
+
 		logger.Info("[SIMULATE USER ACTION] Deleting test_10.txt from Google (%s) directly...", candidate.Email)
 		if err := candidateClient.DeleteFile(googleNativeID); err != nil {
 			lastGoogleDeleteErr = err

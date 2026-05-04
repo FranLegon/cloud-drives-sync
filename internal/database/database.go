@@ -1615,6 +1615,13 @@ func (db *DB) UpdateLogicalFilesFromReplicas() error {
 	FROM RankedReplicas rr
 	WHERE files.id = rr.file_id
 	AND rr.rn = 1
+	AND (
+		files.size IS NOT rr.size OR
+		files.mod_time IS NOT rr.mod_time OR
+		files.calculated_id IS NOT rr.calculated_id OR
+		files.name IS NOT rr.name OR
+		files.path IS NOT rr.path
+	)
 	`
 	_, err := db.conn.Exec(query)
 	return err
