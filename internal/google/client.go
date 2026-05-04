@@ -2,6 +2,8 @@ package google
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -10,7 +12,6 @@ import (
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
 	"github.com/FranLegon/cloud-drives-sync/internal/auth"
-	"github.com/FranLegon/cloud-drives-sync/internal/crypto"
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
 	"golang.org/x/oauth2"
@@ -765,17 +766,16 @@ func (c *Client) GetNativeHash(fileID string) (string, string, error) {
 
 // CalculateSHA256 calculates SHA-256 hash of a reader
 func (c *Client) CalculateSHA256(reader io.Reader) (string, error) {
-	return crypto.HashBytes(mustReadAll(reader)), nil
+	h := sha256.New()
+	if _, err := io.Copy(h, reader); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(h.Sum(nil)), nil
 }
 
 func parseTime(timeStr string) time.Time {
 	t, _ := time.Parse(time.RFC3339, timeStr)
 	return t
-}
-
-func mustReadAll(r io.Reader) []byte {
-	data, _ := io.ReadAll(r)
-	return data
 }
 
 // GetDriveID returns the Drive ID (not used for Google)
