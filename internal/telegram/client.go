@@ -2,6 +2,8 @@ package telegram
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -805,11 +807,17 @@ func (c *Client) uploadPart(folderID, name string, reader io.Reader, replica *mo
 		},
 	}
 
+	// Generate a secure random ID for Telegram
+	var randomID int64
+	if err := binary.Read(rand.Reader, binary.LittleEndian, &randomID); err != nil {
+		randomID = time.Now().UnixNano() // Fallback
+	}
+
 	updates, err := c.client.API().MessagesSendMedia(c.ctx, &tg.MessagesSendMediaRequest{
 		Peer:     inputChannel,
 		Media:    inputMedia,
 		Message:  string(caption),
-		RandomID: time.Now().UnixNano(),
+		RandomID: randomID,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to send message: %w", err)
