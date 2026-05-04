@@ -62,7 +62,7 @@ while ($iteration -le $maxIterations) {
     }
     .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS | Tee-Object -Variable testOutput
     $testExitCode = $LASTEXITCODE
-    $testErrorLines = Get-Content test.log | Where-Object { "`nERROR" -in $_ }
+    $testErrorLines = Get-Content test.log | Where-Object { $_ -match "ERROR|FATAL|PANIC"}
     if ($testExitCode -ne 0) { 
         Write-Host "Tests failed. Output:" -ForegroundColor Red
         $prompt += "The tests failed with the following output: $testOutput. Analyze the error and fix it before proceeding."
@@ -70,10 +70,16 @@ while ($iteration -le $maxIterations) {
     } elseif ($testErrorLines) {
         Write-Host "Tests passed but errors were found in logs. Lines:" -ForegroundColor Yellow
         $testErrorLines | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
-        $prompt += "The tests passed but the following errors were found in the logs: $($testErrorLines -join '; '). Analyze these errors and fix them before proceeding."
+        $prompt += "The tests passed but the following errors were found in the logs:`n$($testErrorLines -join '; ').`nAnalyze these errors and fix them before proceeding."
         continue
     } else {
         Write-Host "Build and tests succeeded without errors." -ForegroundColor Green
+        git status --porcelain | Tee-Object -Variable gitStatus
+        if (-not $gitStatus) {
+            Write-Host "No changes detected by git." -ForegroundColor Green
+            $prompt = $mainPrompt
+            continue
+        }
         $commitPrompt = "The build and tests succeeded without errors. Commit the changes with message 'INFINITE OPENCODE:\nSUMMARY: <1-3 lines>\nEVIDENCE: <what improved and why>'"
         opencode run -c $commitPrompt
         $prompt = $mainPrompt
