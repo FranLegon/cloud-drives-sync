@@ -741,67 +741,81 @@ func (r *Runner) FreeMain() (bool, error) {
 		}
 
 		// Move file
-		if !r.safeMode {
-			logger.InfoTagged([]string{"Google", mainUser.Email}, "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
-			err := mainClient.TransferOwnership(file.ID, target.User.Email)
+			// Find the main replica for this file to get the NativeID
+			var mainReplica *model.Replica
+			for _, replica := range file.Replicas {
+				if replica.AccountID == mainUser.Email && replica.Owner == mainUser.Email {
+					mainReplica = replica
+					break
+				}
+			}
 
-			// Handle pending transfer flow
-			if err == api.ErrOwnershipTransferPending {
-				logger.InfoTagged([]string{"Google", mainUser.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
-				if acceptErr := target.Client.AcceptOwnership(file.ID); acceptErr != nil {
-					logger.Error("Failed to accept ownership: %v", acceptErr)
-					err = fmt.Errorf("acceptance failed: %w", acceptErr)
-				} else {
-					err = nil // Clear error as acceptance succeeded
+			if mainReplica == nil {
+				logger.Warning("Could not find main replica for file %s", file.Name)
+				continue
+			}
 
-					// Move file to target's sync folder (it's currently in root after pending owner flow)
-					dir := filepath.Dir(file.Path)
-					dir = strings.ReplaceAll(dir, "\\", "/")
-					if dir == "." || dir == "" {
-						dir = "/"
-					}
-					targetFolderID, folderErr := r.ensureFolderStructure(target.Client, dir, target.User.Provider)
-					if folderErr != nil {
-						logger.Warning("Failed to resolve target sync folder for %s: %v", file.Name, folderErr)
+			if !r.safeMode {
+				logger.InfoTagged([]string{"Google", mainUser.Email}, "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+				err := mainClient.TransferOwnership(mainReplica.NativeID, target.User.Email)
+
+				// Handle pending transfer flow
+				if err == api.ErrOwnershipTransferPending {
+					logger.InfoTagged([]string{"Google", mainUser.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
+					if acceptErr := target.Client.AcceptOwnership(mainReplica.NativeID); acceptErr != nil {
+						logger.Error("Failed to accept ownership: %v", acceptErr)
+						err = fmt.Errorf("acceptance failed: %w", acceptErr)
 					} else {
-						if mvErr := target.Client.MoveFile(file.ID, targetFolderID); mvErr != nil {
-							logger.Warning("Failed to move transferred file %s to sync folder: %v", file.Name, mvErr)
+						err = nil // Clear error as acceptance succeeded
+
+						// Move file to target's sync folder (it's currently in root after pending owner flow)
+						dir := filepath.Dir(file.Path)
+						dir = strings.ReplaceAll(dir, "\\", "/")
+						if dir == "." || dir == "" {
+							dir = "/"
+						}
+						targetFolderID, folderErr := r.ensureFolderStructure(target.Client, dir, target.User.Provider)
+						if folderErr != nil {
+							logger.Warning("Failed to resolve target sync folder for %s: %v", file.Name, folderErr)
 						} else {
-							logger.InfoTagged([]string{"Google", target.User.Email}, "Moved %s to sync folder", file.Name)
+							if mvErr := target.Client.MoveFile(mainReplica.NativeID, targetFolderID); mvErr != nil {
+								logger.Warning("Failed to move transferred file %s to sync folder: %v", file.Name, mvErr)
+							} else {
+								logger.InfoTagged([]string{"Google", target.User.Email}, "Moved %s to sync folder", file.Name)
+							}
 						}
 					}
 				}
-			}
 
-			fallbackUsed := false
+				fallbackUsed := false
 
-			if err != nil {
-				// Check for consent error Consumer to Consumer transfer restriction
-				if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") || strings.Contains(err.Error(), "transferOwnership parameter must be enabled") {
-					fallbackUsed = true
-					if fallbackErr := r.fallbackCopyDelete(mainClient, target, file, mainUser.Email); fallbackErr != nil {
-						logger.Error("Fallback transfer failed: %v", fallbackErr)
+				if err != nil {
+					// Check for consent error Consumer to Consumer transfer restriction
+					if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") || strings.Contains(err.Error(), "transferOwnership parameter must be enabled") {
+						fallbackUsed = true
+						if fallbackErr := r.fallbackCopyDelete(mainClient, target, file, mainReplica.NativeID, mainUser.Email); fallbackErr != nil {
+							logger.Error("Fallback transfer failed: %v", fallbackErr)
+							continue
+						}
+						filesMoved = true
+						err = nil // Cleared
+					} else {
+						logger.Error("Failed to transfer ownership: %v", err)
 						continue
 					}
-					filesMoved = true
-					err = nil // Cleared
-				} else {
-					logger.Error("Failed to transfer ownership: %v", err)
-					continue
 				}
-			}
 
-			if err == nil && !fallbackUsed {
-				// Update database to reflect ownership change for standard transfer
-				if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainUser.Email, file.ID, target.User.Email); dbErr != nil {
-					logger.Warning("Failed to update local DB for %s: %v", file.Name, dbErr)
+				if err == nil && !fallbackUsed {
+					// Update database to reflect ownership change for standard transfer
+					if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainUser.Email, mainReplica.NativeID, target.User.Email); dbErr != nil {
+						logger.Warning("Failed to update local DB for %s: %v", file.Name, dbErr)
+					}
+					filesMoved = true
 				}
-				filesMoved = true
+			} else {
+				logger.DryRunTagged([]string{"Google", mainUser.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+				filesMoved = true // simulate move in dry run
 			}
-		} else {
-			logger.DryRunTagged([]string{"Google", mainUser.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
-			filesMoved = true // simulate move in dry run
-		}
 
 		// Update local state
 		if filesMoved {
@@ -814,7 +828,7 @@ func (r *Runner) FreeMain() (bool, error) {
 }
 
 // fallbackCopyDelete performs a download+upload+delete transfer when ownership transfer is not supported
-func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupStatus, file *model.File, mainEmail string) error {
+func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupStatus, file *model.File, nativeID string, mainEmail string) error {
 	logger.InfoTagged([]string{"Google", mainEmail}, "Transfer via ownership not supported (consent required). Falling back to Copy+Delete...")
 
 	// 1. Download
@@ -824,7 +838,7 @@ func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupSt
 	go func() {
 		defer pw.Close()
 		logger.Info("Downloading %s for fallback transfer...", file.Name)
-		if err := mainClient.DownloadFile(file.ID, pw); err != nil {
+		if err := mainClient.DownloadFile(nativeID, pw); err != nil {
 			downloadErrChan <- err
 		} else {
 			downloadErrChan <- nil
@@ -863,7 +877,7 @@ func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupSt
 
 	// 3. Delete original file
 	deleteSucceeded := true
-	if delErr := mainClient.DeleteFile(file.ID); delErr != nil {
+	if delErr := mainClient.DeleteFile(nativeID); delErr != nil {
 		deleteSucceeded = false
 		logger.Error("Fallback: Failed to delete original file: %v", delErr)
 	}

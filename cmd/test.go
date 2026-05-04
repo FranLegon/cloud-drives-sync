@@ -842,10 +842,13 @@ func runTestCase1(runner *task.Runner, mainUser *model.User) error {
 
 func runTestCase2(runner *task.Runner, backups []*model.User) error {
 	logger.Info("\n--- Test Case 2: Multi-Provider Backups ---")
+	logger.Info("[TEST] Initializing Test Case 2 with %d backup accounts", len(backups))
 
 	googleBackups := filterUsers(backups, model.ProviderGoogle)
 	microsoftBackups := filterUsers(backups, model.ProviderMicrosoft)
 	telegramBackups := filterUsers(backups, model.ProviderTelegram)
+
+	logger.Info("[TEST] Breakdown: %d Google, %d Microsoft, %d Telegram backups", len(googleBackups), len(microsoftBackups), len(telegramBackups))
 
 	uploadLocalToRandom := func(users []*model.User, filename string) error {
 		if len(users) == 0 {
@@ -855,6 +858,8 @@ func runTestCase2(runner *task.Runner, backups []*model.User) error {
 		u := users[int(mustRand(int64(len(users))))]
 		data := []byte(testFileContents[filename])
 
+		logger.Info("[TEST] Selected %s (%s) for uploading %s", u.Email, u.Provider, filename)
+
 		client, err := runner.GetOrCreateClient(u)
 		if err != nil {
 			return err
@@ -863,6 +868,8 @@ func runTestCase2(runner *task.Runner, backups []*model.User) error {
 		if err != nil {
 			return err
 		}
+
+		logger.Info("[TEST] SyncFolderID for %s is %s", u.Email, syncID)
 
 		_, err = simulateUserUploadFile(client, syncID, filename, data, u.Email)
 		return err
