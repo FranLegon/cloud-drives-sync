@@ -529,13 +529,6 @@ func (r *Runner) BalanceStorage() error {
 			continue
 		}
 
-		// Sort targets by most free space (descending)
-		sort.Slice(targets, func(i, j int) bool {
-			freeI := targets[i].Quota.Total - targets[i].Quota.Used
-			freeJ := targets[j].Quota.Total - targets[j].Quota.Used
-			return freeI > freeJ
-		})
-
 		// Pre-fetch files once for all sources
 		files, err := r.db.GetAllFiles()
 		if err != nil {
@@ -567,6 +560,13 @@ func (r *Runner) BalanceStorage() error {
 					logger.InfoTagged([]string{string(provider), source.User.Email}, "Account is now under safe threshold")
 					break
 				}
+
+				// Sort targets by most free space (descending) - re-sort each time as space changes
+				sort.Slice(targets, func(i, j int) bool {
+					freeI := targets[i].Quota.Total - targets[i].Quota.Used
+					freeJ := targets[j].Quota.Total - targets[j].Quota.Used
+					return freeI > freeJ
+				})
 
 				// Find a target with enough space
 				var target *AccountStatus
