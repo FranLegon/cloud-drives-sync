@@ -38,13 +38,12 @@ git stash && git checkout main~1 && go build -o cloud-drives-sync.exe . && Write
 # OpenCode infite loop:
 ```powershell
 $mainPrompt = @"
-Look for more possible optimizations. 
+Look for possible optimizations. 
 Find the single highest-impact, low-risk improvement.
 Make only focused changes that are clearly justified.
 Preserve behavior unless a bug fix is explicitly needed.
 The only change allowed for cmd\test.go is adding more logs, so focus on the other go files instead.
-If you make changes, run tests as described in TEST.md.
-Consider tests take more than 15 minutes to run, be patient and wait for them to finish before analyzing results (you can check timestamped log in logs dir).
+Do not run tests yourself. I will build and run tests after you finish.
 "@
 $gitClarification = "`nDo not commit or run any git state-changing (mutating) operations (you can still run status/diff/log/show if needed)."
 $prompt = $mainPrompt + $gitClarification
@@ -66,7 +65,7 @@ while ($iteration -le $maxIterations) {
     go build -o cloud-drives-sync.exe . | Tee-Object -Variable buildOutput
     if ($LASTEXITCODE -ne 0) { 
         Write-Host "Build failed. Output:" -ForegroundColor Red
-        $prompt += "The build failed with the following output: $buildOutput. Analyze the error and fix it before proceeding."
+        $prompt = "The build failed with the following output: $buildOutput. Analyze the error and fix it before proceeding." + $gitClarification
         continue
     }
     .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --with-commit | Tee-Object -Variable testOutput
@@ -74,18 +73,15 @@ while ($iteration -le $maxIterations) {
     $testErrorLines = Get-Content test.log | Where-Object { $_ -match "ERROR|FATAL|PANIC"}
     if ($testExitCode -ne 0) { 
         Write-Host "Tests failed. Output:" -ForegroundColor Red
-        $prompt += "The tests failed with the following output: $testOutput. Your .go changes are still in the working tree (uncommitted). Analyze the error and fix them before proceeding."
-        continue
+        $prompt = "The tests failed with the following output: $testOutput. Your .go changes are still in the working tree (uncommitted). Analyze the error and fix them before proceeding." + $gitClarification
     } elseif ($testErrorLines) {
         Write-Host "Tests passed but errors were found in logs. Lines:" -ForegroundColor Yellow
         $testErrorLines | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
-        $prompt += "The tests passed (changes already committed) but the following errors were found in the logs:`n$($testErrorLines -join '; ').`nAnalyze these errors and fix them before proceeding."
-        continue
+        $prompt = "The tests passed (changes already committed) but the following errors were found in the logs:`n$($testErrorLines -join '; ').`nAnalyze these errors and fix them before proceeding." + $gitClarification
     } else {
         Write-Host "Build and tests succeeded without errors." -ForegroundColor Green
-        $prompt = $mainPrompt
+        $prompt = $mainPrompt + $gitClarification
+        $iteration++
     }
-    $prompt = $prompt + $gitClarification
-    $iteration++
 }
 ```
