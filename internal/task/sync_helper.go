@@ -73,6 +73,18 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		return path, nil
 	}
 
+	// Clean path and split
+	path = strings.Trim(path, "/\\")
+	
+	// Quick fast-path lookup in DB without any locks
+	accountID := client.GetUserIdentifier()
+	if path != "" && path != "." {
+		dbFolder, err := r.db.GetFolderByPathAndAccount("/"+path, provider, accountID)
+		if err == nil && dbFolder != nil && dbFolder.ID != "" {
+			return dbFolder.ID, nil
+		}
+	}
+
 	r.folderMu.Lock()
 	defer r.folderMu.Unlock()
 
@@ -82,13 +94,10 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		return "", err
 	}
 
-	// Clean path and split
-	path = strings.Trim(path, "/\\")
 	if path == "" || path == "." {
 		return currentID, nil
 	}
 
-	accountID := client.GetUserIdentifier()
 	currentPath := ""
 	parts := strings.Split(path, "/")
 

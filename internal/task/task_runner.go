@@ -1157,6 +1157,10 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 		}
 	}
 
+	var wg sync.WaitGroup
+	// Use bounded concurrency to avoid flooding network
+	sem := make(chan struct{}, 4)
+
 	for calculatedID, intent := range intents {
 		fileSet := filesByCalculatedID[calculatedID]
 		for _, f := range fileSet {
@@ -1172,17 +1176,30 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 					if replicaInSoftDeleted {
 						continue
 					}
-					r.softDeleteReplica(replica, f.Name, softDeletedPath)
+					wg.Add(1)
+					sem <- struct{}{}
+					go func(rep *model.Replica, fname string) {
+						defer wg.Done()
+						defer func() { <-sem }()
+						r.softDeleteReplica(rep, fname, softDeletedPath)
+					}(replica, f.Name)
 
 				case "active":
 					if !replicaInSoftDeleted || intent.ActivePath == "" || replica.Provider == model.ProviderTelegram {
 						continue
 					}
-					r.moveReplicaToPath(replica, f.Name, intent.ActivePath)
+					wg.Add(1)
+					sem <- struct{}{}
+					go func(rep *model.Replica, fname, apath string) {
+						defer wg.Done()
+						defer func() { <-sem }()
+						r.moveReplicaToPath(rep, fname, apath)
+					}(replica, f.Name, intent.ActivePath)
 				}
 			}
 		}
 	}
+	wg.Wait()
 
 	return nil
 }
