@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/big"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -29,6 +30,7 @@ var testSafe bool
 var testForce bool
 var testStopOnError bool
 var testCase int
+var testWithCommit bool
 var test10Hash string
 
 var testCmd = &cobra.Command{
@@ -43,6 +45,7 @@ func init() {
 	testCmd.Flags().BoolVar(&testForce, "force", false, "Skip confirmation prompt")
 	testCmd.Flags().BoolVarP(&testStopOnError, "stop-on-error", "s", false, "Stop test execution immediately if an error occurs")
 	testCmd.Flags().IntVarP(&testCase, "test-case", "t", 0, "Run specific test case and its dependencies (0 = all)")
+	testCmd.Flags().BoolVarP(&testWithCommit, "with-commit", "c", false, "Commit .go files to test branch and merge on success")
 	rootCmd.AddCommand(testCmd)
 }
 
@@ -91,6 +94,39 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 
 	testRuntimes := map[int]time.Duration{}
 	totalStart := time.Now()
+	var testCommitHash string
+	var gitStashed bool
+	var gitBranchCreated bool
+
+	// Git cleanup: return to main, merge if passed, pop stash
+	defer func() {
+		if !testWithCommit {
+			return
+		}
+		if gitBranchCreated {
+			if retErr == nil {
+				logger.Info("[GIT] All tests passed, merging test branch into main...")
+				if _, err := runGit("checkout", "main"); err != nil {
+					logger.Error("[GIT] Failed to checkout main: %v", err)
+				} else if _, err := runGit("merge", "test"); err != nil {
+					logger.Error("[GIT] Failed to merge test into main: %v", err)
+				} else {
+					logger.Info("[GIT] Successfully merged test into main")
+				}
+			} else {
+				logger.Warning("[GIT] Tests failed, skipping merge. Returning to main...")
+				if _, err := runGit("checkout", "main"); err != nil {
+					logger.Error("[GIT] Failed to checkout main: %v", err)
+				}
+			}
+		}
+		if gitStashed {
+			logger.Info("[GIT] Restoring stashed non-.go files...")
+			if _, err := runGit("stash", "pop"); err != nil {
+				logger.Error("[GIT] Failed to pop stash: %v", err)
+			}
+		}
+	}()
 
 	// Print runtime summary before archiving the log
 	defer func() {
@@ -101,6 +137,9 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 			}
 		}
 		logger.Info("  Total Runtime:  %s", time.Since(totalStart).Round(time.Millisecond))
+		if testCommitHash != "" {
+			logger.Info("  Git commit tested: %s", testCommitHash)
+		}
 		logger.Info("=============================")
 	}()
 
@@ -117,6 +156,97 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}()
 	logger.Info("Starting Test Command...")
+
+	// --with-commit: git setup
+	if testWithCommit {
+		// Pre-check: verify remote origin and current branch
+		originURL, err := runGit("remote", "get-url", "origin")
+		if err != nil {
+			return fmt.Errorf("--with-commit: failed to get remote origin URL: %w", err)
+		}
+		if !strings.EqualFold(strings.TrimSpace(originURL), "https://github.com/FranLegon/cloud-drives-sync.git") {
+			return fmt.Errorf("--with-commit: remote origin URL is %q, expected https://github.com/FranLegon/cloud-drives-sync.git", originURL)
+		}
+
+		currentBranch, err := runGit("rev-parse", "--abbrev-ref", "HEAD")
+		if err != nil {
+			return fmt.Errorf("--with-commit: failed to get current branch: %w", err)
+		}
+		if currentBranch != "main" {
+			return fmt.Errorf("--with-commit: current branch is %q, expected main", currentBranch)
+		}
+
+		// Parse git status to find changed files
+		statusOutput, err := runGit("status", "--porcelain")
+		if err != nil {
+			return fmt.Errorf("--with-commit: failed to get git status: %w", err)
+		}
+
+		var goFiles []string
+		var nonGoFiles []string
+		if statusOutput != "" {
+			for _, line := range strings.Split(statusOutput, "\n") {
+				if len(line) < 4 {
+					continue
+				}
+				// Status format: XY <path> or XY <path> -> <path>
+				filePath := strings.TrimSpace(line[3:])
+				if idx := strings.Index(filePath, " -> "); idx != -1 {
+					filePath = filePath[idx+4:]
+				}
+				if strings.HasSuffix(filePath, ".go") {
+					goFiles = append(goFiles, filePath)
+				} else {
+					nonGoFiles = append(nonGoFiles, filePath)
+				}
+			}
+		}
+
+		if len(goFiles) == 0 {
+			// No .go changes: use current HEAD hash, skip branching
+			hash, err := runGit("rev-parse", "HEAD")
+			if err != nil {
+				return fmt.Errorf("--with-commit: failed to get HEAD hash: %w", err)
+			}
+			testCommitHash = hash
+			logger.Info("[GIT] No .go file changes detected. Using current HEAD: %s", testCommitHash)
+		} else {
+			// Stash non-.go files if any
+			if len(nonGoFiles) > 0 {
+				stashArgs := append([]string{"stash", "push", "--include-untracked", "--"}, nonGoFiles...)
+				if _, err := runGit(stashArgs...); err != nil {
+					return fmt.Errorf("--with-commit: failed to stash non-.go files: %w", err)
+				}
+				gitStashed = true
+				logger.Info("[GIT] Stashed %d non-.go file(s)", len(nonGoFiles))
+			}
+
+			// Create/reset test branch from main
+			if _, err := runGit("checkout", "-B", "test", "main"); err != nil {
+				return fmt.Errorf("--with-commit: failed to create test branch: %w", err)
+			}
+			gitBranchCreated = true
+
+			// Stage all .go files (handles new, modified, deleted)
+			addArgs := append([]string{"add", "--"}, goFiles...)
+			if _, err := runGit(addArgs...); err != nil {
+				return fmt.Errorf("--with-commit: failed to stage .go files: %w", err)
+			}
+
+			// Commit
+			commitMsg := fmt.Sprintf("Test Run: %s", time.Now().Format("02Jan2006 15:04:05"))
+			if _, err := runGit("commit", "-m", commitMsg); err != nil {
+				return fmt.Errorf("--with-commit: failed to commit: %w", err)
+			}
+
+			hash, err := runGit("rev-parse", "HEAD")
+			if err != nil {
+				return fmt.Errorf("--with-commit: failed to get test branch hash: %w", err)
+			}
+			testCommitHash = hash
+			logger.Info("[GIT] Committed .go changes to test branch: %s", testCommitHash)
+		}
+	}
 
 	// Use smaller fragment limit for tests (2MB instead of 2GB)
 	telegram.SetDefaultMaxPartSize(2 * 1024 * 1024)
@@ -389,6 +519,18 @@ func runTestCase9(r *task.Runner) error {
 		logger.Info("  Difference (Non-Sync Data): %s", formatBytes(diff))
 	}
 	return nil
+}
+
+func runGit(args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("git %s failed: %w\nstderr: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+	}
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 func runSetup(r *task.Runner) error {
