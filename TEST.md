@@ -50,6 +50,41 @@ $prompt = $mainPrompt + $gitClarification
 
 cd 'C:\Users\francisco.legon\GitHub\IMEMINE\cloud-drives-sync'
 
+# Enforce git restrictions via opencode.json permissions (deny mutating git in all shells)
+$opencodeConfig = Get-Content opencode.json | ConvertFrom-Json
+$gitRules = [ordered]@{
+    'git status*'       = 'allow'
+    'git diff*'         = 'allow'
+    'git log*'          = 'allow'
+    'git show*'         = 'allow'
+    '*git commit*'      = 'deny'
+    '*git push*'        = 'deny'
+    '*git reset*'       = 'deny'
+    '*git rebase*'      = 'deny'
+    '*git merge*'       = 'deny'
+    '*git checkout*'    = 'deny'
+    '*git switch*'      = 'deny'
+    '*git branch -d*'   = 'deny'
+    '*git branch -D*'   = 'deny'
+    '*git stash*'       = 'deny'
+    '*git cherry-pick*' = 'deny'
+    '*git revert*'      = 'deny'
+    '*git tag*'         = 'deny'
+    '*git am*'          = 'deny'
+}
+$permission = [ordered]@{
+    bash       = $gitRules
+    powershell = $gitRules
+    pwsh       = $gitRules
+    cmd        = [ordered]@{ '*git*' = 'deny' }
+}
+if (-not $opencodeConfig.permission) {
+    $opencodeConfig | Add-Member -MemberType NoteProperty -Name 'permission' -Value $permission
+} else {
+    $opencodeConfig.permission = $permission
+}
+$opencodeConfig | ConvertTo-Json -Depth 10 | Set-Content opencode.json
+
 $model = 'google-vertex/gemini-3.1-pro-preview'
 
 $maxIterations = 10
