@@ -858,7 +858,6 @@ func (c *Client) FindSharedItem(name string, originalID string) (string, string,
 	ctx := context.Background()
 
 	// List items in Shared with me
-	// Note: This only retrieves the first page. For production, apply pagination.
 	// Using Drives().ByDriveId().SharedWithMe() instead of Me().Drive().SharedWithMe()
 	// because Me().Drive() builder might not expose it directly in this SDK version.
 	result, err := c.graphClient.Drives().ByDriveId(c.driveID).SharedWithMe().Get(ctx, nil)
@@ -866,18 +865,27 @@ func (c *Client) FindSharedItem(name string, originalID string) (string, string,
 		return "", "", fmt.Errorf("failed to list shared items: %w", err)
 	}
 
-	for _, item := range result.GetValue() {
+	pageIterator, err := msgraphgocore.NewPageIterator[models.DriveItemable](result, c.graphClient.GetAdapter(), models.CreateDriveItemCollectionResponseFromDiscriminatorValue)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to create page iterator: %w", err)
+	}
+
+	var targetID, targetDriveID string
+	err = pageIterator.Iterate(ctx, func(item models.DriveItemable) bool {
 		remote := item.GetRemoteItem()
 		if remote == nil {
-			continue
+			return true // Continue iterating
 		}
 
 		// Check by ID
 		if originalID != "" && remote.GetId() != nil && *remote.GetId() == originalID {
 			if remote.GetParentReference() != nil && remote.GetParentReference().GetDriveId() != nil {
-				return *remote.GetId(), *remote.GetParentReference().GetDriveId(), nil
+				targetID = *remote.GetId()
+				targetDriveID = *remote.GetParentReference().GetDriveId()
+				return false // Found, stop iterating
 			}
-			return *remote.GetId(), "", nil
+			targetID = *remote.GetId()
+			return false // Found, stop iterating
 		}
 
 		// Check by Name (fallback)
@@ -891,16 +899,24 @@ func (c *Client) FindSharedItem(name string, originalID string) (string, string,
 		}
 
 		if name != "" && (itemName == name || remoteName == name) {
-			targetID := ""
 			if remote.GetId() != nil {
 				targetID = *remote.GetId()
 			}
-			targetDriveID := ""
 			if remote.GetParentReference() != nil && remote.GetParentReference().GetDriveId() != nil {
 				targetDriveID = *remote.GetParentReference().GetDriveId()
 			}
-			return targetID, targetDriveID, nil
+			return false // Found, stop iterating
 		}
+
+		return true // Continue iterating
+	})
+
+	if err != nil {
+		return "", "", fmt.Errorf("pagination failed: %w", err)
+	}
+
+	if targetID != "" {
+		return targetID, targetDriveID, nil
 	}
 
 	return "", "", nil

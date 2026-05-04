@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
@@ -720,40 +721,71 @@ func (db *DB) getAllReplicas() ([]*model.Replica, error) {
 	return replicas, rows.Err()
 }
 
-// batchLoadFragments loads fragments for all fragmented replicas in a single query
+// batchLoadFragments loads fragments for the specified fragmented replicas efficiently
 func (db *DB) batchLoadFragments(replicas []*model.Replica) error {
 	if len(replicas) == 0 {
 		return nil
 	}
 
-	query := `
-	SELECT id, replica_id, fragment_number, fragments_total, size, native_fragment_id
-	FROM replica_fragments
-	ORDER BY replica_id, fragment_number ASC
-	`
-	rows, err := db.conn.Query(query)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	// Build a map for fast lookup
+	// Extract unique replica IDs
 	replicaMap := make(map[int64]*model.Replica, len(replicas))
+	replicaIDs := make([]int64, 0, len(replicas))
 	for _, r := range replicas {
-		replicaMap[r.ID] = r
+		if _, exists := replicaMap[r.ID]; !exists {
+			replicaMap[r.ID] = r
+			replicaIDs = append(replicaIDs, r.ID)
+		}
 	}
 
-	for rows.Next() {
-		f := &model.ReplicaFragment{}
-		err := rows.Scan(&f.ID, &f.ReplicaID, &f.FragmentNumber, &f.FragmentsTotal, &f.Size, &f.NativeFragmentID)
+	// Process in batches to avoid SQLite limits on variables in IN clause (limit is 999)
+	batchSize := 900
+	for i := 0; i < len(replicaIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(replicaIDs) {
+			end = len(replicaIDs)
+		}
+
+		batch := replicaIDs[i:end]
+
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, len(batch))
+		for j, id := range batch {
+			placeholders[j] = "?"
+			args[j] = id
+		}
+
+		query := fmt.Sprintf(`
+		SELECT id, replica_id, fragment_number, fragments_total, size, native_fragment_id
+		FROM replica_fragments
+		WHERE replica_id IN (%s)
+		ORDER BY replica_id, fragment_number ASC
+		`, strings.Join(placeholders, ","))
+
+		rows, err := db.conn.Query(query, args...)
 		if err != nil {
 			return err
 		}
-		if r, ok := replicaMap[f.ReplicaID]; ok {
-			r.Fragments = append(r.Fragments, f)
+
+		for rows.Next() {
+			f := &model.ReplicaFragment{}
+			err := rows.Scan(&f.ID, &f.ReplicaID, &f.FragmentNumber, &f.FragmentsTotal, &f.Size, &f.NativeFragmentID)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			if r, ok := replicaMap[f.ReplicaID]; ok {
+				r.Fragments = append(r.Fragments, f)
+			}
 		}
+		
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
 	}
-	return rows.Err()
+
+	return nil
 }
 
 // GetFilesByStatus returns all files with a specific status
