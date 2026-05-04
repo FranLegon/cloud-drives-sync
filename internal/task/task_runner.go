@@ -718,18 +718,11 @@ func (r *Runner) FreeMain() (bool, error) {
 
 	// Filter files owned by main user
 	var candidates []*model.File
-	seenIDs := make(map[string]bool)
-
 	for _, f := range files {
-		if seenIDs[f.ID] {
-			continue
-		}
-
 		// Check if any replica is OWNED by the main user (not just present in their account)
 		for _, replica := range f.Replicas {
 			if replica.AccountID == mainUser.Email && replica.Owner == mainUser.Email {
 				candidates = append(candidates, f)
-				seenIDs[f.ID] = true
 				break
 			}
 		}
@@ -994,12 +987,6 @@ func (r *Runner) SyncProviders() error {
 		return fmt.Errorf("status convergence failed: %w", err)
 	}
 
-	// Refresh after status convergence so copy/conflict sync uses updated paths/statuses
-	files, err = r.db.GetAllFilesAcrossProviders()
-	if err != nil {
-		return fmt.Errorf("failed to refresh files after status convergence: %w", err)
-	}
-
 	// Phase 2: Copy missing files and resolve conflicts
 	filesByPath := buildFilesByPath(files)
 	if err := r.syncMissingAndConflicts(filesByPath, softDeletedPath); err != nil {
@@ -1082,15 +1069,10 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 	mainAccounts := r.buildMainAccountSet()
 
 	filesByCalculatedID := make(map[string][]*model.File, len(files))
-	seenFileByID := make(map[string]bool, len(files))
 	for _, f := range files {
 		if f.Status != "active" || f.CalculatedID == "" {
 			continue
 		}
-		if seenFileByID[f.ID] {
-			continue
-		}
-		seenFileByID[f.ID] = true
 		filesByCalculatedID[f.CalculatedID] = append(filesByCalculatedID[f.CalculatedID], f)
 	}
 
