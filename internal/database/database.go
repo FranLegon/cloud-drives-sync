@@ -635,11 +635,8 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 	}
 	defer rows.Close()
 
-	// Pre-allocate based on count for performance
-	var count int
-	db.conn.QueryRow("SELECT COUNT(*) FROM files").Scan(&count)
-	files := make([]*model.File, 0, count)
-	fileMap := make(map[string]*model.File, count)
+	files := make([]*model.File, 0)
+	fileMap := make(map[string]*model.File)
 	for rows.Next() {
 		file := &model.File{}
 		var modTime int64
@@ -703,9 +700,7 @@ func (db *DB) getAllReplicas() ([]*model.Replica, error) {
 	}
 	defer rows.Close()
 
-	var count int
-	db.conn.QueryRow("SELECT COUNT(*) FROM replicas WHERE file_id IS NOT NULL").Scan(&count)
-	replicas := make([]*model.Replica, 0, count)
+	replicas := make([]*model.Replica, 0)
 	for rows.Next() {
 		r := &model.Replica{}
 		var providerStr string
