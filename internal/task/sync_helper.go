@@ -15,19 +15,30 @@ import (
 
 // getDestinationClient returns the best client for a provider to upload a file
 func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.CloudClient, *model.User, error) {
-	// Find a backup account with space. Start with maxFree = -1.
+	// Telegram has no quota limit, use fast path
+	if provider == model.ProviderTelegram {
+		for i := range r.config.Users {
+			user := &r.config.Users[i]
+			if user.Provider == provider && !user.IsMain {
+				client, err := r.GetOrCreateClient(user)
+				if err == nil {
+					return client, user, nil
+				}
+			}
+		}
+		return nil, nil, fmt.Errorf("no telegram account found")
+	}
+
+	r.accountQuotasMu.Lock()
+	defer r.accountQuotasMu.Unlock()
+
 	var bestUser *model.User
 	var bestClient api.CloudClient
 	var maxFree int64 = -1
 
 	for i := range r.config.Users {
 		user := &r.config.Users[i]
-		if user.Provider != provider {
-			continue
-		}
-
-		// Never upload to Main account
-		if user.IsMain {
+		if user.Provider != provider || user.IsMain {
 			continue
 		}
 
@@ -36,17 +47,19 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 			continue
 		}
 
-		// Telegram has no quota limit
-		if provider == model.ProviderTelegram {
-			return client, user, nil
+		key := string(user.Provider) + ":" + user.Email + user.Phone
+		q, ok := r.accountQuotas[key]
+		if !ok {
+			quota, err := client.GetQuota()
+			if err != nil {
+				logger.Warning("Failed to get quota for %s: %v", user.Email, err)
+				continue
+			}
+			q = &accountQuota{Total: quota.Total, Used: quota.Used}
+			r.accountQuotas[key] = q
 		}
 
-		quota, err := client.GetQuota()
-		if err != nil {
-			continue
-		}
-
-		free := quota.Total - quota.Used
+		free := q.Total - q.Used
 		if free > size && free > maxFree {
 			maxFree = free
 			bestUser = user
@@ -55,6 +68,9 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 	}
 
 	if bestUser != nil {
+		// Reserve the space for this file
+		key := string(bestUser.Provider) + ":" + bestUser.Email + bestUser.Phone
+		r.accountQuotas[key].Used += size
 		return bestClient, bestUser, nil
 	}
 

@@ -28,6 +28,12 @@ type backupStatus struct {
 	Free   int64
 }
 
+// accountQuota caches the quota for an account to avoid repeated API calls
+type accountQuota struct {
+	Total int64
+	Used  int64
+}
+
 // Runner handles task orchestration
 type Runner struct {
 	config                *model.Config
@@ -39,6 +45,8 @@ type Runner struct {
 	folderMu              sync.Mutex      // protects ensureFolderStructure from concurrent creates
 	msShareFailureCache   map[string]bool // Cache of failed Microsoft sharing attempts (sourceAccount:targetAccount)
 	msShareFailureCacheMu sync.RWMutex
+	accountQuotas         map[string]*accountQuota
+	accountQuotasMu       sync.Mutex
 }
 
 // NewRunner creates a new task runner
@@ -49,6 +57,7 @@ func NewRunner(config *model.Config, db *database.DB, safeMode bool) *Runner {
 		safeMode:            safeMode,
 		clients:             make(map[string]api.CloudClient),
 		msShareFailureCache: make(map[string]bool),
+		accountQuotas:       make(map[string]*accountQuota),
 	}
 }
 
