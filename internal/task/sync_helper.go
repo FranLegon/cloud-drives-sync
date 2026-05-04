@@ -29,9 +29,6 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 		return nil, nil, fmt.Errorf("no telegram account found")
 	}
 
-	r.accountQuotasMu.Lock()
-	defer r.accountQuotasMu.Unlock()
-
 	var bestUser *model.User
 	var bestClient api.CloudClient
 	var maxFree int64 = -1
@@ -48,18 +45,32 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 		}
 
 		key := string(user.Provider) + ":" + user.Email + user.Phone
+		
+		r.accountQuotasMu.Lock()
 		q, ok := r.accountQuotas[key]
+		var free int64
+		if ok {
+			free = q.Total - q.Used
+		}
+		r.accountQuotasMu.Unlock()
+
 		if !ok {
 			quota, err := client.GetQuota()
 			if err != nil {
 				logger.Warning("Failed to get quota for %s: %v", user.Email, err)
 				continue
 			}
-			q = &accountQuota{Total: quota.Total, Used: quota.Used}
-			r.accountQuotas[key] = q
+			r.accountQuotasMu.Lock()
+			if existing, exists := r.accountQuotas[key]; exists {
+				q = existing
+			} else {
+				q = &accountQuota{Total: quota.Total, Used: quota.Used}
+				r.accountQuotas[key] = q
+			}
+			free = q.Total - q.Used
+			r.accountQuotasMu.Unlock()
 		}
 
-		free := q.Total - q.Used
 		if free > size && free > maxFree {
 			maxFree = free
 			bestUser = user
@@ -70,7 +81,9 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 	if bestUser != nil {
 		// Reserve the space for this file
 		key := string(bestUser.Provider) + ":" + bestUser.Email + bestUser.Phone
+		r.accountQuotasMu.Lock()
 		r.accountQuotas[key].Used += size
+		r.accountQuotasMu.Unlock()
 		return bestClient, bestUser, nil
 	}
 
