@@ -484,13 +484,18 @@ func (db *DB) BatchInsertFolders(folders []*model.Folder) error {
 
 // GetAllFolders returns all folders from DB
 func (db *DB) GetAllFolders() ([]*model.Folder, error) {
+	var folderCount int
+	if err := db.conn.QueryRow("SELECT COUNT(*) FROM folders").Scan(&folderCount); err != nil {
+		folderCount = 0
+	}
+
 	rows, err := db.conn.Query("SELECT id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email FROM folders")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var folders []*model.Folder
+	folders := make([]*model.Folder, 0, folderCount)
 	for rows.Next() {
 		var f model.Folder
 		var provider string
@@ -623,6 +628,11 @@ func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error)
 
 // GetAllFiles returns all files with replicas loaded in a single batch query
 func (db *DB) GetAllFiles() ([]*model.File, error) {
+	var fileCount int
+	if err := db.conn.QueryRow("SELECT COUNT(*) FROM files").Scan(&fileCount); err != nil {
+		fileCount = 0
+	}
+
 	query := `
 	SELECT id, path, name, size, calculated_id, mod_time, status
 	FROM files
@@ -635,8 +645,8 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 	}
 	defer rows.Close()
 
-	files := make([]*model.File, 0)
-	fileMap := make(map[string]*model.File)
+	files := make([]*model.File, 0, fileCount)
+	fileMap := make(map[string]*model.File, fileCount)
 	for rows.Next() {
 		file := &model.File{}
 		var modTime int64
@@ -689,6 +699,11 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 
 // getAllReplicas loads all replicas from the database in one query
 func (db *DB) getAllReplicas() ([]*model.Replica, error) {
+	var repCount int
+	if err := db.conn.QueryRow("SELECT COUNT(*) FROM replicas WHERE file_id IS NOT NULL").Scan(&repCount); err != nil {
+		repCount = 0
+	}
+
 	query := `
 	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	FROM replicas
@@ -700,7 +715,7 @@ func (db *DB) getAllReplicas() ([]*model.Replica, error) {
 	}
 	defer rows.Close()
 
-	replicas := make([]*model.Replica, 0)
+	replicas := make([]*model.Replica, 0, repCount)
 	for rows.Next() {
 		r := &model.Replica{}
 		var providerStr string
