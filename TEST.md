@@ -24,7 +24,7 @@ if (-not (Select-String -Path .gitignore -Pattern "^\.env$" -Quiet)) { Add-Conte
 #Load .env variables into environment:
 Get-Content .env | ForEach-Object { if ($_ -match '^(.*?)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] } }
 #Run tests:
-go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS
+go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --with-commit
 ```
 
 # Compare current vs last commit results:
