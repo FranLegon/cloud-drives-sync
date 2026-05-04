@@ -89,6 +89,21 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}()
 
+	testRuntimes := map[int]time.Duration{}
+	totalStart := time.Now()
+
+	// Print runtime summary before archiving the log
+	defer func() {
+		logger.Info("\n=== TEST RUNTIME SUMMARY ===")
+		for _, step := range []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12} {
+			if d, ok := testRuntimes[step]; ok {
+				logger.Info("  Test Case %2d: %s", step, d.Round(time.Millisecond))
+			}
+		}
+		logger.Info("  Total Runtime:  %s", time.Since(totalStart).Round(time.Millisecond))
+		logger.Info("=============================")
+	}()
+
 	defer func() {
 		if retErr != nil {
 			logger.Error("Test failed: %v", retErr)
@@ -200,97 +215,121 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Dependency execution
 	if shouldRun(1) {
+		t := time.Now()
 		if err := runTestCase1(runner, mainUser); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
 			return err
 		}
+		testRuntimes[1] = time.Since(t)
 	}
 	if shouldRun(2) {
+		t := time.Now()
 		if err := runTestCase2(runner, backups); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
 			return err
 		}
+		testRuntimes[2] = time.Since(t)
 	}
 	if shouldRun(3) {
+		t := time.Now()
 		if err := runTestCase3(runner, mainUser); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
 			return err
 		}
+		testRuntimes[3] = time.Since(t)
 	}
 	if shouldRun(4) {
+		t := time.Now()
 		if err := runTestCase4(runner, mainUser, backups); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
 			return err
 		}
+		testRuntimes[4] = time.Since(t)
 	}
 
 	if shouldRun(5) {
+		t := time.Now()
 		if err := runTestCase5(runner, mainUser, backups); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
 			return err
 		}
+		testRuntimes[5] = time.Since(t)
 	}
 	if shouldRun(6) {
+		t := time.Now()
 		if err := runTestCase6(runner, mainUser, backups); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
 			return err
 		}
+		testRuntimes[6] = time.Since(t)
 	}
 	if shouldRun(7) {
+		t := time.Now()
 		if err := runTestCase7(runner, mainUser, backups); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
 			return err
 		}
+		testRuntimes[7] = time.Since(t)
 	}
 	if shouldRun(8) {
+		t := time.Now()
 		if err := runTestCase8(runner, mainUser, backups); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
 			return err
 		}
+		testRuntimes[8] = time.Since(t)
 	}
 	if shouldRun(9) {
+		t := time.Now()
 		if err := runTestCase9(runner); err != nil {
 			return err
 		}
+		testRuntimes[9] = time.Since(t)
 	}
 
 	// Run large file tests at the end
 	if shouldRun(10) {
+		t := time.Now()
 		if err := runTestCase10(runner, mainUser); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
 			return err
 		}
+		testRuntimes[10] = time.Since(t)
 	}
 	if shouldRun(11) {
+		t := time.Now()
 		if err := runTestCase11(runner, mainUser, backups); err != nil {
 			return err
 		}
 		if err := testMetadata(runner); err != nil {
 			return err
 		}
+		testRuntimes[11] = time.Since(t)
 	}
 	if shouldRun(12) {
+		t := time.Now()
 		if err := runTestCase12(runner, mainUser, backups); err != nil {
 			return err
 		}
+		testRuntimes[12] = time.Since(t)
 	}
 
 	logger.Info("\nTEST SUITE COMPLETED SUCCESSFULLY")
