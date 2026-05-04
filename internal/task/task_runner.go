@@ -221,8 +221,8 @@ func (r *Runner) dbWriter(fileChan <-chan *model.File, folderChan <-chan *model.
 	const batchSize = 500
 	const flushInterval = 2 * time.Second
 
-	var fileBuffer []*model.File
-	var folderBuffer []*model.Folder
+	fileBuffer := make([]*model.File, 0, batchSize)
+	folderBuffer := make([]*model.Folder, 0, batchSize)
 
 	ticker := time.NewTicker(flushInterval)
 	defer ticker.Stop()
@@ -232,7 +232,7 @@ func (r *Runner) dbWriter(fileChan <-chan *model.File, folderChan <-chan *model.
 			if err := r.db.BatchInsertFiles(fileBuffer); err != nil {
 				logger.Error("Failed to batch insert files: %v", err)
 			}
-			fileBuffer = nil
+			fileBuffer = fileBuffer[:0]
 		}
 	}
 
@@ -241,7 +241,7 @@ func (r *Runner) dbWriter(fileChan <-chan *model.File, folderChan <-chan *model.
 			if err := r.db.BatchInsertFolders(folderBuffer); err != nil {
 				logger.Error("Failed to batch insert folders: %v", err)
 			}
-			folderBuffer = nil
+			folderBuffer = folderBuffer[:0]
 		}
 	}
 
@@ -583,14 +583,28 @@ func (r *Runner) BalanceStorage() error {
 					continue
 				}
 
+				// Find the replica for this source account
+				var sourceReplica *model.Replica
+				for _, replica := range file.Replicas {
+					if replica.AccountID == source.User.Email || replica.AccountID == source.User.Phone {
+						sourceReplica = replica
+						break
+					}
+				}
+
+				if sourceReplica == nil {
+					logger.Warning("Could not find replica for file %s in account %s", file.Name, source.User.Email)
+					continue
+				}
+
 				// Move file (Transfer Ownership)
 				if !r.safeMode {
 					logger.InfoTagged([]string{string(provider), source.User.Email}, "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
-					err := source.Client.TransferOwnership(file.ID, target.User.Email)
+					err := source.Client.TransferOwnership(sourceReplica.NativeID, target.User.Email)
 					if err != nil {
 						if err == api.ErrOwnershipTransferPending {
 							logger.InfoTagged([]string{string(provider), source.User.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
-							if err := target.Client.AcceptOwnership(file.ID); err != nil {
+							if err := target.Client.AcceptOwnership(sourceReplica.NativeID); err != nil {
 								logger.Error("Failed to accept ownership: %v", err)
 								continue
 							}
@@ -601,7 +615,7 @@ func (r *Runner) BalanceStorage() error {
 					}
 
 					// Update database to reflect ownership change
-					if err := r.db.UpdateReplicaOwner(string(provider), source.User.Email, file.ID, target.User.Email); err != nil {
+					if err := r.db.UpdateReplicaOwner(string(provider), source.User.Email, sourceReplica.NativeID, target.User.Email); err != nil {
 						logger.Warning("Failed to update local DB for %s: %v", file.Name, err)
 					}
 				} else {
@@ -803,7 +817,7 @@ func (r *Runner) FreeMain() (bool, error) {
 					// Check for consent error Consumer to Consumer transfer restriction
 					if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") || strings.Contains(err.Error(), "transferOwnership parameter must be enabled") {
 						fallbackUsed = true
-						if fallbackErr := r.fallbackCopyDelete(mainClient, target, file, mainReplica.NativeID, mainUser.Email); fallbackErr != nil {
+						if fallbackErr := r.fallbackCopyDelete(mainClient, target, file, mainReplica.NativeID, mainUser.Email, mainReplica); fallbackErr != nil {
 							logger.Error("Fallback transfer failed: %v", fallbackErr)
 							continue
 						}
@@ -838,7 +852,7 @@ func (r *Runner) FreeMain() (bool, error) {
 }
 
 // fallbackCopyDelete performs a download+upload+delete transfer when ownership transfer is not supported
-func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupStatus, file *model.File, nativeID string, mainEmail string) error {
+func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupStatus, file *model.File, nativeID string, mainEmail string, oldReplicaDB *model.Replica) error {
 	logger.InfoTagged([]string{"Google", mainEmail}, "Transfer via ownership not supported (consent required). Falling back to Copy+Delete...")
 
 	// 1. Download
@@ -882,9 +896,6 @@ func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupSt
 
 	logger.InfoTagged([]string{"Google", mainEmail}, "Fallback: Copy successful, deleting original...")
 
-	// Resolve old DB replica
-	oldReplicaDB := r.findMainReplica(file, mainEmail)
-
 	// 3. Delete original file
 	deleteSucceeded := true
 	if delErr := mainClient.DeleteFile(nativeID); delErr != nil {
@@ -896,33 +907,6 @@ func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupSt
 	r.reconcileFallbackDB(uploadedFile, oldReplicaDB, target, file, mainEmail, deleteSucceeded)
 
 	return nil
-}
-
-// findMainReplica looks up the DB replica for a file owned by the given main account email
-func (r *Runner) findMainReplica(file *model.File, mainEmail string) *model.Replica {
-	oldReplicaDB, dbLookupErr := r.db.GetReplicaByNativeID(model.ProviderGoogle, file.ID)
-	if dbLookupErr != nil {
-		logger.Warning("Fallback: Failed to lookup original replica in DB by NativeID: %v", dbLookupErr)
-	}
-	if oldReplicaDB != nil && oldReplicaDB.AccountID != mainEmail {
-		oldReplicaDB = nil
-	}
-
-	if oldReplicaDB == nil {
-		logger.Info("Attempting to find replica by file path: %s", file.Path)
-		fileDB, err := r.db.GetFileByPath(file.Path)
-		if err == nil && fileDB != nil {
-			for _, replica := range fileDB.Replicas {
-				if replica.Provider == model.ProviderGoogle && replica.AccountID == mainEmail {
-					oldReplicaDB = replica
-					logger.Info("Found replica by path: ID=%d, NativeID=%s", replica.ID, replica.NativeID)
-					break
-				}
-			}
-		}
-	}
-
-	return oldReplicaDB
 }
 
 // reconcileFallbackDB updates the database after a fallback copy+delete transfer
@@ -991,49 +975,6 @@ func (r *Runner) reconcileFallbackDB(uploadedFile *model.File, oldReplicaDB *mod
 			logger.Warning("Failed to insert fallback copied replica in DB: %v", dbErr)
 		}
 	}
-}
-
-// getAllFilesRecursive recursively lists all files in a folder and its subfolders
-func (r *Runner) getAllFilesRecursive(client api.CloudClient, folderID, parentPath string) ([]*model.File, error) {
-	var allFiles []*model.File
-
-	// List files in current folder
-	files, err := client.ListFiles(folderID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Assign paths
-	for _, f := range files {
-		f.Path = strings.ReplaceAll(filepath.Join(parentPath, f.Name), "\\", "/")
-	}
-
-	allFiles = append(allFiles, files...)
-	if len(files) > 0 {
-		names := make([]string, 0, len(files))
-		for _, f := range files {
-			names = append(names, f.Name)
-		}
-		logger.Info("Found files in folder %s: %s", folderID, strings.Join(names, ", "))
-	}
-
-	// List subfolders
-	folders, err := client.ListFolders(folderID)
-	if err != nil {
-		return nil, err
-	}
-
-	// Recursively list files in subfolders
-	for _, folder := range folders {
-		currentPath := strings.ReplaceAll(filepath.Join(parentPath, folder.Name), "\\", "/")
-		subFiles, err := r.getAllFilesRecursive(client, folder.ID, currentPath)
-		if err != nil {
-			return nil, err
-		}
-		allFiles = append(allFiles, subFiles...)
-	}
-
-	return allFiles, nil
 }
 
 // SyncProviders synchronizes files across all providers
@@ -2141,7 +2082,7 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 						continue
 					}
 
-					if err := client.MoveFile(file.ID, targetFolderID); err != nil {
+					if err := client.MoveFile(targetReplica.NativeID, targetFolderID); err != nil {
 						logger.Error("Failed to move file %s to soft-deleted: %v", path, err)
 					}
 				} else {
