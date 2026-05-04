@@ -83,13 +83,11 @@ $gitRules = [ordered]@{
     '*git apply*'       = 'deny'
     '*git init*'        = 'deny'
     '*git bisect*'      = 'deny'
-    '*git init*'        = 'deny'
     '*git submodule*'     = 'deny'
     '*git config*'        = 'deny'
     '*git credential*'      = 'deny'
     '*git archive*'         = 'deny'
     '*git remote*'          = 'deny'
-    '*git bisect*'           = 'deny'
     '*git add*'              = 'deny'
     '*git mv*'               = 'deny'
 }
