@@ -51,11 +51,13 @@ $prompt = $mainPrompt + $gitClarification
 
 cd 'C:\Users\francisco.legon\GitHub\IMEMINE\cloud-drives-sync'
 
+$model = 'google-vertex/gemini-3.1-pro-preview'
+
 $maxIterations = 10
 $iteration = 1
 while ($iteration -le $maxIterations) {
     if ($prompt -eq ($mainPrompt + $gitClarification)) {
-        opencode run $prompt 
+        opencode run $prompt --model $model
     } else {
         opencode run -c $prompt 
     }
