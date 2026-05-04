@@ -45,16 +45,21 @@ Preserve behavior unless a bug fix is explicitly needed.
 The only change allowed for cmd\test.go is adding more logs, so focus on the other go files instead.
 If you make changes, run tests as described in TEST.md.
 Consider tests take more than 15 minutes to run, be patient and wait for them to finish before analyzing results (you can check timestamped log in logs dir).
-Do not commit or run any git operations.
 "@
-$prompt = $mainPrompt
+$gitClarification = "`nDo not commit or run any git state-changing (mutating) operations (you can still run status/diff/log/show if needed)."
+$prompt = $mainPrompt + $gitClarification
 
 cd 'C:\Users\francisco.legon\GitHub\IMEMINE\cloud-drives-sync'
 
 $maxIterations = 10
 $iteration = 1
 while ($iteration -le $maxIterations) {
-    opencode run -c $prompt 
+    if ($prompt -eq ($mainPrompt + $gitClarification)) {
+        opencode run $prompt 
+    } else {
+        opencode run -c $prompt 
+    }
+    
     
     go build -o cloud-drives-sync.exe . | Tee-Object -Variable buildOutput
     if ($LASTEXITCODE -ne 0) { 
@@ -78,6 +83,7 @@ while ($iteration -le $maxIterations) {
         Write-Host "Build and tests succeeded without errors." -ForegroundColor Green
         $prompt = $mainPrompt
     }
+    $prompt = $prompt + $gitClarification
     $iteration++
 }
 ```
