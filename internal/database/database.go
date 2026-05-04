@@ -310,13 +310,13 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 				return fmt.Errorf("failed to upsert replica: %w", err)
 			}
 
-			var replicaID int64
-			err = idStmt.QueryRow(string(replica.Provider), replica.AccountID, replica.NativeID).Scan(&replicaID)
-			if err != nil {
-				return fmt.Errorf("failed to get replica ID: %w", err)
-			}
-
 			if len(replica.Fragments) > 0 {
+				var replicaID int64
+				err = idStmt.QueryRow(string(replica.Provider), replica.AccountID, replica.NativeID).Scan(&replicaID)
+				if err != nil {
+					return fmt.Errorf("failed to get replica ID: %w", err)
+				}
+
 				// Clear old fragments
 				if _, err := deleteFragmentsStmt.Exec(replicaID); err != nil {
 					return fmt.Errorf("failed to clear fragments: %w", err)
