@@ -1024,7 +1024,7 @@ func (r *Runner) SyncProviders() error {
 
 // buildFilesByPath groups active files by path and provider
 func buildFilesByPath(all []*model.File) map[string]map[model.Provider]*model.File {
-	result := make(map[string]map[model.Provider]*model.File)
+	result := make(map[string]map[model.Provider]*model.File, len(all))
 	for _, f := range all {
 		if f.Status != "active" {
 			continue
@@ -1081,8 +1081,8 @@ type statusIntent struct {
 func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath string) error {
 	mainAccounts := r.buildMainAccountSet()
 
-	filesByCalculatedID := make(map[string][]*model.File)
-	seenFileByID := make(map[string]bool)
+	filesByCalculatedID := make(map[string][]*model.File, len(files))
+	seenFileByID := make(map[string]bool, len(files))
 	for _, f := range files {
 		if f.Status != "active" || f.CalculatedID == "" {
 			continue
@@ -1094,7 +1094,7 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 		filesByCalculatedID[f.CalculatedID] = append(filesByCalculatedID[f.CalculatedID], f)
 	}
 
-	intents := make(map[string]statusIntent)
+	intents := make(map[string]statusIntent, len(filesByCalculatedID))
 	for _, f := range files {
 		if f.Status != "active" || f.CalculatedID == "" {
 			continue
