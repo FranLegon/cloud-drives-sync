@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
@@ -28,11 +29,13 @@ const (
 
 // Client represents a Google Drive client
 type Client struct {
-	service      *drive.Service
-	user         *model.User
-	config       *oauth2.Config
-	tokenSource  *auth.TokenSource
-	syncFolderID string
+	service       *drive.Service
+	user          *model.User
+	config        *oauth2.Config
+	tokenSource   *auth.TokenSource
+	syncFolderID  string
+	folderCache   map[string][]*model.Folder
+	folderCacheMu sync.Mutex
 }
 
 // NewClient creates a new Google Drive client
@@ -54,6 +57,7 @@ func NewClient(user *model.User, config *oauth2.Config) (*Client, error) {
 		user:        user,
 		config:      config,
 		tokenSource: tokenSource,
+		folderCache: make(map[string][]*model.Folder),
 	}, nil
 }
 
@@ -129,14 +133,15 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 		return nil, errors.New("folder ID is required")
 	}
 
-	query := fmt.Sprintf("'%s' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed=false", folderID)
+	query := fmt.Sprintf("'%s' in parents and trashed=false", folderID)
 
 	var allFiles []*model.File
+	var allFolders []*model.Folder
 	pageToken := ""
 
 	for {
 		call := c.service.Files.List().Q(query).
-			Fields("nextPageToken, files(id, name, size, md5Checksum, createdTime, modifiedTime, owners, parents)").
+			Fields("nextPageToken, files(id, name, mimeType, size, md5Checksum, createdTime, modifiedTime, owners, parents)").
 			PageSize(1000)
 
 		if pageToken != "" {
@@ -148,9 +153,24 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			return nil, fmt.Errorf("failed to list files: %w", err)
 		}
 
-		logger.Info("Google ListFiles page: found %d files", len(fileList.Files)) // ADDED LOG
+		logger.Info("Google ListFiles page: found %d items", len(fileList.Files)) // ADDED LOG
 
 		for _, f := range fileList.Files {
+			if f.MimeType == "application/vnd.google-apps.folder" {
+				folder := &model.Folder{
+					ID:             f.Id,
+					Name:           f.Name,
+					Provider:       model.ProviderGoogle,
+					UserEmail:      c.user.Email,
+					ParentFolderID: folderID,
+				}
+				if len(f.Owners) > 0 {
+					folder.OwnerEmail = f.Owners[0].EmailAddress
+				}
+				allFolders = append(allFolders, folder)
+				continue
+			}
+
 			modTime := parseTime(f.ModifiedTime)
 			calculatedID := fmt.Sprintf("%s-%d", f.Name, f.Size)
 
@@ -198,6 +218,10 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 		pageToken = fileList.NextPageToken
 	}
 
+	c.folderCacheMu.Lock()
+	c.folderCache[folderID] = allFolders
+	c.folderCacheMu.Unlock()
+
 	return allFiles, nil
 }
 
@@ -206,6 +230,14 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 	if parentID == "" {
 		return nil, errors.New("parent folder ID is required")
 	}
+
+	c.folderCacheMu.Lock()
+	if cached, ok := c.folderCache[parentID]; ok {
+		delete(c.folderCache, parentID)
+		c.folderCacheMu.Unlock()
+		return cached, nil
+	}
+	c.folderCacheMu.Unlock()
 
 	query := fmt.Sprintf("'%s' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false", parentID)
 

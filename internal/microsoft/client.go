@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -35,12 +36,14 @@ var fakeShortcutRegex = regexp.MustCompile(`^(.*)\.sz-(\d+)` + regexp.QuoteMeta(
 
 // Client represents a Microsoft OneDrive client
 type Client struct {
-	graphClient  *msgraphsdk.GraphServiceClient
-	user         *model.User
-	config       *oauth2.Config
-	tokenSource  *auth.TokenSource
-	syncFolderID string
-	driveID      string
+	graphClient   *msgraphsdk.GraphServiceClient
+	user          *model.User
+	config        *oauth2.Config
+	tokenSource   *auth.TokenSource
+	syncFolderID  string
+	driveID       string
+	folderCache   map[string][]*model.Folder
+	folderCacheMu sync.Mutex
 }
 
 // NewClient creates a new Microsoft OneDrive client
@@ -62,6 +65,7 @@ func NewClient(user *model.User, config *oauth2.Config) (*Client, error) {
 		user:        user,
 		config:      config,
 		tokenSource: tokenSource,
+		folderCache: make(map[string][]*model.Folder),
 	}
 
 	if err := client.initializeDrive(); err != nil {
@@ -151,6 +155,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 	}
 
 	var allFiles []*model.File
+	var allFolders []*model.Folder
 	err = pageIterator.Iterate(ctx, func(item models.DriveItemable) bool {
 		isFolder := item.GetFolder() != nil
 		isShortcut := item.GetRemoteItem() != nil
@@ -170,6 +175,14 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				return true // It's a folder shortcut
 			}
 		} else if isFolder {
+			folder := &model.Folder{
+				ID:             *item.GetId(),
+				Name:           *item.GetName(),
+				Provider:       model.ProviderMicrosoft,
+				UserEmail:      c.user.Email,
+				ParentFolderID: folderID,
+			}
+			allFolders = append(allFolders, folder)
 			return true // It's a regular folder
 		}
 
@@ -251,6 +264,10 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pagination failed: %w", err)
 	}
+
+	c.folderCacheMu.Lock()
+	c.folderCache[folderID] = allFolders
+	c.folderCacheMu.Unlock()
 
 	return allFiles, nil
 }
@@ -546,6 +563,14 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 	if parentID == "" {
 		return nil, errors.New("parent folder ID is required")
 	}
+
+	c.folderCacheMu.Lock()
+	if cached, ok := c.folderCache[parentID]; ok {
+		delete(c.folderCache, parentID)
+		c.folderCacheMu.Unlock()
+		return cached, nil
+	}
+	c.folderCacheMu.Unlock()
 
 	ctx := context.Background()
 	items, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(parentID).Children().Get(ctx, nil)
