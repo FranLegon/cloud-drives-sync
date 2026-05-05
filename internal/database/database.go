@@ -1568,25 +1568,37 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 	}
 	defer tx.Rollback()
 
+	insertFileStmt, err := tx.Prepare(`
+		INSERT OR IGNORE INTO files (id, path, name, size, calculated_id, mod_time, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		return err
+	}
+	defer insertFileStmt.Close()
+
+	updateReplicaStmt, err := tx.Prepare(`
+		UPDATE replicas SET file_id = ? WHERE id = ?
+	`)
+	if err != nil {
+		return err
+	}
+	defer updateReplicaStmt.Close()
+
 	for _, group := range orphanGroups {
 		// Use the first orphan's metadata for the new logical file
 		first := group[0]
 		newFileID := uuid.New().String()
 
 		// Insert File
-		_, err := tx.Exec(`
-			INSERT OR IGNORE INTO files (id, path, name, size, calculated_id, mod_time, status)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, newFileID, first.Path, first.Name, first.Size, first.CalculatedID, first.ModTime, first.Status)
+		_, err := insertFileStmt.Exec(newFileID, first.Path, first.Name, first.Size, first.CalculatedID, first.ModTime, first.Status)
 		if err != nil {
 			return fmt.Errorf("failed to promote replica group %s: %w", first.CalculatedID, err)
 		}
 
 		// Update all replicas in the group
 		for _, o := range group {
-			_, err = tx.Exec(`
-				UPDATE replicas SET file_id = ? WHERE id = ?
-			`, newFileID, o.ReplicaID)
+			_, err = updateReplicaStmt.Exec(newFileID, o.ReplicaID)
 			if err != nil {
 				return fmt.Errorf("failed to update replica %d: %w", o.ReplicaID, err)
 			}
