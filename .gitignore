@@ -43,5 +43,3 @@ install_deps.sh
 
 # Opencode 
 opencode.json
-agents/Invoke-InfiniteOpencodeOptimization.ps1
-agents/Set-WindowsTaskForOpencodeLoop.ps1
