@@ -109,6 +109,10 @@ $model = 'google-vertex/gemini-3.1-pro-preview'
 $maxIterations = 10
 $iteration = 1
 while ($iteration -le $maxIterations) {
+    if ($prompt -notmatch [regex]::Escape($gitClarification)) {
+        Write-Host "Prompt is missing git clarification. Resetting prompt to include it." -ForegroundColor Yellow
+        $prompt = $mainPrompt + $gitClarification
+    }
     if ($prompt -eq ($mainPrompt + $gitClarification)) {
         opencode run $prompt --model $model
     } else {
@@ -122,7 +126,6 @@ while ($iteration -le $maxIterations) {
         $prompt = $mainPrompt + $gitClarification
         continue
     }
-    
     
     go build -o cloud-drives-sync.exe . | Tee-Object -Variable buildOutput
     if ($LASTEXITCODE -ne 0) { 
