@@ -1179,134 +1179,56 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 	minTimestamp := scanStartTime.Unix()
 
 	// Single-pass update: Determine the correct status based on current replica locations
-	// A file should be 'active' if ANY recently scanned Google replica is outside soft-deleted folder
-	// A file should be 'softdeleted' only if ALL recently scanned Google replicas are in soft-deleted folder
-	// For files without Google replicas, use the same logic but check all providers
-
 	updateQuery := `
+	WITH ReplicaAgg AS (
+		SELECT file_id,
+			SUM(CASE WHEN provider = 'google' AND path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%' AND path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%' THEN 1 ELSE 0 END) as active_google,
+			SUM(CASE WHEN provider = 'google' THEN 1 ELSE 0 END) as total_google,
+			SUM(CASE WHEN path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%' AND path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%' THEN 1 ELSE 0 END) as active_any,
+			COUNT(*) as total_any
+		FROM replicas
+		WHERE status = 'active' AND last_seen_at >= ?
+		GROUP BY file_id
+	)
 	UPDATE files
 	SET status = CASE
-		-- First check: Does file have any recently scanned Google replica NOT in soft-deleted?
-		-- If yes, mark as 'active'
-		WHEN EXISTS (
-			SELECT 1
-			FROM replicas r
-			WHERE r.file_id = files.id
-			AND r.status = 'active'
-			AND r.provider = 'google'
-			AND r.last_seen_at >= ?
-			AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
-			AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
-		) THEN 'active'
-		
-		-- Second check: If file has Google replicas and ALL are in soft-deleted, mark as 'softdeleted'
-		WHEN EXISTS (
-			SELECT 1
-			FROM replicas r
-			WHERE r.file_id = files.id
-			AND r.status = 'active'
-			AND r.provider = 'google'
-			AND r.last_seen_at >= ?
-		) AND NOT EXISTS (
-			SELECT 1
-			FROM replicas r
-			WHERE r.file_id = files.id
-			AND r.status = 'active'
-			AND r.provider = 'google'
-			AND r.last_seen_at >= ?
-			AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
-			AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
-		) THEN 'softdeleted'
-		
-		-- Third check: For files without Google replicas, check other providers
-		-- If any non-Google replica is NOT in soft-deleted, mark as 'active'
-		WHEN NOT EXISTS (
-			SELECT 1
-			FROM replicas r
-			WHERE r.file_id = files.id
-			AND r.status = 'active'
-			AND r.provider = 'google'
-			AND r.last_seen_at >= ?
-		) AND EXISTS (
-			SELECT 1
-			FROM replicas r
-			WHERE r.file_id = files.id
-			AND r.status = 'active'
-			AND r.last_seen_at >= ?
-			AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
-			AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
-		) THEN 'active'
-		
-		-- Fourth check: For files without Google replicas, if ALL other replicas are in soft-deleted
-		WHEN NOT EXISTS (
-			SELECT 1
-			FROM replicas r
-			WHERE r.file_id = files.id
-			AND r.status = 'active'
-			AND r.provider = 'google'
-			AND r.last_seen_at >= ?
-		) AND EXISTS (
-			SELECT 1
-			FROM replicas r
-			WHERE r.file_id = files.id
-			AND r.status = 'active'
-			AND r.last_seen_at >= ?
-		) AND NOT EXISTS (
-			SELECT 1
-			FROM replicas r
-			WHERE r.file_id = files.id
-			AND r.status = 'active'
-			AND r.last_seen_at >= ?
-			AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
-			AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
-		) THEN 'softdeleted'
-		
-		-- Default: Keep existing status
-		ELSE status
+		WHEN r.active_google > 0 THEN 'active'
+		WHEN r.total_google > 0 AND r.active_google = 0 THEN 'softdeleted'
+		WHEN r.total_google = 0 AND r.active_any > 0 THEN 'active'
+		WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'softdeleted'
+		ELSE files.status
 	END
-	WHERE EXISTS (
-		SELECT 1
-		FROM replicas r
-		WHERE r.file_id = files.id
-		AND r.status = 'active'
-		AND r.last_seen_at >= ?
-	)
+	FROM ReplicaAgg r
+	WHERE files.id = r.file_id
 	`
 
-	if _, err := db.conn.Exec(updateQuery, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp, minTimestamp); err != nil {
+	if _, err := db.conn.Exec(updateQuery, minTimestamp); err != nil {
 		return fmt.Errorf("failed to update soft-deleted status: %w", err)
 	}
 
 	// Second pass: catch files that remain 'softdeleted' due to file_id linkage issues
 	// by checking replicas via calculated_id (content-based match)
 	fallbackQuery := `
+	WITH LatestActive AS (
+		SELECT calculated_id, path,
+			ROW_NUMBER() OVER(PARTITION BY calculated_id ORDER BY mod_time DESC) as rn
+		FROM replicas
+		WHERE status = 'active'
+		AND provider = 'google'
+		AND last_seen_at >= ?
+		AND path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
+		AND path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
+	)
 	UPDATE files
 	SET status = 'active',
-		path = COALESCE(
-			(SELECT r.path FROM replicas r
-			 WHERE r.calculated_id = files.calculated_id
-			 AND r.status = 'active'
-			 AND r.provider = 'google'
-			 AND r.last_seen_at >= ?
-			 AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
-			 AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
-			 ORDER BY r.mod_time DESC
-			 LIMIT 1),
-			files.path)
-	WHERE status = 'softdeleted'
-	AND (calculated_id != '' AND calculated_id IS NOT NULL)
-	AND EXISTS (
-		SELECT 1
-		FROM replicas r
-		WHERE r.calculated_id = files.calculated_id
-		AND r.status = 'active'
-		AND r.provider = 'google'
-		AND r.last_seen_at >= ?
-		AND r.path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
-		AND r.path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
-	)
+		path = COALESCE(la.path, files.path)
+	FROM LatestActive la
+	WHERE files.calculated_id = la.calculated_id
+	AND la.rn = 1
+	AND files.status = 'softdeleted'
+	AND (files.calculated_id != '' AND files.calculated_id IS NOT NULL)
 	`
-	if _, err := db.conn.Exec(fallbackQuery, minTimestamp, minTimestamp); err != nil {
+	if _, err := db.conn.Exec(fallbackQuery, minTimestamp); err != nil {
 		return fmt.Errorf("failed to update soft-deleted status (fallback): %w", err)
 	}
 
@@ -1498,20 +1420,18 @@ func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
 
 // LinkOrphanedReplicas links orphaned replicas to existing files based on calculated_id
 func (db *DB) LinkOrphanedReplicas() error {
-	// Update replicas that match an existing file by calculated_id
-	// We use the first matching file if duplicates exist (though ideally calculated_id should be unique-ish)
+	// Update replicas that match an existing file by calculated_id using a single join (CTE)
 	query := `
+	WITH FileMap AS (
+		SELECT calculated_id, MIN(id) as id
+		FROM files
+		GROUP BY calculated_id
+	)
 	UPDATE replicas
-	SET file_id = (
-		SELECT id FROM files 
-		WHERE files.calculated_id = replicas.calculated_id 
-		LIMIT 1
-	)
-	WHERE (file_id IS NULL OR file_id = '')
-	AND EXISTS (
-		SELECT 1 FROM files 
-		WHERE files.calculated_id = replicas.calculated_id
-	)
+	SET file_id = fm.id
+	FROM FileMap fm
+	WHERE (replicas.file_id IS NULL OR replicas.file_id = '')
+	AND replicas.calculated_id = fm.calculated_id
 	`
 	_, err := db.conn.Exec(query)
 	return err
