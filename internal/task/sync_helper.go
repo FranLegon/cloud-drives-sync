@@ -114,8 +114,9 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		}
 	}
 
-	r.folderMu.Lock()
-	defer r.folderMu.Unlock()
+	mu := r.getAccountFolderLock(provider, accountID)
+	mu.Lock()
+	defer mu.Unlock()
 
 	// Get root sync folder
 	currentID, err := client.GetSyncFolderID()

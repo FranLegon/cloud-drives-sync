@@ -42,7 +42,7 @@ type Runner struct {
 	stopOnError           bool
 	clients               map[string]api.CloudClient
 	clientsMu             sync.RWMutex
-	folderMu              sync.Mutex      // protects ensureFolderStructure from concurrent creates
+	folderLocks           sync.Map        // protects ensureFolderStructure per account from concurrent creates
 	msShareFailureCache   map[string]bool // Cache of failed Microsoft sharing attempts (sourceAccount:targetAccount)
 	msShareFailureCacheMu sync.RWMutex
 	accountQuotas         map[string]*accountQuota
@@ -63,6 +63,16 @@ func NewRunner(config *model.Config, db *database.DB, safeMode bool) *Runner {
 
 func (r *Runner) SetStopOnError(stop bool) {
 	r.stopOnError = stop
+}
+
+// getAccountFolderLock returns a mutex for the given provider and account to serialize folder creation
+func (r *Runner) getAccountFolderLock(provider model.Provider, accountID string) *sync.Mutex {
+	key := string(provider) + ":" + accountID
+	if v, ok := r.folderLocks.Load(key); ok {
+		return v.(*sync.Mutex)
+	}
+	v, _ := r.folderLocks.LoadOrStore(key, &sync.Mutex{})
+	return v.(*sync.Mutex)
 }
 
 // GetOrCreateClient gets or creates a client for a user
