@@ -195,14 +195,14 @@ func (r *Runner) GetMetadata() error {
 	dbWg.Wait()
 
 	// Post-processing: Link replicas to files
-	logger.Info("Updating logical files from latest replicas...")
-	if err := r.db.UpdateLogicalFilesFromReplicas(); err != nil {
-		return fmt.Errorf("failed to update logical files: %w", err)
-	}
-
 	logger.Info("Linking replicas to logical files...")
 	if err := r.db.LinkOrphanedReplicas(); err != nil {
 		return fmt.Errorf("failed to link orphaned replicas: %w", err)
+	}
+
+	logger.Info("Updating logical files from latest replicas...")
+	if err := r.db.UpdateLogicalFilesFromReplicas(); err != nil {
+		return fmt.Errorf("failed to update logical files: %w", err)
 	}
 
 	logger.Info("Creating new logical files for unmatched replicas...")
