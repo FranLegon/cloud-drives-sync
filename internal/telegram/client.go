@@ -422,6 +422,12 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 		}
 
 		for _, msgClass := range messages {
+			// Update offset for next page BEFORE any continue
+			msgClassID := msgClass.GetID()
+			if msgClassID < offsetID || offsetID == 0 {
+				offsetID = msgClassID
+			}
+
 			msg, ok := msgClass.(*tg.Message)
 			if !ok {
 				continue // Skip service messages
@@ -511,11 +517,6 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 					replicaFragmentMap[fullPath] = append(replicaFragmentMap[fullPath], meta.ReplicaFragment)
 				}
-			}
-
-			// Update offset for next page
-			if msg.ID < offsetID || offsetID == 0 {
-				offsetID = msg.ID
 			}
 		}
 

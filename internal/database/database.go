@@ -636,7 +636,6 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 	query := `
 	SELECT id, path, name, size, calculated_id, mod_time, status
 	FROM files
-	ORDER BY path ASC
 	`
 
 	rows, err := db.conn.Query(query)
@@ -811,7 +810,6 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	FROM files f
 	LEFT JOIN replicas r ON r.file_id = f.id
 	WHERE f.status = ?
-	ORDER BY f.path ASC, r.id ASC
 	`
 
 	rows, err := db.conn.Query(query, status)

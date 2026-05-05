@@ -1718,12 +1718,18 @@ func (r *Runner) GetProviderQuotasFromAPI() ([]*model.ProviderQuota, error) {
 			if !user.IsMain {
 				if pq.Total == -1 {
 					// Already unlimited, stay unlimited
-				} else if q.Total == -1 {
+				} else if q.Total <= 0 {
 					// Found an unlimited account, set provider to unlimited
 					pq.Total = -1
-					pq.Free = -1
 				} else {
 					pq.Total += q.Total
+				}
+				
+				if pq.Free == -1 {
+					// Already unlimited
+				} else if q.Total <= 0 {
+					pq.Free = -1
+				} else {
 					pq.Free += q.Free
 				}
 			}

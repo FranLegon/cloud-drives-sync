@@ -50,7 +50,11 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 		q, ok := r.accountQuotas[key]
 		var free int64
 		if ok {
-			free = q.Total - q.Used
+			if q.Total <= 0 {
+				free = (1<<63 - 1) - q.Used
+			} else {
+				free = q.Total - q.Used
+			}
 		}
 		r.accountQuotasMu.Unlock()
 
@@ -67,7 +71,11 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 				q = &accountQuota{Total: quota.Total, Used: quota.Used}
 				r.accountQuotas[key] = q
 			}
-			free = q.Total - q.Used
+			if q.Total <= 0 {
+				free = (1<<63 - 1) - q.Used
+			} else {
+				free = q.Total - q.Used
+			}
 			r.accountQuotasMu.Unlock()
 		}
 
