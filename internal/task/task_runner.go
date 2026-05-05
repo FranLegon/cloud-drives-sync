@@ -1595,6 +1595,7 @@ func (r *Runner) syncFolderStructures() error {
 				if id, ok := m[name]; ok {
 					return id, nil
 				}
+				return "", nil // Already listed, not found
 			}
 
 			// List
