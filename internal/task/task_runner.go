@@ -257,7 +257,7 @@ func (r *Runner) dbWriter(fileChan <-chan *model.File, folderChan <-chan *model.
 		}
 	}
 
-	for {
+	for fileChan != nil || folderChan != nil {
 		select {
 		case file, ok := <-fileChan:
 			if !ok {
@@ -280,10 +280,6 @@ func (r *Runner) dbWriter(fileChan <-chan *model.File, folderChan <-chan *model.
 		case <-ticker.C:
 			flushFiles()
 			flushFolders()
-		}
-
-		if fileChan == nil && folderChan == nil {
-			break
 		}
 	}
 
