@@ -47,6 +47,7 @@ type Runner struct {
 	msShareFailureCacheMu sync.RWMutex
 	accountQuotas         map[string]*accountQuota
 	accountQuotasMu       sync.Mutex
+	folderCache           sync.Map        // Cache of resolved folder IDs (path+account -> ID)
 }
 
 // NewRunner creates a new task runner

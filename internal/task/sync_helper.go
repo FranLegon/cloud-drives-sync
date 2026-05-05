@@ -104,12 +104,19 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 
 	// Clean path and split
 	path = strings.Trim(path, "/\\")
+	accountID := client.GetUserIdentifier()
+	
+	// Quick fast-path memory cache lookup
+	cacheKey := string(provider) + ":" + accountID + ":" + path
+	if cachedID, ok := r.folderCache.Load(cacheKey); ok {
+		return cachedID.(string), nil
+	}
 	
 	// Quick fast-path lookup in DB without any locks
-	accountID := client.GetUserIdentifier()
 	if path != "" && path != "." {
 		dbFolder, err := r.db.GetFolderByPathAndAccount("/"+path, provider, accountID)
 		if err == nil && dbFolder != nil && dbFolder.ID != "" {
+			r.folderCache.Store(cacheKey, dbFolder.ID)
 			return dbFolder.ID, nil
 		}
 	}
@@ -138,10 +145,18 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 
 		currentPath += "/" + part
 		
+		// First check memory cache
+		partCacheKey := string(provider) + ":" + accountID + ":" + strings.TrimPrefix(currentPath, "/")
+		if cachedID, ok := r.folderCache.Load(partCacheKey); ok {
+			currentID = cachedID.(string)
+			continue
+		}
+
 		// First check local DB for the folder
 		dbFolder, err := r.db.GetFolderByPathAndAccount(currentPath, provider, accountID)
 		if err == nil && dbFolder != nil && dbFolder.ID != "" {
 			currentID = dbFolder.ID
+			r.folderCache.Store(partCacheKey, currentID)
 			continue
 		}
 
@@ -189,9 +204,11 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 				folder.UserPhone = accountID
 			}
 			r.db.InsertFolder(folder)
+			r.folderCache.Store(partCacheKey, currentID)
 		}
 	}
 
+	r.folderCache.Store(cacheKey, currentID)
 	return currentID, nil
 }
 
