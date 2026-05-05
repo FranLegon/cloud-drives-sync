@@ -114,6 +114,14 @@ while ($iteration -le $maxIterations) {
     } else {
         opencode run -c $prompt 
     }
+    if (-not $? -or $LASTEXITCODE -ne 0) { 
+        Write-Host "OpenCode execution failed. Checking out to main and resetting to discard any changes..." -ForegroundColor Red
+        git checkout main --force | Out-Null
+        git clean -fd | Out-Null
+        if (git stash list) { git stash pop | Out-Null }
+        $prompt = $mainPrompt + $gitClarification
+        continue
+    }
     
     
     go build -o cloud-drives-sync.exe . | Tee-Object -Variable buildOutput
