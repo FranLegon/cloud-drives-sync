@@ -46,44 +46,6 @@ type CaptionMetadata struct {
 	ReplicaFragment *model.ReplicaFragment `json:"replica_fragment,omitempty"`
 }
 
-// findMessagesByGeneratedID searches for messages with the given generated ID
-func (c *Client) findMessagesByGeneratedID(generatedID string) ([]tg.MessageClass, error) {
-	if c.channelID == 0 {
-		return nil, fmt.Errorf("channel not initialized")
-	}
-
-	// Search for the generated ID in the caption
-	// We match the JSON key inside the replica object
-	query := fmt.Sprintf(`"calculated_id":"%s"`, generatedID)
-
-	inputPeer := &tg.InputPeerChannel{
-		ChannelID:  c.channelID,
-		AccessHash: c.accessHash,
-	}
-
-	res, err := c.client.API().MessagesSearch(c.ctx, &tg.MessagesSearchRequest{
-		Peer:   inputPeer,
-		Q:      query,
-		Filter: &tg.InputMessagesFilterDocument{},
-		Limit:  100, // Should be enough for split files
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to search messages: %w", err)
-	}
-
-	var messages []tg.MessageClass
-	switch r := res.(type) {
-	case *tg.MessagesChannelMessages:
-		messages = r.Messages
-	case *tg.MessagesMessages:
-		messages = r.Messages
-	case *tg.MessagesMessagesSlice:
-		messages = r.Messages
-	}
-
-	return messages, nil
-}
-
 // UpdateFileStatus updates the status of a file (message caption)
 func (c *Client) UpdateFileStatus(replica *model.Replica, newStatus string) error {
 	if c.channelID == 0 {
@@ -631,22 +593,6 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	calculatedID := generatedID
 	modTime := time.Now()
 	fullPath := folderID + "/" + name
-
-	// Check if file already exists (logic omitted for brevity/simplicity as we overwrite/update capability is tricky with new schema in-place edit)
-	// For "sync-providers" conflict logic handles uniqueness before calling UploadFile usually (renaming).
-	// But if we want to deduplicate *uploads* that already exist:
-	existingMessages, err := c.findMessagesByGeneratedID(generatedID)
-	if err == nil && len(existingMessages) > 0 {
-		// Log and return existing (simplified from previous logic)
-		logger.Info("File %s already exists", name)
-		// We could try to parse the first message to return the file...
-		// For now, let's proceed to upload if not found or blindly upload? The previous logic tried to update metadata.
-		// Updating metadata for existing files to new schema is complex.
-		// Let's assume we proceed to upload if the user called this, or duplicate check happened before.
-		// Actually, requirements say "If a file is found... it is treated as a conflict".
-		// So we shouldn't be here if it exists, unless we are "updating" it.
-		// Ignoring existing check for now to ensure cleaner implementation of upload.
-	}
 
 	// Prepare common Replica data
 	replica := &model.Replica{
