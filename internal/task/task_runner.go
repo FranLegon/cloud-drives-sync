@@ -155,12 +155,13 @@ func (r *Runner) GetMetadata() error {
 	}()
 
 	var wg sync.WaitGroup
-	apiSem := make(chan struct{}, 8) // Limit concurrent API calls globally
 
 	for i := range r.config.Users {
 		wg.Add(1)
 		go func(user *model.User) {
 			defer wg.Done()
+
+			apiSem := make(chan struct{}, 8) // Limit concurrent API calls per account
 
 			client, err := r.GetOrCreateClient(user)
 			if err != nil {
