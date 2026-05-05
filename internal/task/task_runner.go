@@ -1184,19 +1184,20 @@ func (r *Runner) markTelegramReplicaDeleted(replica *model.Replica, fileName str
 		logger.Error("Failed to get telegram client for %s: %v", replica.AccountID, err)
 		return
 	}
-	tgClient, ok := client.(*telegram.Client)
-	if !ok {
-		logger.Error("Client is not a Telegram client for %s", replica.Provider)
-		return
-	}
-	logger.Info("Marking soft-deleted file on Telegram: %s", fileName)
-	if err := tgClient.UpdateFileStatus(replica, "deleted"); err != nil {
-		logger.Error("Failed to update file status on Telegram: %v", err)
-		return
-	}
-	replica.Status = "deleted"
-	if err := r.db.UpdateReplica(replica); err != nil {
-		logger.Warning("Failed to update telegram replica status in DB: %v", err)
+	if tgClient, ok := client.(*telegram.Client); ok {
+		if r.safeMode {
+			logger.DryRun("Would mark soft-deleted file on Telegram: %s", fileName)
+			return
+		}
+		logger.Info("Marking soft-deleted file on Telegram: %s", fileName)
+		if err := tgClient.UpdateFileStatus(replica, "deleted"); err != nil {
+			logger.Error("Failed to update file status on Telegram: %v", err)
+			return
+		}
+		replica.Status = "deleted"
+		if err := r.db.UpdateReplica(replica); err != nil {
+			logger.Warning("Failed to update telegram replica status in DB: %v", err)
+		}
 	}
 }
 
@@ -1223,6 +1224,11 @@ func (r *Runner) moveReplicaToPath(replica *model.Replica, fileName, targetPath 
 	destID, err := r.ensureFolderStructure(client, targetDir, replica.Provider)
 	if err != nil {
 		logger.Error("Failed to ensure folder structure for %s: %v", targetDir, err)
+		return
+	}
+
+	if r.safeMode {
+		logger.DryRun("Would move %s on %s to %s", fileName, replica.Provider, targetPath)
 		return
 	}
 
@@ -1420,12 +1426,16 @@ func (r *Runner) enforceSoftDeletedPlacement(masterFile *model.File, softDeleted
 				continue
 			}
 
-			if err := client.MoveFile(replica.NativeID, destID); err != nil {
-				logger.Error("Failed to move file to soft-deleted: %v", err)
+			if r.safeMode {
+				logger.DryRun("Would move %s to soft-deleted on %s", masterFile.Name, replica.Provider)
 			} else {
-				newPath := "/" + softDeletedPath + "/" + masterFile.Name
-				replica.Path = newPath
-				r.db.UpdateReplica(replica)
+				if err := client.MoveFile(replica.NativeID, destID); err != nil {
+					logger.Error("Failed to move file to soft-deleted: %v", err)
+				} else {
+					newPath := "/" + softDeletedPath + "/" + masterFile.Name
+					replica.Path = newPath
+					r.db.UpdateReplica(replica)
+				}
 			}
 		}
 	}
@@ -1582,79 +1592,11 @@ func (r *Runner) syncFolderStructures() error {
 		if err != nil {
 			continue
 		}
-		rootID, err := client.GetSyncFolderID()
-		if err != nil {
-			continue
-		}
-
-		// Cache for this user: parentID -> map[name]id
-		cache := make(map[string]map[string]string)
-
-		var getFolderID func(string, string) (string, error)
-		getFolderID = func(parentID, name string) (string, error) {
-			if m, ok := cache[parentID]; ok {
-				if id, ok := m[name]; ok {
-					return id, nil
-				}
-				return "", nil // Already listed, not found
-			}
-
-			// List
-			items, err := client.ListFolders(parentID)
-			if err != nil {
-				return "", err
-			}
-
-			m := make(map[string]string)
-			for _, item := range items {
-				m[item.Name] = item.ID
-			}
-			cache[parentID] = m
-
-			if id, ok := m[name]; ok {
-				return id, nil
-			}
-			return "", nil // Not found
-		}
 
 		for _, path := range paths {
-			relPath := strings.TrimPrefix(path, "/")
-			if relPath == "" {
-				continue
-			}
-			parts := strings.Split(relPath, "/")
-
-			currentID := rootID
-			for _, part := range parts {
-				if part == "" {
-					continue
-				}
-
-				id, err := getFolderID(currentID, part)
-				if err != nil {
-					break
-				} // Error listing
-
-				if id == "" {
-					// Create
-					if !r.safeMode {
-						newF, err := client.CreateFolder(currentID, part)
-						if err != nil {
-							logger.Warning("Failed to create folder %s: %v", part, err)
-							break
-						}
-						id = newF.ID
-						// Update cache
-						if cache[currentID] == nil {
-							cache[currentID] = make(map[string]string)
-						}
-						cache[currentID][part] = id
-					} else {
-						logger.DryRun("Would create folder %s in %s", part, currentID)
-						break // Can't proceed safely
-					}
-				}
-				currentID = id
+			_, err := r.ensureFolderStructure(client, path, u.Provider)
+			if err != nil && !strings.Contains(err.Error(), "safe mode") {
+				logger.Warning("Failed to ensure folder structure for %s: %v", path, err)
 			}
 		}
 	}
@@ -1924,6 +1866,11 @@ func (r *Runner) ProcessHardDeletes() error {
 						continue
 					}
 
+					if r.safeMode {
+						logger.DryRun("Would hard delete replica on Microsoft: %s", rep.NativeID)
+						continue
+					}
+
 					logger.Info("Hard deleting replica on Microsoft: %s", rep.NativeID)
 					if err := client.DeleteFile(rep.NativeID); err != nil {
 						logger.Error("Failed to delete file on Microsoft: %v", err)
@@ -1948,6 +1895,10 @@ func (r *Runner) ProcessHardDeletes() error {
 					}
 
 					if tgClient, ok := client.(*telegram.Client); ok {
+						if r.safeMode {
+							logger.DryRun("Would update Telegram caption to 'deleted' for %s", rep.NativeID)
+							continue
+						}
 						logger.Info("Updating Telegram caption to 'deleted' for %s", rep.NativeID)
 						if err := tgClient.UpdateFileStatus(rep, "deleted"); err != nil {
 							logger.Error("Failed to update Telegram status: %v", err)

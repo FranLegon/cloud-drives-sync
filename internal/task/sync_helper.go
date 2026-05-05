@@ -189,6 +189,10 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 			})
 		} else {
 			// Create folder
+			if r.safeMode {
+				logger.DryRun("Would create folder '%s'", part)
+				return "", fmt.Errorf("safe mode: skipped folder creation for %s", part)
+			}
 			logger.Info("Creating folder '%s'...", part)
 			folder, err := client.CreateFolder(currentID, part)
 			if err != nil {
