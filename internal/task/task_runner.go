@@ -231,13 +231,9 @@ func (r *Runner) GetMetadata() error {
 
 func (r *Runner) dbWriter(fileChan <-chan *model.File, folderChan <-chan *model.Folder) {
 	const batchSize = 500
-	const flushInterval = 2 * time.Second
 
 	fileBuffer := make([]*model.File, 0, batchSize)
 	folderBuffer := make([]*model.Folder, 0, batchSize)
-
-	ticker := time.NewTicker(flushInterval)
-	defer ticker.Stop()
 
 	flushFiles := func() {
 		if len(fileBuffer) > 0 {
@@ -277,9 +273,6 @@ func (r *Runner) dbWriter(fileChan <-chan *model.File, folderChan <-chan *model.
 					flushFolders()
 				}
 			}
-		case <-ticker.C:
-			flushFiles()
-			flushFolders()
 		}
 	}
 
