@@ -1791,6 +1791,19 @@ func (r *Runner) ProcessHardDeletes() error {
 
 	logger.Info("Checking %d soft-deleted files for hard deletion...", len(files))
 
+	// Pre-fetch active Google replica statuses for all calculated_ids to avoid N+1 queries
+	var calcIDs []string
+	for _, file := range files {
+		if file.CalculatedID != "" {
+			calcIDs = append(calcIDs, file.CalculatedID)
+		}
+	}
+	
+	activeGoogleMap, err := r.db.GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calcIDs)
+	if err != nil {
+		logger.Warning("Failed to bulk fetch active Google replicas, falling back to individual queries: %v", err)
+	}
+
 	for _, file := range files {
 		// DEBUG: Log file state for hard delete analysis
 		logger.Info("[DEBUG-HD] File ID=%s, Path=%s, CalcID=%s, Status=%s, Replicas=%d",
@@ -1814,7 +1827,13 @@ func (r *Runner) ProcessHardDeletes() error {
 		// Safety check: query DB directly by calculated_id to catch cases where
 		// replicas may not be linked to this file record (file_id mismatch after moves)
 		if !hasGoogleReplica && file.CalculatedID != "" {
-			found, err := r.db.HasActiveGoogleReplicaOutsideSoftDeleted(file.CalculatedID)
+			var found bool
+			var err error
+			if activeGoogleMap != nil {
+				found = activeGoogleMap[file.CalculatedID]
+			} else {
+				found, err = r.db.HasActiveGoogleReplicaOutsideSoftDeleted(file.CalculatedID)
+			}
 			logger.Info("[DEBUG-HD] Safety check HasActiveGoogleReplicaOutsideSoftDeleted(%s) = %v, err=%v", file.CalculatedID, found, err)
 			if err != nil {
 				logger.Warning("Failed safety check for %s: %v", file.Path, err)

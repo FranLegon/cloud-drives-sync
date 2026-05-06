@@ -1200,6 +1200,59 @@ func (db *DB) HasActiveGoogleReplicaOutsideSoftDeleted(calculatedID string) (boo
 	return exists, err
 }
 
+// GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk returns a map of all calculated_ids that have an active Google replica
+// outside the soft-deleted folder. This is used to optimize ProcessHardDeletes.
+func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs []string) (map[string]bool, error) {
+	result := make(map[string]bool)
+	if len(calculatedIDs) == 0 {
+		return result, nil
+	}
+
+	// Chunk the query if needed, SQLite limit is 999 variables usually, 
+	// but we can just fetch all matching ones without an IN clause if we want, 
+	// or chunk the IN clause.
+	// Since this table could be huge, chunking the IN clause is safer.
+	chunkSize := 900
+	for i := 0; i < len(calculatedIDs); i += chunkSize {
+		end := i + chunkSize
+		if end > len(calculatedIDs) {
+			end = len(calculatedIDs)
+		}
+		chunk := calculatedIDs[i:end]
+		
+		placeholders := make([]string, len(chunk))
+		args := make([]interface{}, len(chunk))
+		for j, id := range chunk {
+			placeholders[j] = "?"
+			args[j] = id
+		}
+		
+		query := fmt.Sprintf(`
+		SELECT DISTINCT calculated_id FROM replicas
+		WHERE calculated_id IN (%s)
+		AND provider = 'google'
+		AND status = 'active'
+		AND path NOT LIKE '%%sync-cloud-drives-aux/soft-deleted%%'
+		AND path NOT LIKE '%%sync-cloud-drives-aux\soft-deleted%%'
+		`, strings.Join(placeholders, ","))
+		
+		rows, err := db.conn.Query(query, args...)
+		if err != nil {
+			return nil, err
+		}
+		
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err == nil {
+				result[id] = true
+			}
+		}
+		rows.Close()
+	}
+	
+	return result, nil
+}
+
 // UpdateSoftDeletedFileStatus marks files as softdeleted or active based on replica locations
 // Priority: Google provider state takes precedence when replicas disagree
 // Only considers recently scanned replicas (last_seen_at >= query start time)
