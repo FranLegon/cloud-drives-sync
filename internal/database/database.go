@@ -439,9 +439,24 @@ func (db *DB) InsertReplicaFragment(fragment *model.ReplicaFragment) error {
 // InsertFolder inserts a folder record into the database
 func (db *DB) InsertFolder(folder *model.Folder) error {
 	query := `
-	INSERT OR REPLACE INTO folders (
+	INSERT INTO folders (
 		id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		name=excluded.name,
+		path=excluded.path,
+		provider=excluded.provider,
+		user_email=excluded.user_email,
+		user_phone=excluded.user_phone,
+		parent_folder_id=excluded.parent_folder_id,
+		owner_email=excluded.owner_email
+	WHERE folders.name != excluded.name
+	   OR folders.path != excluded.path
+	   OR folders.provider != excluded.provider
+	   OR COALESCE(folders.user_email, '') != COALESCE(excluded.user_email, '')
+	   OR COALESCE(folders.user_phone, '') != COALESCE(excluded.user_phone, '')
+	   OR COALESCE(folders.parent_folder_id, '') != COALESCE(excluded.parent_folder_id, '')
+	   OR COALESCE(folders.owner_email, '') != COALESCE(excluded.owner_email, '')
 	`
 
 	_, err := db.conn.Exec(query,
@@ -460,9 +475,24 @@ func (db *DB) BatchInsertFolders(folders []*model.Folder) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.Prepare(`
-	INSERT OR REPLACE INTO folders (
+	INSERT INTO folders (
 		id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		name=excluded.name,
+		path=excluded.path,
+		provider=excluded.provider,
+		user_email=excluded.user_email,
+		user_phone=excluded.user_phone,
+		parent_folder_id=excluded.parent_folder_id,
+		owner_email=excluded.owner_email
+	WHERE folders.name != excluded.name
+	   OR folders.path != excluded.path
+	   OR folders.provider != excluded.provider
+	   OR COALESCE(folders.user_email, '') != COALESCE(excluded.user_email, '')
+	   OR COALESCE(folders.user_phone, '') != COALESCE(excluded.user_phone, '')
+	   OR COALESCE(folders.parent_folder_id, '') != COALESCE(excluded.parent_folder_id, '')
+	   OR COALESCE(folders.owner_email, '') != COALESCE(excluded.owner_email, '')
 	`)
 	if err != nil {
 		return err
@@ -1198,6 +1228,13 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 	END
 	FROM ReplicaAgg r
 	WHERE files.id = r.file_id
+	AND files.status != CASE
+		WHEN r.active_google > 0 THEN 'active'
+		WHEN r.total_google > 0 AND r.active_google = 0 THEN 'softdeleted'
+		WHEN r.total_google = 0 AND r.active_any > 0 THEN 'active'
+		WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'softdeleted'
+		ELSE files.status
+	END
 	`
 
 	if _, err := db.conn.Exec(updateQuery, minTimestamp); err != nil {
