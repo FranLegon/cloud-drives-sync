@@ -1090,13 +1090,14 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 			continue
 		}
 
+		inSoftDeleted := strings.Contains(strings.ReplaceAll(f.Path, "\\", "/"), softDeletedPath)
+
 		for _, replica := range f.Replicas {
 			if replica.Status != "active" {
 				continue
 			}
 
 			intent := intents[f.CalculatedID]
-			inSoftDeleted := strings.Contains(strings.ReplaceAll(f.Path, "\\", "/"), softDeletedPath)
 
 			if inSoftDeleted {
 				intent.Status = "soft-deleted"
@@ -1270,22 +1271,14 @@ func sortFilesBySizeDesc(files []*model.File) {
 func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string) error {
 	providers := []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram}
 
-	// Phase 1: Handle soft-deleted placements (sequential, fast)
-	for path, fileMap := range filesByPath {
-		if !strings.Contains(path, softDeletedPath) {
-			continue
-		}
-		
-		if masterFile := getMasterFile(fileMap); masterFile != nil {
-			r.enforceSoftDeletedPlacement(masterFile, softDeletedPath)
-		}
-	}
-
-	// Phase 2: Collect copy jobs for missing files and conflicts
+	// Phase 1 and 2: Handle soft-deleted placements and collect copy jobs
 	var jobs []copyJob
 
 	for path, fileMap := range filesByPath {
 		if strings.Contains(path, softDeletedPath) {
+			if masterFile := getMasterFile(fileMap); masterFile != nil {
+				r.enforceSoftDeletedPlacement(masterFile, softDeletedPath)
+			}
 			continue
 		}
 
