@@ -98,10 +98,11 @@ $model = 'google-vertex/gemini-3.1-pro-preview'
 $maxIterations = 50
 $iteration = 1
 while ($iteration -le $maxIterations) {
-    # Persistent ANSI banner pinned to top row of terminal
+    # Banner: set terminal tab title (survives TUI apps like opencode) + ANSI row-1 banner (visible between commands)
     $trimmed = $mainPrompt.Trim() -replace '\s+', ' '
     $short = $trimmed.Substring(0, [Math]::Min(200, $trimmed.Length)) + $(if ($trimmed.Length -gt 200) {'...'})
     $banner = "[$iteration/$maxIterations] $short"
+    Write-Host -NoNewline "`e]0;$banner`a"
     Write-Host -NoNewline "`e[s`e[H`e[K`e[7m $banner `e[0m`e[u"
 
     if ($prompt -notmatch [regex]::Escape($gitClarification)) {
