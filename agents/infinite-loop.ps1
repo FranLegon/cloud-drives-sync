@@ -1,28 +1,39 @@
 
-$focusPrompts = @{
-    0       = "Tighten command orchestration flow. Simplify repeated pre-check and setup logic between commands, reduce branching complexity, and keep exact user-visible behavior unless fixing a clear bug."
-    1       = "Harden error handling paths across Go files. Prioritize wrapping errors with context, avoiding swallowed errors, and returning actionable messages. Preserve existing behavior and public interfaces."
-    2       = "Reduce unnecessary API calls and repeated cloud lookups. Cache short-lived results within command execution when safe, and remove duplicate fetch patterns. Do not change sync semantics."
-    3       = "Update all .md files in the repository to reflect the current state of the codebase. Ensure READMEs and documentation match the actual logic and CLI flags."
-    4       = "Improve reliability of retry and backoff usage. Ensure transient network and rate-limit errors use consistent retry strategy and avoid retrying non-retriable errors."
-    5       = "Look for possible refactors to avoid repeating code, simplify complex logic, improve naming, and remove redundancy.
+$focusPrompts = @(
+    @{ Weight = 4;  Prompt = "Tighten command orchestration flow. Simplify repeated pre-check and setup logic between commands, reduce branching complexity, and keep exact user-visible behavior unless fixing a clear bug." }
+    @{ Weight = 4;  Prompt = "Harden error handling paths across Go files. Prioritize wrapping errors with context, avoiding swallowed errors, and returning actionable messages. Preserve existing behavior and public interfaces." }
+    @{ Weight = 4;  Prompt = "Reduce unnecessary API calls and repeated cloud lookups. Cache short-lived results within command execution when safe, and remove duplicate fetch patterns. Do not change sync semantics." }
+    @{ Weight = 4;  Prompt = "Update all .md files in the repository to reflect the current state of the codebase. Ensure READMEs and documentation match the actual logic and CLI flags." }
+    @{ Weight = 4;  Prompt = "Improve reliability of retry and backoff usage. Ensure transient network and rate-limit errors use consistent retry strategy and avoid retrying non-retriable errors." }
+    @{ Weight = 4;  Prompt = "Look for possible refactors to avoid repeating code, simplify complex logic, improve naming, and remove redundancy.
                Make sure not to alter the behavior of the code unless it's to fix a bug. Focus on improving code quality and maintainability.
-               If you think no refactor is necessary, don't do anything."
-    6       = "Unify duplicate path normalization and file identity logic. Consolidate repeated helpers for path cleaning, calculated_id handling, and provider naming consistency without changing outputs."
-    7       = "Strengthen database interaction safety. Focus on consistent transaction boundaries, prepared statements reuse, and clearer failure handling while preserving schema and command behavior."
-    8       = "Improve logging signal-to-noise. Keep current log style, but make critical actions and failures more diagnosable with concise context (provider, account, path, native_id) and fewer redundant lines."
-    9       = "Optimize memory and stream handling in upload/download paths. Remove avoidable buffering and ensure readers/writers are closed correctly in all branches, including error paths."
-    'Default' = @"
+               If you think no refactor is necessary, don't do anything." }
+    @{ Weight = 4;  Prompt = "Unify duplicate path normalization and file identity logic. Consolidate repeated helpers for path cleaning, calculated_id handling, and provider naming consistency without changing outputs." }
+    @{ Weight = 4;  Prompt = "Strengthen database interaction safety. Focus on consistent transaction boundaries, prepared statements reuse, and clearer failure handling while preserving schema and command behavior." }
+    @{ Weight = 4;  Prompt = "Improve logging signal-to-noise. Keep current log style, but make critical actions and failures more diagnosable with concise context (provider, account, path, native_id) and fewer redundant lines." }
+    @{ Weight = 4;  Prompt = "Optimize memory and stream handling in upload/download paths. Remove avoidable buffering and ensure readers/writers are closed correctly in all branches, including error paths." }
+    @{ Weight = 60; Prompt = @"
 Look for possible optimizations. 
 Find the single highest-impact, low-risk improvement.
 Make only focused changes that are clearly justified.
 Preserve behavior unless a bug fix is explicitly needed.
 The only change allowed for cmd\test.go is adding more logs, so focus on the other go files instead.
 Do not run tests yourself. I will build and run tests after you finish.
-"@
+"@ }
+)
+
+function Select-WeightedPrompt {
+    $totalWeight = ($focusPrompts | Measure-Object -Property Weight -Sum).Sum
+    $roll = Get-Random -Minimum 0 -Maximum $totalWeight
+    $cumulative = 0
+    foreach ($entry in $focusPrompts) {
+        $cumulative += $entry.Weight
+        if ($roll -lt $cumulative) { return $entry.Prompt }
+    }
+    return $focusPrompts[-1].Prompt
 }
 
-$mainPrompt = $focusPrompts['Default']
+$mainPrompt = Select-WeightedPrompt
 $gitClarification = "`nDo not commit or run any git state-changing (mutating) operations (you can still run status/diff/log/show if needed)."
 $prompt = $mainPrompt + $gitClarification
 
@@ -112,6 +123,22 @@ while ($iteration -le $maxIterations) {
         $prompt = "The build failed with the following output: $buildOutput. Analyze the error and fix it before proceeding." + $gitClarification
         continue
     }
+    # Commit .md file changes before test — .md files don't require a test run
+    if ($prompt -match [regex]::Escape('Update all .md files in the repository')) {
+        $mdFiles = git status --porcelain | Where-Object { $_ -match '\.md$' } | ForEach-Object { $_.Substring(3) }
+        if ($mdFiles) {
+            git add $mdFiles | Out-Null
+            git commit -m "docs: update .md files" | Out-Null
+            Write-Host "Committed updated .md files: $($mdFiles -join ', ')" -ForegroundColor Green
+        } else {
+            Write-Host "No .md files were modified to commit." -ForegroundColor Yellow
+        }
+        $iteration++
+        $mainPrompt = Select-WeightedPrompt
+        Write-Host "Next iteration focus: $mainPrompt" -ForegroundColor Cyan
+        $prompt = $mainPrompt + $gitClarification
+        continue
+    }
     .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --with-commit | Tee-Object -Variable testOutput
     $testExitCode = $LASTEXITCODE
     $testErrorLines = Get-Content test.log | Where-Object { $_ -match "ERROR|FATAL|PANIC"}
@@ -125,21 +152,8 @@ while ($iteration -le $maxIterations) {
     } else {
         Write-Host "Build and tests succeeded without errors." -ForegroundColor Green
         $iteration++
-        $modValue = $iteration % 25
-        $mainPrompt = $focusPrompts[$modValue] ?? $focusPrompts['Default']
+        $mainPrompt = Select-WeightedPrompt
         Write-Host "Next iteration focus: $mainPrompt" -ForegroundColor Cyan
-        # Commit .md file changes if the prompt includes the instruction to update .md files
-        if ($prompt -match [regex]::Escape('Update all .md files in the repository')) {
-            # commit all modified .md files into main with a commit message "docs: update .md files"
-            $mdFiles = git status --porcelain | Where-Object { $_ -match '\.md$' } | ForEach-Object { $_.Substring(3) }
-            if ($mdFiles) {
-                git add $mdFiles | Out-Null
-                git commit -m "docs: update .md files" | Out-Null
-                Write-Host "Committed updated .md files: $($mdFiles -join ', ')" -ForegroundColor Green
-            } else {
-                Write-Host "No .md files were modified to commit." -ForegroundColor Yellow
-            }    
-        }
         $prompt = $mainPrompt + $gitClarification
     }
 }
