@@ -175,10 +175,17 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		}
 
 		var foundID string
+		parentPath := currentPath[:len(currentPath)-len(part)-1]
 		for _, f := range folders {
+			siblingPath := parentPath + "/" + f.Name
+			if siblingPath == "/" {
+				siblingPath = "/" + f.Name
+			}
+			siblingCacheKey := string(provider) + ":" + accountID + ":" + strings.TrimPrefix(siblingPath, "/")
+			r.folderCache.Store(siblingCacheKey, f.ID)
+
 			if f.Name == part {
 				foundID = f.ID
-				break
 			}
 		}
 
