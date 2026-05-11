@@ -37,7 +37,8 @@ $mainPrompt = Select-WeightedPrompt
 $gitClarification = "`nDo not commit or run any git state-changing (mutating) operations (you can still run status/diff/log/show if needed).`nBefore you finish, write a single-line conventional commit message (e.g. 'fix: ...', 'refactor: ...', 'perf: ...') summarizing your changes to the file .commitmsg in the repo root."
 $prompt = $mainPrompt + $gitClarification
 
-cd 'C:\Users\francisco.legon\GitHub\IMEMINE\cloud-drives-sync'
+Set-Location 'C:\Users\francisco.legon\GitHub\IMEMINE\cloud-drives-sync'
+Get-Content .env | ForEach-Object { if ($_ -match '^(.*?)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] } }
 
 # Enforce git restrictions via opencode.json permissions (deny mutating git in all shells)
 $opencodeConfig = Get-Content opencode.json | ConvertFrom-Json
