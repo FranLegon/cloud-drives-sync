@@ -1262,7 +1262,15 @@ func sortFilesBySizeDesc(files []*model.File) {
 
 // syncMissingAndConflicts copies missing files across providers, resolves conflicts, and enforces soft-delete placement
 func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string) error {
-	providers := []model.Provider{model.ProviderGoogle, model.ProviderMicrosoft, model.ProviderTelegram}
+	// Determine active providers from config
+	activeProviders := make(map[model.Provider]bool)
+	for _, u := range r.config.Users {
+		activeProviders[u.Provider] = true
+	}
+	var providers []model.Provider
+	for p := range activeProviders {
+		providers = append(providers, p)
+	}
 
 	// Phase 1 and 2: Handle soft-deleted placements and collect copy jobs
 	var jobs []copyJob
