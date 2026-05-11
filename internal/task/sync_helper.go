@@ -114,8 +114,10 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 	path = strings.Trim(path, "/\\")
 	accountID := client.GetUserIdentifier()
 	
+	cachePrefix := string(provider) + ":" + accountID + ":"
+	
 	// Quick fast-path memory cache lookup
-	cacheKey := string(provider) + ":" + accountID + ":" + path
+	cacheKey := cachePrefix + path
 	if cachedID, ok := r.folderCache.Load(cacheKey); ok {
 		return cachedID.(string), nil
 	}
@@ -151,17 +153,22 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 			continue
 		}
 
-		currentPath += "/" + part
+		parentPath := currentPath
+		if currentPath == "" {
+			currentPath = part
+		} else {
+			currentPath += "/" + part
+		}
 		
 		// First check memory cache
-		partCacheKey := string(provider) + ":" + accountID + ":" + strings.TrimPrefix(currentPath, "/")
+		partCacheKey := cachePrefix + currentPath
 		if cachedID, ok := r.folderCache.Load(partCacheKey); ok {
 			currentID = cachedID.(string)
 			continue
 		}
 
 		// First check local DB for the folder
-		dbFolder, err := r.db.GetFolderByPathAndAccount(currentPath, provider, accountID)
+		dbFolder, err := r.db.GetFolderByPathAndAccount("/"+currentPath, provider, accountID)
 		if err == nil && dbFolder != nil && dbFolder.ID != "" {
 			currentID = dbFolder.ID
 			r.folderCache.Store(partCacheKey, currentID)
@@ -175,13 +182,12 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		}
 
 		var foundID string
-		parentPath := currentPath[:len(currentPath)-len(part)-1]
 		for _, f := range folders {
-			siblingPath := parentPath + "/" + f.Name
-			if siblingPath == "/" {
-				siblingPath = "/" + f.Name
+			siblingPath := f.Name
+			if parentPath != "" {
+				siblingPath = parentPath + "/" + f.Name
 			}
-			siblingCacheKey := string(provider) + ":" + accountID + ":" + strings.TrimPrefix(siblingPath, "/")
+			siblingCacheKey := cachePrefix + siblingPath
 			r.folderCache.Store(siblingCacheKey, f.ID)
 
 			if f.Name == part {
@@ -196,7 +202,7 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 			r.db.InsertFolder(&model.Folder{
 				ID:             foundID,
 				Name:           part,
-				Path:           currentPath,
+				Path:           "/" + currentPath,
 				Provider:       provider,
 				UserEmail:      client.GetUserEmail(),
 				UserPhone:      accountID, // fallback
@@ -216,7 +222,7 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 			currentID = folder.ID
 			
 			// Insert newly created folder into DB
-			folder.Path = currentPath
+			folder.Path = "/" + currentPath
 			folder.Provider = provider
 			folder.UserEmail = client.GetUserEmail()
 			if provider == model.ProviderTelegram {
