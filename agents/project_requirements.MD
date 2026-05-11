@@ -398,8 +398,8 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
             *   Generates `test_2.txt` (Google), `test_3.txt` (Telegram), and `test_4.txt` (Microsoft) directly on backups.
             *   Runs `sync-providers` to synchronize contents to all providers.
             *   Verifies consistency.
-        5.  **Test Case 3 (Large File - 50MB):**
-            *   Generates `test_5.txt` (50 MB) locally and uploads it to main.
+        5.  **Test Case 3 (Large File - 0.5MB):**
+            *   Generates `test_5.txt` (0.5 MB) locally and uploads it to main.
             *   Runs `sync-providers` (streaming upload).
             *   Verifies consistency.
         6.  **Test Case 4 (Folder & File Movements):**
@@ -411,23 +411,29 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
             *   Moves `test_5.txt` and others to `sync-cloud-drives-aux/soft-deleted`.
             *   Runs `sync-providers`.
             *   Verifies files are marked as soft-deleted everywhere (gone from active sync).
-        8.  **Test Case 7 (Very Large File - 3GB):**
-            *   Generates/streams `test_6.txt` (3 GB) to main (simulated via LimitReader).
-            *   Runs `sync-providers` to test fragmentation logic (Telegram) and large file handling (OneDrive/Google).
-            *   Verifies consistency.
-        9.  **Test Case 8 (Restore from Soft-Deleted):**
+        8.  **Test Case 6 (Nested Folders):**
+            *   Tests the creation and synchronization of nested folder structures.
+        9.  **Test Case 7 (Restoring from Soft-Deleted):**
             *   Moves `test_5.txt` from `soft-deleted` back to root folder on Main account.
             *   Runs `sync-providers`.
             *   Verifies file is restored and active on all providers.
-        10. **Test Case 9 (Restore Fragmented File):**
-            *   Hard deletes `test_6.txt` (3GB) from Google (Main) and Microsoft (Backup) directly.
-             *  Deletes corresponding replicas from local DB to simulate data loss detection.
-            *   Runs `sync-providers`.
-            *   Verifies that the file is restored to Google and Microsoft using the fragments stored in Telegram.
-        11. **Test Case 10 (Hard Deletion):**
+        10. **Test Case 8 (Hard Deletion):**
             *   Deletes all files from `sync-cloud-drives-aux/soft-deleted`.
             *   Runs `sync-providers`.
             *   Verifies files are permanently removed from DB and Cloud.
+        11. **Test Case 9 (Quota Similarity Check):**
+            *   Verifies that total space used matches the aggregated quota logic.
+        12. **Test Case 10 (Very Big File - 3MB):**
+            *   Generates/streams `test_6.txt` (3 MB) to main (simulated via LimitReader).
+            *   Runs `sync-providers` to test fragmentation logic (Telegram) and large file handling (OneDrive/Google).
+            *   Verifies consistency.
+        13. **Test Case 11 (Restoring Fragmented File):**
+            *   Hard deletes `test_6.txt` (3MB) from Google (Main) and Microsoft (Backup) directly.
+            *   Deletes corresponding replicas from local DB to simulate data loss detection.
+            *   Runs `sync-providers`.
+            *   Verifies that the file is restored to Google and Microsoft using the fragments stored in Telegram.
+        14. **Test Case 12 (Ownership Transfer API Test):**
+            *   Verifies the ownership transfer behavior across accounts directly via API.
 
 *   **`help`**
     *   Help output is provided by Cobra's built-in command/help handling and lists available commands, their purpose, and usage.
