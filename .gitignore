@@ -37,6 +37,7 @@ metadata.db-wal
 # Temporary files
 install_deps.sh
 *.bak
+.commitmsg
 
 # Environment variables file
 .env

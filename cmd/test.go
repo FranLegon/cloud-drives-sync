@@ -30,7 +30,7 @@ var testSafe bool
 var testForce bool
 var testStopOnError bool
 var testCase int
-var testWithCommit bool
+var testWithCommit string
 var test10Hash string
 
 var testCmd = &cobra.Command{
@@ -45,7 +45,8 @@ func init() {
 	testCmd.Flags().BoolVar(&testForce, "force", false, "Skip confirmation prompt")
 	testCmd.Flags().BoolVarP(&testStopOnError, "stop-on-error", "s", false, "Stop test execution immediately if an error occurs")
 	testCmd.Flags().IntVarP(&testCase, "test-case", "t", 0, "Run specific test case and its dependencies (0 = all)")
-	testCmd.Flags().BoolVarP(&testWithCommit, "with-commit", "c", false, "Commit .go files to test branch and merge on success")
+	testCmd.Flags().StringVarP(&testWithCommit, "with-commit", "c", "", "Commit .go files to test branch and merge on success (optional: commit message)")
+	testCmd.Flags().Lookup("with-commit").NoOptDefVal = "__auto__"
 	rootCmd.AddCommand(testCmd)
 }
 
@@ -100,7 +101,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 
 	// Git cleanup: return to main, merge if passed, pop stash
 	defer func() {
-		if !testWithCommit {
+		if testWithCommit == "" {
 			return
 		}
 		if gitBranchCreated {
@@ -165,7 +166,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	logger.Info("Starting Test Command...")
 
 	// --with-commit: git setup
-	if testWithCommit {
+	if testWithCommit != "" {
 		// Pre-check: verify remote origin and current branch
 		originURL, err := runGit("remote", "get-url", "origin")
 		if err != nil {
@@ -241,7 +242,14 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 			}
 
 			// Commit
-			commitMsg := fmt.Sprintf("Test Run: %s", time.Now().Format("02Jan2006 15:04:05"))
+			commitMsg := strings.TrimSpace(testWithCommit)
+			if commitMsg == "" || commitMsg == "__auto__" {
+				if stat, err := runGit("diff", "--cached", "--stat"); err == nil && strings.TrimSpace(stat) != "" {
+					commitMsg = stat
+				} else {
+					commitMsg = fmt.Sprintf("Test Run: %s", time.Now().Format("02Jan2006 15:04:05"))
+				}
+			}
 			if _, err := runGit("commit", "-m", commitMsg); err != nil {
 				return fmt.Errorf("--with-commit: failed to commit: %w", err)
 			}

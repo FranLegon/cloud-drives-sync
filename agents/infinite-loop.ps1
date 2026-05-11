@@ -34,7 +34,7 @@ function Select-WeightedPrompt {
 }
 
 $mainPrompt = Select-WeightedPrompt
-$gitClarification = "`nDo not commit or run any git state-changing (mutating) operations (you can still run status/diff/log/show if needed)."
+$gitClarification = "`nDo not commit or run any git state-changing (mutating) operations (you can still run status/diff/log/show if needed).`nBefore you finish, write a single-line conventional commit message (e.g. 'fix: ...', 'refactor: ...', 'perf: ...') summarizing your changes to the file .commitmsg in the repo root."
 $prompt = $mainPrompt + $gitClarification
 
 cd 'C:\Users\francisco.legon\GitHub\IMEMINE\cloud-drives-sync'
@@ -119,6 +119,7 @@ while ($iteration -le $maxIterations) {
         Write-Host "OpenCode execution failed. Checking out to main and resetting to discard any changes..." -ForegroundColor Red
         git checkout main --force | Out-Null
         git clean -fd | Out-Null
+        Remove-Item .commitmsg -ErrorAction SilentlyContinue
         if (git stash list) { git stash pop | Out-Null }
         $prompt = $mainPrompt + $gitClarification
         continue
@@ -146,7 +147,14 @@ while ($iteration -le $maxIterations) {
         $prompt = $mainPrompt + $gitClarification
         continue
     }
-    .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --with-commit | Tee-Object -Variable testOutput
+    # Read AI-generated commit message if available
+    $commitMsg = if (Test-Path .commitmsg) { (Get-Content .commitmsg -Raw).Trim() } else { "" }
+    Remove-Item .commitmsg -ErrorAction SilentlyContinue
+    if ($commitMsg) {
+        .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --with-commit $commitMsg | Tee-Object -Variable testOutput
+    } else {
+        .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --with-commit | Tee-Object -Variable testOutput
+    }
     $testExitCode = $LASTEXITCODE
     $testErrorLines = Get-Content test.log | Where-Object { $_ -match "ERROR|FATAL|PANIC"}
     if ($testExitCode -ne 0) { 
