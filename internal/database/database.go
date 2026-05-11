@@ -636,7 +636,7 @@ func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error)
 	}
 
 	// Load fragments for fragmented replicas in batch
-	fragmented := make([]*model.Replica, 0)
+	fragmented := make([]*model.Replica, 0, len(allReplicas))
 	for _, r := range allReplicas {
 		if r.Fragmented {
 			fragmented = append(fragmented, r)
@@ -701,7 +701,7 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 	}
 
 	// Load fragments for fragmented replicas
-	fragmented := make([]*model.Replica, 0)
+	fragmented := make([]*model.Replica, 0, len(replicas))
 	for _, r := range replicas {
 		if r.Fragmented {
 			fragmented = append(fragmented, r)
@@ -897,7 +897,7 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	}
 
 	// Load fragments for fragmented replicas in batch
-	fragmented := make([]*model.Replica, 0)
+	fragmented := make([]*model.Replica, 0, len(allReplicas))
 	for _, r := range allReplicas {
 		if r.Fragmented {
 			fragmented = append(fragmented, r)
