@@ -37,7 +37,12 @@ git stash && git checkout main~1 && go build -o cloud-drives-sync.exe . && Write
 
 # OpenCode infite loop:
 ```powershell
-$mainPrompt = @"
+$focusPrompts = @{
+    3       = "Update all .md files in the repository to reflect the current state of the codebase. Ensure READMEs and documentation match the actual logic and CLI flags."
+    5       = "Look for possible refactors to avoid repeating code, simplify complex logic, improve naming, and remove redundancy.
+               Make sure not to alter the behavior of the code unless it's to fix a bug. Focus on improving code quality and maintainability.
+               If you think no refactor is necessary, don't do anything."
+    'Default' = @"
 Look for possible optimizations. 
 Find the single highest-impact, low-risk improvement.
 Make only focused changes that are clearly justified.
@@ -45,6 +50,9 @@ Preserve behavior unless a bug fix is explicitly needed.
 The only change allowed for cmd\test.go is adding more logs, so focus on the other go files instead.
 Do not run tests yourself. I will build and run tests after you finish.
 "@
+}
+
+$mainPrompt = $focusPrompts['Default']
 $gitClarification = "`nDo not commit or run any git state-changing (mutating) operations (you can still run status/diff/log/show if needed)."
 $prompt = $mainPrompt + $gitClarification
 
@@ -106,7 +114,7 @@ $opencodeConfig | ConvertTo-Json -Depth 10 | Set-Content opencode.json
 
 $model = 'google-vertex/gemini-3.1-pro-preview'
 
-$maxIterations = 10
+$maxIterations = 11
 $iteration = 1
 while ($iteration -le $maxIterations) {
     if ($prompt -notmatch [regex]::Escape($gitClarification)) {
@@ -145,8 +153,11 @@ while ($iteration -le $maxIterations) {
         $prompt = "The tests passed (changes already committed) but the following errors were found in the logs:`n$($testErrorLines -join '; ').`nAnalyze these errors and fix them before proceeding." + $gitClarification
     } else {
         Write-Host "Build and tests succeeded without errors." -ForegroundColor Green
-        $prompt = $mainPrompt + $gitClarification
         $iteration++
+        $modValue = $iteration % 10
+        $mainPrompt = $focusPrompts[$modValue] ?? $focusPrompts['Default']
+        Write-Host "Next iteration focus: $mainPrompt" -ForegroundColor Cyan
+        $prompt = $mainPrompt + $gitClarification
     }
 }
 ```
