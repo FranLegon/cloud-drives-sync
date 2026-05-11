@@ -20,7 +20,7 @@ const (
 	MetadataFileName  = "metadata.db"
 )
 
-func createClient(user *model.User, cfg *model.Config) (api.CloudClient, error) {
+func createClient(user *model.User, cfg *model.Config, runPreFlight bool) (api.CloudClient, error) {
 	// Re-use the same factory logic as Runner.GetOrCreateClient but without caching,
 	// since this is called during startup before a Runner is available.
 	var c api.CloudClient
@@ -43,8 +43,10 @@ func createClient(user *model.User, cfg *model.Config) (api.CloudClient, error) 
 		return nil, err
 	}
 
-	if err := c.PreFlightCheck(); err != nil {
-		return nil, fmt.Errorf("preflight check failed: %w", err)
+	if runPreFlight {
+		if err := c.PreFlightCheck(); err != nil {
+			return nil, fmt.Errorf("preflight check failed: %w", err)
+		}
 	}
 
 	return c, nil
@@ -61,7 +63,7 @@ func DownloadMetadataDB(cfg *model.Config, dbPath string) error {
 	logger.Info("Local metadata.db missing. Attempting to download from cloud providers...")
 
 	tryDownload := func(user *model.User) error {
-		client, err := createClient(user, cfg)
+		client, err := createClient(user, cfg, true)
 		if err != nil {
 			return err
 		}
@@ -189,7 +191,7 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 	logger.Info("Uploading metadata.db to cloud providers...")
 
 	uploadToUser := func(user *model.User) error {
-		client, err := createClient(user, cfg)
+		client, err := createClient(user, cfg, true)
 		if err != nil {
 			return err
 		}

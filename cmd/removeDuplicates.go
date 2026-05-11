@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
+	"github.com/FranLegon/cloud-drives-sync/internal/model"
 	"github.com/FranLegon/cloud-drives-sync/internal/task"
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
@@ -64,6 +65,38 @@ func prepareDuplicatesCheck(runner *task.Runner, updateMetadata bool) ([]string,
 	return ids, nil
 }
 
+// deleteDuplicateFile deletes all replicas of a file and removes it from the database
+func deleteDuplicateFile(runner *task.Runner, file *model.File, keepPath string) bool {
+	if safeMode {
+		if keepPath != "" {
+			logger.DryRun("Would delete duplicate: %s (would keep %s)", file.Path, keepPath)
+		} else {
+			logger.DryRun("Would delete file: %s (ID: %s)", file.Path, file.ID)
+		}
+		return true
+	}
+
+	for _, replica := range file.Replicas {
+		client, err := getClientForReplica(runner, replica)
+		if err != nil {
+			logger.ErrorTagged([]string{string(replica.Provider)}, "Failed to get client: %v", err)
+			continue
+		}
+
+		if err := client.DeleteFile(replica.NativeID); err != nil {
+			logger.ErrorTagged([]string{string(replica.Provider)}, "Failed to delete file: %v", err)
+		} else {
+			if keepPath != "" {
+				logger.InfoTagged([]string{string(replica.Provider)}, "Deleted duplicate replica: %s (kept %s)", file.Path, keepPath)
+			} else {
+				logger.InfoTagged([]string{string(replica.Provider)}, "Deleted replica: %s", file.Path)
+			}
+		}
+	}
+	db.DeleteFile(file.ID)
+	return true
+}
+
 // RemoveDuplicatesAction runs interactive duplicate removal
 func RemoveDuplicatesAction(runner *task.Runner, updateMetadata bool) error {
 	ids, err := prepareDuplicatesCheck(runner, updateMetadata)
@@ -117,28 +150,7 @@ func RemoveDuplicatesAction(runner *task.Runner, updateMetadata bool) error {
 
 			// Delete the selected file
 			file := files[idx]
-			deleted := false
-			if !safeMode {
-				// Delete all replicas of this file
-				for _, replica := range file.Replicas {
-					client, err := getClientForReplica(runner, replica)
-					if err != nil {
-						logger.ErrorTagged([]string{string(replica.Provider)}, "Failed to get client: %v", err)
-						continue
-					}
-
-					if err := client.DeleteFile(replica.NativeID); err != nil {
-						logger.ErrorTagged([]string{string(replica.Provider)}, "Failed to delete file: %v", err)
-					} else {
-						logger.InfoTagged([]string{string(replica.Provider)}, "Deleted replica: %s", file.Path)
-					}
-				}
-				db.DeleteFile(file.ID)
-				deleted = true
-			} else {
-				logger.DryRun("Would delete file: %s (ID: %s)", file.Path, file.ID)
-				deleted = true
-			}
+			deleted := deleteDuplicateFile(runner, file, "")
 
 			if deleted {
 				// Remove from files slice
@@ -191,25 +203,7 @@ func RemoveDuplicatesUnsafeAction(runner *task.Runner, updateMetadata bool) erro
 					continue // Skip the oldest file
 				}
 
-				if !safeMode {
-					// Delete all replicas of this file
-					for _, replica := range file.Replicas {
-						client, err := getClientForReplica(runner, replica)
-						if err != nil {
-							logger.ErrorTagged([]string{string(replica.Provider)}, "Failed to get client: %v", err)
-							continue
-						}
-
-						if err := client.DeleteFile(replica.NativeID); err != nil {
-							logger.ErrorTagged([]string{string(replica.Provider)}, "Failed to delete file: %v", err)
-						} else {
-							logger.InfoTagged([]string{string(replica.Provider)}, "Deleted duplicate replica: %s (kept %s)", file.Path, oldestFile.Path)
-						}
-					}
-					db.DeleteFile(file.ID)
-					totalDeleted++
-				} else {
-					logger.DryRun("Would delete duplicate: %s (would keep %s)", file.Path, oldestFile.Path)
+				if deleteDuplicateFile(runner, file, oldestFile.Path) {
 					totalDeleted++
 				}
 			}

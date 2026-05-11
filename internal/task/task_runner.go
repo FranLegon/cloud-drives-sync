@@ -10,12 +10,9 @@ import (
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
-	"github.com/FranLegon/cloud-drives-sync/internal/auth"
 	"github.com/FranLegon/cloud-drives-sync/internal/config"
 	"github.com/FranLegon/cloud-drives-sync/internal/database"
-	"github.com/FranLegon/cloud-drives-sync/internal/google"
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
-	"github.com/FranLegon/cloud-drives-sync/internal/microsoft"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
 	"github.com/FranLegon/cloud-drives-sync/internal/telegram"
 )
@@ -47,7 +44,7 @@ type Runner struct {
 	msShareFailureCacheMu sync.RWMutex
 	accountQuotas         map[string]*accountQuota
 	accountQuotasMu       sync.Mutex
-	folderCache           sync.Map        // Cache of resolved folder IDs (path+account -> ID)
+	folderCache           sync.Map // Cache of resolved folder IDs (path+account -> ID)
 }
 
 // NewRunner creates a new task runner
@@ -95,22 +92,7 @@ func (r *Runner) GetOrCreateClient(user *model.User) (api.CloudClient, error) {
 		return client, nil
 	}
 
-	var client api.CloudClient
-	var err error
-
-	switch user.Provider {
-	case model.ProviderGoogle:
-		config := auth.GetGoogleOAuthConfig(r.config.GoogleClient.ID, r.config.GoogleClient.Secret)
-		client, err = google.NewClient(user, config)
-	case model.ProviderMicrosoft:
-		config := auth.GetMicrosoftOAuthConfig(r.config.MicrosoftClient.ID, r.config.MicrosoftClient.Secret)
-		client, err = microsoft.NewClient(user, config)
-	case model.ProviderTelegram:
-		client, err = telegram.NewClient(user, r.config.TelegramClient.APIID, r.config.TelegramClient.APIHash)
-	default:
-		return nil, fmt.Errorf("unsupported provider: %s", user.Provider)
-	}
-
+	client, err := createClient(user, r.config, false)
 	if err != nil {
 		return nil, err
 	}
@@ -642,27 +624,14 @@ func (r *Runner) FreeMain() (bool, error) {
 	filesMoved := false
 
 	// Find main account (Google)
-	var mainUser *model.User
-	for i := range r.config.Users {
-		if r.config.Users[i].IsMain && r.config.Users[i].Provider == model.ProviderGoogle {
-			mainUser = &r.config.Users[i]
-			break
-		}
-	}
-
+	mainUser := config.GetMainAccount(r.config, model.ProviderGoogle)
 	if mainUser == nil {
 		logger.Warning("No Google main account found")
 		return filesMoved, nil
 	}
 
 	// Find backup accounts for Google
-	var backupUsers []model.User
-	for _, user := range r.config.Users {
-		if !user.IsMain && user.Provider == model.ProviderGoogle {
-			backupUsers = append(backupUsers, user)
-		}
-	}
-
+	backupUsers := config.GetBackupAccounts(r.config, model.ProviderGoogle)
 	if len(backupUsers) == 0 {
 		logger.Warning("No Google backup accounts found")
 		return filesMoved, nil
@@ -759,81 +728,81 @@ func (r *Runner) FreeMain() (bool, error) {
 		}
 
 		// Move file
-			// Find the main replica for this file to get the NativeID
-			var mainReplica *model.Replica
-			for _, replica := range file.Replicas {
-				if replica.AccountID == mainUser.Email && replica.Owner == mainUser.Email {
-					mainReplica = replica
-					break
-				}
+		// Find the main replica for this file to get the NativeID
+		var mainReplica *model.Replica
+		for _, replica := range file.Replicas {
+			if replica.AccountID == mainUser.Email && replica.Owner == mainUser.Email {
+				mainReplica = replica
+				break
 			}
+		}
 
-			if mainReplica == nil {
-				logger.Warning("Could not find main replica for file %s", file.Name)
-				continue
-			}
+		if mainReplica == nil {
+			logger.Warning("Could not find main replica for file %s", file.Name)
+			continue
+		}
 
-			if !r.safeMode {
-				logger.InfoTagged([]string{"Google", mainUser.Email}, "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
-				err := mainClient.TransferOwnership(mainReplica.NativeID, target.User.Email)
+		if !r.safeMode {
+			logger.InfoTagged([]string{"Google", mainUser.Email}, "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+			err := mainClient.TransferOwnership(mainReplica.NativeID, target.User.Email)
 
-				// Handle pending transfer flow
-				if err == api.ErrOwnershipTransferPending {
-					logger.InfoTagged([]string{"Google", mainUser.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
-					if acceptErr := target.Client.AcceptOwnership(mainReplica.NativeID); acceptErr != nil {
-						logger.Error("Failed to accept ownership: %v", acceptErr)
-						err = fmt.Errorf("acceptance failed: %w", acceptErr)
+			// Handle pending transfer flow
+			if err == api.ErrOwnershipTransferPending {
+				logger.InfoTagged([]string{"Google", mainUser.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
+				if acceptErr := target.Client.AcceptOwnership(mainReplica.NativeID); acceptErr != nil {
+					logger.Error("Failed to accept ownership: %v", acceptErr)
+					err = fmt.Errorf("acceptance failed: %w", acceptErr)
+				} else {
+					err = nil // Clear error as acceptance succeeded
+
+					// Move file to target's sync folder (it's currently in root after pending owner flow)
+					dir := filepath.Dir(file.Path)
+					dir = strings.ReplaceAll(dir, "\\", "/")
+					if dir == "." || dir == "" {
+						dir = "/"
+					}
+					targetFolderID, folderErr := r.ensureFolderStructure(target.Client, dir, target.User.Provider)
+					if folderErr != nil {
+						logger.Warning("Failed to resolve target sync folder for %s: %v", file.Name, folderErr)
 					} else {
-						err = nil // Clear error as acceptance succeeded
-
-						// Move file to target's sync folder (it's currently in root after pending owner flow)
-						dir := filepath.Dir(file.Path)
-						dir = strings.ReplaceAll(dir, "\\", "/")
-						if dir == "." || dir == "" {
-							dir = "/"
-						}
-						targetFolderID, folderErr := r.ensureFolderStructure(target.Client, dir, target.User.Provider)
-						if folderErr != nil {
-							logger.Warning("Failed to resolve target sync folder for %s: %v", file.Name, folderErr)
+						if mvErr := target.Client.MoveFile(mainReplica.NativeID, targetFolderID); mvErr != nil {
+							logger.Warning("Failed to move transferred file %s to sync folder: %v", file.Name, mvErr)
 						} else {
-							if mvErr := target.Client.MoveFile(mainReplica.NativeID, targetFolderID); mvErr != nil {
-								logger.Warning("Failed to move transferred file %s to sync folder: %v", file.Name, mvErr)
-							} else {
-								logger.InfoTagged([]string{"Google", target.User.Email}, "Moved %s to sync folder", file.Name)
-							}
+							logger.InfoTagged([]string{"Google", target.User.Email}, "Moved %s to sync folder", file.Name)
 						}
 					}
 				}
+			}
 
-				fallbackUsed := false
+			fallbackUsed := false
 
-				if err != nil {
-					// Check for consent error Consumer to Consumer transfer restriction
-					if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") || strings.Contains(err.Error(), "transferOwnership parameter must be enabled") {
-						fallbackUsed = true
-						if fallbackErr := r.fallbackCopyDelete(mainClient, target, file, mainReplica.NativeID, mainUser.Email, mainReplica); fallbackErr != nil {
-							logger.Error("Fallback transfer failed: %v", fallbackErr)
-							continue
-						}
-						filesMoved = true
-						err = nil // Cleared
-					} else {
-						logger.Error("Failed to transfer ownership: %v", err)
+			if err != nil {
+				// Check for consent error Consumer to Consumer transfer restriction
+				if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") || strings.Contains(err.Error(), "transferOwnership parameter must be enabled") {
+					fallbackUsed = true
+					if fallbackErr := r.fallbackCopyDelete(mainClient, target, file, mainReplica.NativeID, mainUser.Email, mainReplica); fallbackErr != nil {
+						logger.Error("Fallback transfer failed: %v", fallbackErr)
 						continue
 					}
-				}
-
-				if err == nil && !fallbackUsed {
-					// Update database to reflect ownership change for standard transfer
-					if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainUser.Email, mainReplica.NativeID, target.User.Email); dbErr != nil {
-						logger.Warning("Failed to update local DB for %s: %v", file.Name, dbErr)
-					}
 					filesMoved = true
+					err = nil // Cleared
+				} else {
+					logger.Error("Failed to transfer ownership: %v", err)
+					continue
 				}
-			} else {
-				logger.DryRunTagged([]string{"Google", mainUser.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
-				filesMoved = true // simulate move in dry run
 			}
+
+			if err == nil && !fallbackUsed {
+				// Update database to reflect ownership change for standard transfer
+				if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainUser.Email, mainReplica.NativeID, target.User.Email); dbErr != nil {
+					logger.Warning("Failed to update local DB for %s: %v", file.Name, dbErr)
+				}
+				filesMoved = true
+			}
+		} else {
+			logger.DryRunTagged([]string{"Google", mainUser.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+			filesMoved = true // simulate move in dry run
+		}
 
 		// Update local state
 		if filesMoved {
@@ -1714,7 +1683,7 @@ func (r *Runner) GetProviderQuotasFromAPI() ([]*model.ProviderQuota, error) {
 				} else {
 					pq.Total += q.Total
 				}
-				
+
 				if pq.Free == -1 {
 					// Already unlimited
 				} else if q.Total <= 0 {
@@ -1799,7 +1768,7 @@ func (r *Runner) ProcessHardDeletes() error {
 			calcIDs = append(calcIDs, file.CalculatedID)
 		}
 	}
-	
+
 	activeGoogleMap, err := r.db.GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calcIDs)
 	if err != nil {
 		logger.Warning("Failed to bulk fetch active Google replicas, falling back to individual queries: %v", err)
@@ -1935,21 +1904,11 @@ func (r *Runner) ProcessHardDeletes() error {
 func (r *Runner) getUser(provider model.Provider, accountID string) *model.User {
 	for i := range r.config.Users {
 		u := &r.config.Users[i]
-		// Check provider and ID (Email or Phone)
-		match := false
 		if u.Provider == provider {
-			if provider == model.ProviderTelegram {
-				if u.Phone == accountID {
-					match = true
-				}
-			} else {
-				if u.Email == accountID {
-					match = true
-				}
+			if (provider == model.ProviderTelegram && u.Phone == accountID) ||
+				(provider != model.ProviderTelegram && u.Email == accountID) {
+				return u
 			}
-		}
-		if match {
-			return u
 		}
 	}
 	return nil
@@ -2010,11 +1969,8 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 					}
 
 					// Find the user for this replica
-					for i := range r.config.Users {
-						if r.config.Users[i].Provider == provider && (r.config.Users[i].Email == targetReplica.AccountID || r.config.Users[i].Phone == targetReplica.AccountID) {
-							client, err = r.GetOrCreateClient(&r.config.Users[i])
-							break
-						}
+					if user := r.getUser(provider, targetReplica.AccountID); user != nil {
+						client, err = r.GetOrCreateClient(user)
 					}
 
 					if client == nil || err != nil {
