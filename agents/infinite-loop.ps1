@@ -95,12 +95,12 @@ $opencodeConfig | ConvertTo-Json -Depth 10 | Set-Content opencode.json
 
 $model = 'google-vertex/gemini-3.1-pro-preview'
 
-$maxIterations = 11
+$maxIterations = 50
 $iteration = 1
 while ($iteration -le $maxIterations) {
     # Persistent progress banner showing current focus (pinned at top of terminal)
     $trimmed = $mainPrompt.Trim() -replace '\s+', ' '
-    $short = $trimmed.Substring(0, [Math]::Min(150, $trimmed.Length)) + $(if ($trimmed.Length -gt 150) {'...'})
+    $short = $trimmed.Substring(0, [Math]::Min(250, $trimmed.Length)) + $(if ($trimmed.Length -gt 250) {'...'})
     Write-Progress -Activity "[$iteration/$maxIterations] $short" -Status "Running..." -PercentComplete (($iteration / $maxIterations) * 100)
 
     if ($prompt -notmatch [regex]::Escape($gitClarification)) {
