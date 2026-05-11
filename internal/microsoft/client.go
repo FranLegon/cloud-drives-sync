@@ -44,6 +44,7 @@ type Client struct {
 	driveID       string
 	folderCache   map[string][]*model.Folder
 	folderCacheMu sync.Mutex
+	httpClient    *http.Client
 }
 
 // NewClient creates a new Microsoft OneDrive client
@@ -66,6 +67,7 @@ func NewClient(user *model.User, config *oauth2.Config) (*Client, error) {
 		config:      config,
 		tokenSource: tokenSource,
 		folderCache: make(map[string][]*model.Folder),
+		httpClient:  api.NewRetryClient(nil),
 	}
 
 	if err := client.initializeDrive(); err != nil {
@@ -297,7 +299,7 @@ func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
 		return fmt.Errorf("failed to create download request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("microsoft download request failed: %w", err)
 	}
@@ -379,7 +381,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 			end := offset + int64(n) - 1
 			req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := c.httpClient.Do(req)
 			if err != nil {
 				uploadErr = fmt.Errorf("failed to upload chunk: %w", err)
 				continue
@@ -510,7 +512,7 @@ func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
 			end := offset + int64(n) - 1
 			req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := c.httpClient.Do(req)
 			if err != nil {
 				uploadErr = fmt.Errorf("failed to upload chunk: %w", err)
 				continue

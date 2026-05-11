@@ -47,7 +47,9 @@ func NewClient(user *model.User, config *oauth2.Config) (*Client, error) {
 	}
 
 	ctx := context.Background()
-	service, err := drive.NewService(ctx, option.WithTokenSource(tokenSource))
+	oauthClient := oauth2.NewClient(ctx, tokenSource)
+	retryClient := api.NewRetryClient(oauthClient)
+	service, err := drive.NewService(ctx, option.WithHTTPClient(retryClient))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create drive service: %w", err)
 	}

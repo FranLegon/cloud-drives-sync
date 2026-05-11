@@ -43,6 +43,14 @@ type User struct {
 	SessionData  string   `json:"session_data,omitempty"`
 }
 
+// GetAccountID returns the primary identifier for the user (Phone for Telegram, Email otherwise)
+func (u *User) GetAccountID() string {
+	if u.Provider == ProviderTelegram {
+		return u.Phone
+	}
+	return u.Email
+}
+
 // Config represents the application configuration
 type Config struct {
 	GoogleClient    GoogleClient    `json:"google_client"`

@@ -109,10 +109,12 @@ func (c *Client) updateMessageCaption(msgID int, caption string) error {
 		AccessHash: c.accessHash,
 	}
 
-	_, err := c.client.API().MessagesEditMessage(c.ctx, &tg.MessagesEditMessageRequest{
-		Peer:    inputPeer,
-		ID:      msgID,
-		Message: caption,
+	_, err := api.WithRetryT(func() (tg.UpdatesClass, error) {
+		return c.client.API().MessagesEditMessage(c.ctx, &tg.MessagesEditMessageRequest{
+			Peer:    inputPeer,
+			ID:      msgID,
+			Message: caption,
+		})
 	})
 	return err
 }
@@ -250,9 +252,11 @@ func (c *Client) ensureSyncChannel() error {
 	// we list dialogs.
 
 	// Using a limit of 100 for now.
-	dialogs, err := c.client.API().MessagesGetDialogs(c.ctx, &tg.MessagesGetDialogsRequest{
-		OffsetPeer: &tg.InputPeerEmpty{},
-		Limit:      100,
+	dialogs, err := api.WithRetryT(func() (tg.MessagesDialogsClass, error) {
+		return c.client.API().MessagesGetDialogs(c.ctx, &tg.MessagesGetDialogsRequest{
+			OffsetPeer: &tg.InputPeerEmpty{},
+			Limit:      100,
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("failed to list dialogs: %w", err)
@@ -300,10 +304,12 @@ func (c *Client) ensureSyncChannel() error {
 	logger.InfoTagged([]string{"Telegram", c.user.Phone}, "Creating new sync channel: %s", syncChannelName)
 
 	// Create channel
-	updates, err := c.client.API().ChannelsCreateChannel(c.ctx, &tg.ChannelsCreateChannelRequest{
-		Title:     syncChannelName,
-		Broadcast: true, // Channel, not supergroup
-		About:     "Cloud Drives Sync Storage",
+	updates, err := api.WithRetryT(func() (tg.UpdatesClass, error) {
+		return c.client.API().ChannelsCreateChannel(c.ctx, &tg.ChannelsCreateChannelRequest{
+			Title:     syncChannelName,
+			Broadcast: true, // Channel, not supergroup
+			About:     "Cloud Drives Sync Storage",
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create channel: %w", err)
@@ -392,13 +398,15 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 	limit := 100
 
 	for {
-		history, err := c.client.API().MessagesGetHistory(c.ctx, &tg.MessagesGetHistoryRequest{
-			Peer: &tg.InputPeerChannel{
-				ChannelID:  c.channelID,
-				AccessHash: c.accessHash,
-			},
-			OffsetID: offsetID,
-			Limit:    limit,
+		history, err := api.WithRetryT(func() (tg.MessagesMessagesClass, error) {
+			return c.client.API().MessagesGetHistory(c.ctx, &tg.MessagesGetHistoryRequest{
+				Peer: &tg.InputPeerChannel{
+					ChannelID:  c.channelID,
+					AccessHash: c.accessHash,
+				},
+				OffsetID: offsetID,
+				Limit:    limit,
+			})
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to get history: %w", err)
@@ -760,11 +768,13 @@ func (c *Client) uploadPart(folderID, name string, reader io.Reader, replica *mo
 		randomID = time.Now().UnixNano() // Fallback
 	}
 
-	updates, err := c.client.API().MessagesSendMedia(c.ctx, &tg.MessagesSendMediaRequest{
-		Peer:     inputChannel,
-		Media:    inputMedia,
-		Message:  string(caption),
-		RandomID: randomID,
+	updates, err := api.WithRetryT(func() (tg.UpdatesClass, error) {
+		return c.client.API().MessagesSendMedia(c.ctx, &tg.MessagesSendMediaRequest{
+			Peer:     inputChannel,
+			Media:    inputMedia,
+			Message:  string(caption),
+			RandomID: randomID,
+		})
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to send message: %w", err)
@@ -845,12 +855,14 @@ func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
 	}
 
 	// Get message to find the document
-	msgs, err := c.client.API().ChannelsGetMessages(c.ctx, &tg.ChannelsGetMessagesRequest{
-		Channel: &tg.InputChannel{
-			ChannelID:  c.channelID,
-			AccessHash: c.accessHash,
-		},
-		ID: []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
+	msgs, err := api.WithRetryT(func() (tg.MessagesMessagesClass, error) {
+		return c.client.API().ChannelsGetMessages(c.ctx, &tg.ChannelsGetMessagesRequest{
+			Channel: &tg.InputChannel{
+				ChannelID:  c.channelID,
+				AccessHash: c.accessHash,
+			},
+			ID: []tg.InputMessageClass{&tg.InputMessageID{ID: msgID}},
+		})
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get message: %w", err)
@@ -931,12 +943,14 @@ func (c *Client) DeleteFile(fileID string) error {
 		return fmt.Errorf("invalid file ID: %w", err)
 	}
 
-	_, err = c.client.API().ChannelsDeleteMessages(c.ctx, &tg.ChannelsDeleteMessagesRequest{
-		Channel: &tg.InputChannel{
-			ChannelID:  c.channelID,
-			AccessHash: c.accessHash,
-		},
-		ID: []int{msgID},
+	_, err = api.WithRetryT(func() (*tg.MessagesAffectedMessages, error) {
+		return c.client.API().ChannelsDeleteMessages(c.ctx, &tg.ChannelsDeleteMessagesRequest{
+			Channel: &tg.InputChannel{
+				ChannelID:  c.channelID,
+				AccessHash: c.accessHash,
+			},
+			ID: []int{msgID},
+		})
 	})
 
 	return err
@@ -986,9 +1000,11 @@ func (c *Client) DeleteAllMessages() error {
 
 	for {
 		// Get history
-		res, err := c.client.API().MessagesGetHistory(c.ctx, &tg.MessagesGetHistoryRequest{
-			Peer:  inputChannel,
-			Limit: 100,
+		res, err := api.WithRetryT(func() (tg.MessagesMessagesClass, error) {
+			return c.client.API().MessagesGetHistory(c.ctx, &tg.MessagesGetHistoryRequest{
+				Peer:  inputChannel,
+				Limit: 100,
+			})
 		})
 		if err != nil {
 			return fmt.Errorf("failed to get history: %w", err)
@@ -1027,9 +1043,11 @@ func (c *Client) DeleteAllMessages() error {
 		}
 
 		if len(ids) > 0 {
-			_, err = c.client.API().ChannelsDeleteMessages(c.ctx, &tg.ChannelsDeleteMessagesRequest{
-				Channel: &tg.InputChannel{ChannelID: c.channelID, AccessHash: c.accessHash},
-				ID:      ids,
+			_, err = api.WithRetryT(func() (*tg.MessagesAffectedMessages, error) {
+				return c.client.API().ChannelsDeleteMessages(c.ctx, &tg.ChannelsDeleteMessagesRequest{
+					Channel: &tg.InputChannel{ChannelID: c.channelID, AccessHash: c.accessHash},
+					ID:      ids,
+				})
 			})
 			if err != nil {
 				// Continue on error? Only log?
@@ -1056,7 +1074,9 @@ func (c *Client) DeleteSyncChannel() error {
 		AccessHash: c.accessHash,
 	}
 
-	_, err := c.client.API().ChannelsDeleteChannel(c.ctx, inputChannel)
+	_, err := api.WithRetryT(func() (tg.UpdatesClass, error) {
+		return c.client.API().ChannelsDeleteChannel(c.ctx, inputChannel)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to delete channel: %w", err)
 	}
@@ -1119,3 +1139,5 @@ func (c *Client) GetDriveID() (string, error) {
 func (c *Client) CreateShortcut(parentID, name, targetID, targetDriveID string) (*model.File, error) {
 	return nil, ErrNotSupported
 }
+
+
