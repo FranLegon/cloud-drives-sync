@@ -98,6 +98,11 @@ $model = 'google-vertex/gemini-3.1-pro-preview'
 $maxIterations = 11
 $iteration = 1
 while ($iteration -le $maxIterations) {
+    # Set terminal title as persistent banner showing current focus
+    $trimmed = $mainPrompt.Trim() -replace '\s+', ' '
+    $short = $trimmed.Substring(0, [Math]::Min(120, $trimmed.Length)) + $(if ($trimmed.Length -gt 120) {'...'})
+    $Host.UI.RawUI.WindowTitle = "[$iteration/$maxIterations] $short"
+
     if ($prompt -notmatch [regex]::Escape($gitClarification)) {
         Write-Host "Prompt is missing git clarification. Resetting prompt to include it." -ForegroundColor Yellow
         $prompt = $mainPrompt + $gitClarification
