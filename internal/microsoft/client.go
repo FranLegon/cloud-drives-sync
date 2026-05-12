@@ -363,61 +363,39 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 			break
 		}
 
-		var uploadErr error
-		maxRetries := 3
-		for i := 0; i < maxRetries; i++ {
-			if i > 0 {
-				logger.Info("Retrying chunk upload... (Attempt %d/%d)", i+1, maxRetries)
-				time.Sleep(2 * time.Second)
-			}
+		req, err := http.NewRequest("PUT", uploadUrl, bytes.NewReader(buf[:n]))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+		req.ContentLength = int64(n)
+		start := offset
+		end := offset + int64(n) - 1
+		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 
-			req, err := http.NewRequest("PUT", uploadUrl, bytes.NewReader(buf[:n]))
-			if err != nil {
-				uploadErr = fmt.Errorf("failed to create request: %w", err)
-				break
-			}
-			req.ContentLength = int64(n)
-			start := offset
-			end := offset + int64(n) - 1
-			req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("failed to upload chunk: %w", err)
+		}
 
-			resp, err := c.httpClient.Do(req)
-			if err != nil {
-				uploadErr = fmt.Errorf("failed to upload chunk: %w", err)
-				continue
-			}
-
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				body, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				uploadErr = fmt.Errorf("chunk upload failed status %s: %s", resp.Status, string(body))
-				// Retry on server errors
-				if resp.StatusCode >= 500 {
-					continue
-				}
-				break
-			}
-
-			// Capture final response for ID update on completion
-			if resp.StatusCode == 201 || resp.StatusCode == 200 {
-				body, _ := io.ReadAll(resp.Body)
-				// Create a temporary struct to decode just the ID
-				var item struct {
-					Id string `json:"id"`
-				}
-				if jsonErr := json.Unmarshal(body, &item); jsonErr == nil && item.Id != "" {
-					createdItem.SetId(&item.Id)
-				}
-			}
-
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			uploadErr = nil
-			break
+			return nil, fmt.Errorf("chunk upload failed status %s: %s", resp.Status, string(body))
 		}
 
-		if uploadErr != nil {
-			return nil, uploadErr
+		// Capture final response for ID update on completion
+		if resp.StatusCode == 201 || resp.StatusCode == 200 {
+			body, _ := io.ReadAll(resp.Body)
+			// Create a temporary struct to decode just the ID
+			var item struct {
+				Id string `json:"id"`
+			}
+			if jsonErr := json.Unmarshal(body, &item); jsonErr == nil && item.Id != "" {
+				createdItem.SetId(&item.Id)
+			}
 		}
+
+		resp.Body.Close()
 
 		offset += int64(n)
 	}
@@ -494,47 +472,26 @@ func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
 			break
 		}
 
-		var uploadErr error
-		maxRetries := 3
-		for i := 0; i < maxRetries; i++ {
-			if i > 0 {
-				logger.Info("Retrying chunk upload (update)... (Attempt %d/%d)", i+1, maxRetries)
-				time.Sleep(time.Duration(i*2) * time.Second)
-			}
+		req, err := http.NewRequest("PUT", uploadUrl, bytes.NewReader(buf[:n]))
+		if err != nil {
+			return fmt.Errorf("failed to create request: %w", err)
+		}
+		req.ContentLength = int64(n)
+		start := offset
+		end := offset + int64(n) - 1
+		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 
-			req, err := http.NewRequest("PUT", uploadUrl, bytes.NewReader(buf[:n]))
-			if err != nil {
-				uploadErr = fmt.Errorf("failed to create request: %w", err)
-				break
-			}
-			req.ContentLength = int64(n)
-			start := offset
-			end := offset + int64(n) - 1
-			req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("failed to upload chunk: %w", err)
+		}
 
-			resp, err := c.httpClient.Do(req)
-			if err != nil {
-				uploadErr = fmt.Errorf("failed to upload chunk: %w", err)
-				continue
-			}
-
-			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				body, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				uploadErr = fmt.Errorf("chunk upload failed status %s: %s", resp.Status, string(body))
-				if resp.StatusCode >= 500 {
-					continue
-				}
-				break
-			}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			uploadErr = nil
-			break
+			return fmt.Errorf("chunk upload failed status %s: %s", resp.Status, string(body))
 		}
-
-		if uploadErr != nil {
-			return uploadErr
-		}
+		resp.Body.Close()
 
 		offset += int64(n)
 	}

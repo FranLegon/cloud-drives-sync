@@ -23,8 +23,6 @@ import (
 
 const (
 	syncFolderName = "sync-cloud-drives"
-	maxRetries     = 3
-	retryDelay     = 2 * time.Second
 )
 
 // Client represents a Google Drive client

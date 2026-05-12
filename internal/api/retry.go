@@ -82,6 +82,9 @@ func WithRetry(operation func() error) error {
 		if err == nil {
 			return nil
 		}
+		if _, ok := err.(*backoff.PermanentError); ok {
+			return err
+		}
 		if IsRetriableError(err) {
 			return err // Returning error triggers a retry
 		}

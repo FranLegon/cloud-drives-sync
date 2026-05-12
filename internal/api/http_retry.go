@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+
+	"github.com/cenkalti/backoff/v4"
 )
 
 // RetryTransport is an http.RoundTripper that retries on transient errors and rate limits.
@@ -30,11 +32,19 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 	}
 
+	attempt := 0
 	return WithRetryT(func() (*http.Response, error) {
+		attempt++
 		// If we need to retry and the body was consumed, we rewind it.
-		if req.GetBody != nil {
-			body, _ := req.GetBody()
-			req.Body = body
+		if req.Body != nil {
+			if req.GetBody != nil {
+				body, _ := req.GetBody()
+				req.Body = body
+			} else if attempt > 1 {
+				// We cannot rewind the body, so we cannot retry
+				fromRetry := HTTPError{Code: 400, Status: "Cannot retry: body cannot be rewound"}
+				return nil, backoff.Permanent(fromRetry)
+			}
 		}
 
 		resp, err := t.Base.RoundTrip(req)
