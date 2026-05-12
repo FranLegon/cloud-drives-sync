@@ -25,9 +25,12 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-const (
-	syncChannelName = "cloud-drives-sync"
-)
+var syncChannelName = "cloud-drives-sync"
+
+// SetSyncChannelName overrides the sync channel name. Used by tests to isolate from production data.
+func SetSyncChannelName(name string) {
+	syncChannelName = name
+}
 
 // ErrNotSupported is returned by operations that Telegram does not support
 var ErrNotSupported = errors.New("not supported by Telegram")

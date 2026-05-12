@@ -27,10 +27,16 @@ import (
 	"golang.org/x/oauth2"
 )
 
+var syncFolderPrefix = "cloud-drives-sync"
+
 const (
-	syncFolderPrefix      = "cloud-drives-sync"
 	FakeShortcutExtension = ".placeholder"
 )
+
+// SetSyncFolderName overrides the sync folder name. Used by tests to isolate from production data.
+func SetSyncFolderName(name string) {
+	syncFolderPrefix = name
+}
 
 var fakeShortcutRegex = regexp.MustCompile(`^(.*)\.sz-(\d+)` + regexp.QuoteMeta(FakeShortcutExtension) + `$`)
 

@@ -19,6 +19,16 @@ const (
 	DBUser     = "owner"
 )
 
+// auxFolderName is the auxiliary folder name used in path matching queries.
+// Overridable via SetAuxFolderName for test isolation.
+var auxFolderName = "cloud-drives-sync-aux"
+
+// SetAuxFolderName overrides the auxiliary folder name used in SQL path matching.
+// Used by tests to isolate from production data.
+func SetAuxFolderName(name string) {
+	auxFolderName = name
+}
+
 // DB represents the database connection
 type DB struct {
 	conn *sql.DB
@@ -1180,16 +1190,16 @@ func (db *DB) DeleteStaleReplicasByNativeID(provider model.Provider, oldNativeID
 // with the given calculated_id that is NOT in the soft-deleted folder path.
 // This is used as a safety check during hard-delete to catch file_id linkage issues.
 func (db *DB) HasActiveGoogleReplicaOutsideSoftDeleted(calculatedID string) (bool, error) {
-	query := `
+	query := fmt.Sprintf(`
 	SELECT EXISTS(
 		SELECT 1 FROM replicas
 		WHERE calculated_id = ?
 		AND provider = 'google'
 		AND status = 'active'
-		AND path NOT LIKE '%cloud-drives-sync-aux/soft-deleted%'
-		AND path NOT LIKE '%cloud-drives-sync-aux\soft-deleted%'
+		AND path NOT LIKE '%%%s/soft-deleted%%'
+		AND path NOT LIKE '%%%s\soft-deleted%%'
 	)
-	`
+	`, auxFolderName, auxFolderName)
 	var exists bool
 	err := db.conn.QueryRow(query, calculatedID).Scan(&exists)
 	return exists, err
@@ -1227,9 +1237,9 @@ func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs [
 		WHERE calculated_id IN (%s)
 		AND provider = 'google'
 		AND status = 'active'
-		AND path NOT LIKE '%%cloud-drives-sync-aux/soft-deleted%%'
-		AND path NOT LIKE '%%cloud-drives-sync-aux\soft-deleted%%'
-		`, strings.Join(placeholders, ","))
+		AND path NOT LIKE '%%%s/soft-deleted%%'
+		AND path NOT LIKE '%%%s\soft-deleted%%'
+		`, strings.Join(placeholders, ","), auxFolderName, auxFolderName)
 
 		rows, err := db.conn.Query(query, args...)
 		if err != nil {
@@ -1254,13 +1264,16 @@ func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs [
 func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 	minTimestamp := scanStartTime.Unix()
 
+	softDeletedPattern := auxFolderName + "/soft-deleted"
+	softDeletedPatternWin := auxFolderName + `\soft-deleted`
+
 	// Single-pass update: Determine the correct status based on current replica locations
-	updateQuery := `
+	updateQuery := fmt.Sprintf(`
 	WITH ReplicaAgg AS (
 		SELECT file_id,
-			SUM(CASE WHEN provider = 'google' AND path NOT LIKE '%cloud-drives-sync-aux/soft-deleted%' AND path NOT LIKE '%cloud-drives-sync-aux\soft-deleted%' THEN 1 ELSE 0 END) as active_google,
+			SUM(CASE WHEN provider = 'google' AND path NOT LIKE '%%%s%%' AND path NOT LIKE '%%%s%%' THEN 1 ELSE 0 END) as active_google,
 			SUM(CASE WHEN provider = 'google' THEN 1 ELSE 0 END) as total_google,
-			SUM(CASE WHEN path NOT LIKE '%cloud-drives-sync-aux/soft-deleted%' AND path NOT LIKE '%cloud-drives-sync-aux\soft-deleted%' THEN 1 ELSE 0 END) as active_any,
+			SUM(CASE WHEN path NOT LIKE '%%%s%%' AND path NOT LIKE '%%%s%%' THEN 1 ELSE 0 END) as active_any,
 			COUNT(*) as total_any
 		FROM replicas
 		WHERE status = 'active' AND last_seen_at >= ?
@@ -1283,7 +1296,7 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 		WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'softdeleted'
 		ELSE files.status
 	END
-	`
+	`, softDeletedPattern, softDeletedPatternWin, softDeletedPattern, softDeletedPatternWin)
 
 	if _, err := db.conn.Exec(updateQuery, minTimestamp); err != nil {
 		return fmt.Errorf("failed to update soft-deleted status: %w", err)
@@ -1291,7 +1304,7 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 
 	// Second pass: catch files that remain 'softdeleted' due to file_id linkage issues
 	// by checking replicas via calculated_id (content-based match)
-	fallbackQuery := `
+	fallbackQuery := fmt.Sprintf(`
 	WITH LatestActive AS (
 		SELECT calculated_id, path,
 			ROW_NUMBER() OVER(PARTITION BY calculated_id ORDER BY mod_time DESC) as rn
@@ -1299,8 +1312,8 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 		WHERE status = 'active'
 		AND provider = 'google'
 		AND last_seen_at >= ?
-		AND path NOT LIKE '%cloud-drives-sync-aux/soft-deleted%'
-		AND path NOT LIKE '%cloud-drives-sync-aux\soft-deleted%'
+		AND path NOT LIKE '%%%s%%'
+		AND path NOT LIKE '%%%s%%'
 	)
 	UPDATE files
 	SET status = 'active',
@@ -1310,7 +1323,7 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 	AND la.rn = 1
 	AND files.status = 'softdeleted'
 	AND (files.calculated_id != '' AND files.calculated_id IS NOT NULL)
-	`
+	`, softDeletedPattern, softDeletedPatternWin)
 	if _, err := db.conn.Exec(fallbackQuery, minTimestamp); err != nil {
 		return fmt.Errorf("failed to update soft-deleted status (fallback): %w", err)
 	}

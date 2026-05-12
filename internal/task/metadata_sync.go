@@ -14,11 +14,17 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/telegram"
 )
 
+var AuxFolder = "cloud-drives-sync-aux"
+
 const (
-	AuxFolder         = "cloud-drives-sync-aux"
 	SoftDeletedFolder = "soft-deleted"
 	MetadataFileName  = "metadata.db"
 )
+
+// SetAuxFolder overrides the auxiliary folder name. Used by tests to isolate from production data.
+func SetAuxFolder(name string) {
+	AuxFolder = name
+}
 
 func createClient(user *model.User, cfg *model.Config, runPreFlight bool) (api.CloudClient, error) {
 	// Re-use the same factory logic as Runner.GetOrCreateClient but without caching,
@@ -75,7 +81,7 @@ func DownloadMetadataDB(cfg *model.Config, dbPath string) error {
 
 		var auxID string
 		if user.Provider == model.ProviderTelegram {
-			auxID = "/cloud-drives-sync-aux"
+			auxID = "/" + AuxFolder
 		} else {
 			folders, err := client.ListFolders(rootID)
 			if err != nil {

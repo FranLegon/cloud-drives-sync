@@ -21,9 +21,12 @@ import (
 	"google.golang.org/api/option"
 )
 
-const (
-	syncFolderName = "cloud-drives-sync"
-)
+var syncFolderName = "cloud-drives-sync"
+
+// SetSyncFolderName overrides the sync folder name. Used by tests to isolate from production data.
+func SetSyncFolderName(name string) {
+	syncFolderName = name
+}
 
 // Client represents a Google Drive client
 type Client struct {

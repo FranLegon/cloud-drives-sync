@@ -266,6 +266,20 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	// Use smaller fragment limit for tests (2MB instead of 2GB)
 	telegram.SetDefaultMaxPartSize(2 * 1024 * 1024)
 
+	// Use isolated test folders/channel to avoid touching production data
+	google.SetSyncFolderName("cloud-drives-sync-test")
+	microsoft.SetSyncFolderName("cloud-drives-sync-test")
+	telegram.SetSyncChannelName("cloud-drives-sync-test")
+	task.SetAuxFolder("cloud-drives-sync-test-aux")
+	database.SetAuxFolderName("cloud-drives-sync-test-aux")
+	defer func() {
+		google.SetSyncFolderName("cloud-drives-sync")
+		microsoft.SetSyncFolderName("cloud-drives-sync")
+		telegram.SetSyncChannelName("cloud-drives-sync")
+		task.SetAuxFolder("cloud-drives-sync-aux")
+		database.SetAuxFolderName("cloud-drives-sync-aux")
+	}()
+
 	runner := task.NewRunner(cfg, nil, false) // Temporary runner for cleanup
 
 	// Run Setup (Phase 0 + Init)
@@ -766,7 +780,7 @@ func cleanupCloudFiles(r *task.Runner) error {
 			folders, err := c.ListFolders("root")
 			if err == nil {
 				for _, f := range folders {
-					if f.Name == "cloud-drives-sync-aux" {
+					if f.Name == task.AuxFolder {
 						logger.InfoTagged([]string{string(u.Provider), u.Email}, "Deleting aux folder %s...", f.ID)
 						// Try to empty it first
 						subs, _ := c.ListFolders(f.ID)
@@ -1241,7 +1255,7 @@ func runTestCase5(runner *task.Runner, _ *model.User, backups []*model.User) err
 	logger.Info("\n--- Test Case 5: Soft Deletion ---")
 
 	getSoftID := func(c api.CloudClient, rootID string) (string, error) {
-		aux, err := getOrCreateFolder(c, rootID, "cloud-drives-sync-aux")
+		aux, err := getOrCreateFolder(c, rootID, task.AuxFolder)
 		if err != nil {
 			return "", err
 		}
@@ -1610,8 +1624,8 @@ func runTestCase7(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		return "", fmt.Errorf("folder %s not found in %s", name, parentID)
 	}
 
-	// Locate current test_5.txt in cloud-drives-sync-aux/soft-deleted
-	auxID, err := findFolderID(mainClient, mainSyncID, "cloud-drives-sync-aux")
+	// Locate current test_5.txt in cloud-drives-sync-test-aux/soft-deleted
+	auxID, err := findFolderID(mainClient, mainSyncID, task.AuxFolder)
 	if err != nil {
 		return err
 	}
@@ -1696,7 +1710,7 @@ func runTestCase7(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		}
 
 		// 2. Verify IN soft-deleted
-		auxID, err := findFolderID(client, sid, "cloud-drives-sync-aux")
+		auxID, err := findFolderID(client, sid, task.AuxFolder)
 		if err != nil {
 			// If aux doesn't exist, that's definitely a fail for test_4.txt specific check
 			return fmt.Errorf("aux folder missing for %s: %w", u.Email, err)
@@ -2043,7 +2057,7 @@ func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	logger.Info("\n--- Test Case 8: Hard Deletion ---")
 
 	getSoftID := func(c api.CloudClient, rootID string) (string, error) {
-		aux, err := getOrCreateFolder(c, rootID, "cloud-drives-sync-aux")
+		aux, err := getOrCreateFolder(c, rootID, task.AuxFolder)
 		if err != nil {
 			return "", err
 		}
