@@ -235,7 +235,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			}
 		}
 
-		calculatedID := fmt.Sprintf("%s-%d", itemName, itemSize)
+		calculatedID := model.GenerateCalculatedID(itemName, itemSize)
 
 		file := &model.File{
 			ID:           *item.GetId(), // Will be replaced with UUID in database layer
@@ -422,7 +422,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		modTime = *finalItem.GetLastModifiedDateTime()
 	}
 
-	calculatedID := fmt.Sprintf("%s-%d", *finalItem.GetName(), size)
+	calculatedID := model.GenerateCalculatedID(*finalItem.GetName(), size)
 
 	file := &model.File{
 		ID:           *finalItem.GetId(), // Will be replaced with UUID in database layer
@@ -803,7 +803,7 @@ func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
 		modTime = *item.GetLastModifiedDateTime()
 	}
 
-	calculatedID := fmt.Sprintf("%s-%d", *item.GetName(), *item.GetSize())
+	calculatedID := model.GenerateCalculatedID(*item.GetName(), *item.GetSize())
 
 	file := &model.File{
 		ID:           *item.GetId(), // Will be replaced with UUID in database layer
@@ -976,7 +976,7 @@ func (c *Client) CreateShortcut(parentID, name, targetID, targetDriveID string) 
 		size = *item.GetRemoteItem().GetSize()
 	}
 
-	calculatedID := fmt.Sprintf("%s-%d", *item.GetName(), size)
+	calculatedID := model.GenerateCalculatedID(*item.GetName(), size)
 
 	file := &model.File{
 		ID:           *item.GetId(),
@@ -1005,7 +1005,7 @@ func (c *Client) CreateFakeShortcut(parentID, name string, size int64) (*model.F
 	// Convert to "Fake" mode for DB consistency with ListFiles logic
 	uploadedFile.Name = name
 	uploadedFile.Size = size
-	uploadedFile.CalculatedID = fmt.Sprintf("%s-%d", name, size)
+	uploadedFile.CalculatedID = model.GenerateCalculatedID(name, size)
 
 	// Make sure Replicas are also updated
 	if len(uploadedFile.Replicas) > 0 {

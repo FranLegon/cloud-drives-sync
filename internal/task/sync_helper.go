@@ -44,7 +44,7 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 			continue
 		}
 
-		key := string(user.Provider) + ":" + user.GetAccountID()
+		key := user.CacheKey()
 
 		r.accountQuotasMu.Lock()
 		q, ok := r.accountQuotas[key]
@@ -82,7 +82,7 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 
 	if bestUser != nil {
 		// Reserve the space for this file
-		key := string(bestUser.Provider) + ":" + bestUser.GetAccountID()
+		key := bestUser.CacheKey()
 		r.accountQuotasMu.Lock()
 		r.accountQuotas[key].Used += size
 		r.accountQuotasMu.Unlock()
@@ -100,7 +100,7 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		if !strings.HasPrefix(path, "/") {
 			path = "/" + path
 		}
-		path = strings.ReplaceAll(path, "\\", "/")
+		path = model.NormalizePath(path)
 		return path, nil
 	}
 
@@ -108,7 +108,7 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 	path = strings.Trim(path, "/\\")
 	accountID := client.GetUserIdentifier()
 
-	cachePrefix := string(provider) + ":" + accountID + ":"
+	cachePrefix := model.GenerateCacheKey(provider, accountID) + ":"
 
 	// Quick fast-path memory cache lookup
 	cacheKey := cachePrefix + path
@@ -265,7 +265,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 	// 3. Ensure folder structure
 	dir := filepath.Dir(masterFile.Path)
 	// Normalize path separators
-	dir = strings.ReplaceAll(dir, "\\", "/")
+	dir = model.NormalizePath(dir)
 
 	parentID, err := r.ensureFolderStructure(destClient, dir, targetProvider)
 	if err != nil {
@@ -275,7 +275,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 	// 4. Transfer file (Try all viable replicas)
 	var lastErr error
 	for i, sourceReplica := range viableReplicas {
-		logger.InfoTagged([]string{string(targetProvider), destUser.Email}, "Copying %s (as %s) from %s (Replica %d/%d)...", masterFile.Path, finalName, sourceReplica.Provider, i+1, len(viableReplicas))
+		logger.InfoTagged(destUser.LogTags(), "Copying %s (as %s) from %s (Replica %d/%d)...", masterFile.Path, finalName, sourceReplica.Provider, i+1, len(viableReplicas))
 
 		// Get source client
 		sourceUser := r.getUser(sourceReplica.Provider, sourceReplica.AccountID)
@@ -514,11 +514,11 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 		logger.Warning("Source Drive ID is empty, but required for Microsoft shortcut creation. Source Provider: %s", sourceReplica.Provider)
 	}
 
-	logger.InfoTagged([]string{string(targetUser.Provider), targetUser.Email}, "Creating shortcut for %s (TargetID: %s, DriveID: %s)...", sourceFile.Name, sourceReplica.NativeID, sourceDriveID)
+	logger.InfoTagged(targetUser.LogTags(), "Creating shortcut for %s (TargetID: %s, DriveID: %s)...", sourceFile.Name, sourceReplica.NativeID, sourceDriveID)
 
 	// 4. Ensure Folder Structure in Target
 	dir := filepath.Dir(sourceFile.Path)
-	dir = strings.ReplaceAll(dir, "\\", "/")
+	dir = model.NormalizePath(dir)
 
 	parentID, err := r.ensureFolderStructure(targetClient, dir, targetUser.Provider)
 	if err != nil {
@@ -526,7 +526,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 	}
 
 	// 5. Create Shortcut
-	logger.InfoTagged([]string{string(targetUser.Provider), targetUser.Email}, "Creating shortcut for %s...", sourceFile.Name)
+	logger.InfoTagged(targetUser.LogTags(), "Creating shortcut for %s...", sourceFile.Name)
 	shortcut, err := targetClient.CreateShortcut(parentID, sourceFile.Name, sourceReplica.NativeID, sourceDriveID)
 	if err != nil {
 		// Attempt to resolve cross-tenant/shared item reference issues for Microsoft

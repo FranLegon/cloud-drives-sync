@@ -180,7 +180,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			}
 
 			modTime := parseTime(f.ModifiedTime)
-			calculatedID := fmt.Sprintf("%s-%d", f.Name, f.Size)
+			calculatedID := model.GenerateCalculatedID(f.Name, f.Size)
 
 			// Create the logical file
 			file := &model.File{
@@ -320,7 +320,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	}
 
 	modTime := parseTime(createdFile.ModifiedTime)
-	calculatedID := fmt.Sprintf("%s-%d", createdFile.Name, createdFile.Size)
+	calculatedID := model.GenerateCalculatedID(createdFile.Name, createdFile.Size)
 
 	result := &model.File{
 		ID:           createdFile.Id, // Will be replaced with UUID in database layer
@@ -580,7 +580,7 @@ func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
 	}
 
 	modTime := parseTime(f.ModifiedTime)
-	calculatedID := fmt.Sprintf("%s-%d", f.Name, f.Size)
+	calculatedID := model.GenerateCalculatedID(f.Name, f.Size)
 
 	file := &model.File{
 		ID:           f.Id, // Will be replaced with UUID in database layer

@@ -65,7 +65,7 @@ func (r *Runner) SetStopOnError(stop bool) {
 
 // getAccountFolderLock returns a mutex for the given provider and account to serialize folder creation
 func (r *Runner) getAccountFolderLock(provider model.Provider, accountID string) *sync.Mutex {
-	key := string(provider) + ":" + accountID
+	key := model.GenerateCacheKey(provider, accountID)
 	if v, ok := r.folderLocks.Load(key); ok {
 		return v.(*sync.Mutex)
 	}
@@ -75,7 +75,7 @@ func (r *Runner) getAccountFolderLock(provider model.Provider, accountID string)
 
 // GetOrCreateClient gets or creates a client for a user
 func (r *Runner) GetOrCreateClient(user *model.User) (api.CloudClient, error) {
-	key := string(user.Provider) + ":" + user.GetAccountID()
+	key := user.CacheKey()
 
 	r.clientsMu.RLock()
 	if client, exists := r.clients[key]; exists {
@@ -148,25 +148,25 @@ func (r *Runner) GetMetadata() error {
 
 			client, err := r.GetOrCreateClient(user)
 			if err != nil {
-				logger.ErrorTagged([]string{string(user.Provider), user.GetAccountID()}, "Failed to create client: %v", err)
+				logger.ErrorTagged(user.LogTags(), "Failed to create client: %v", err)
 				return
 			}
 
 			// Get sync folder ID
 			syncFolderID, err := client.GetSyncFolderID()
 			if err != nil {
-				logger.ErrorTagged([]string{string(user.Provider), user.GetAccountID()}, "Failed to get sync folder: %v", err)
+				logger.ErrorTagged(user.LogTags(), "Failed to get sync folder: %v", err)
 				return
 			}
 
 			if syncFolderID == "" {
-				logger.InfoTagged([]string{string(user.Provider), user.GetAccountID()}, "No sync folder, skipping")
+				logger.InfoTagged(user.LogTags(), "No sync folder, skipping")
 				return
 			}
 
 			// Scan files
 			if err := r.scanFolder(client, user, syncFolderID, "", fileChan, folderChan, apiSem); err != nil {
-				logger.ErrorTagged([]string{string(user.Provider), user.GetAccountID()}, "Failed to scan folder: %v", err)
+				logger.ErrorTagged(user.LogTags(), "Failed to scan folder: %v", err)
 			}
 		}(&r.config.Users[i])
 	}
@@ -283,7 +283,7 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 		fileChan <- file
 	}
 
-	logger.InfoTagged([]string{string(user.Provider), user.GetAccountID()}, "Found %d files in folder %s", len(files), folderID)
+	logger.InfoTagged(user.LogTags(), "Found %d files in folder %s", len(files), folderID)
 
 	// Recursively scan subfolders
 	apiSem <- struct{}{}
@@ -387,10 +387,10 @@ func (r *Runner) CheckTokens() error {
 		// Try a simple read operation
 		_, err = client.GetQuota()
 		if err != nil {
-			logger.ErrorTagged([]string{string(user.Provider), user.GetAccountID()}, "Token validation failed: %v", err)
+			logger.ErrorTagged(user.LogTags(), "Token validation failed: %v", err)
 			hasErrors = true
 		} else {
-			logger.InfoTagged([]string{string(user.Provider), user.GetAccountID()}, "Token is valid")
+			logger.InfoTagged(user.LogTags(), "Token is valid")
 		}
 	}
 
@@ -757,7 +757,7 @@ func (r *Runner) FreeMain() (bool, error) {
 
 					// Move file to target's sync folder (it's currently in root after pending owner flow)
 					dir := filepath.Dir(file.Path)
-					dir = strings.ReplaceAll(dir, "\\", "/")
+					dir = model.NormalizePath(dir)
 					if dir == "." || dir == "" {
 						dir = "/"
 					}
@@ -835,7 +835,7 @@ func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupSt
 
 	// 2. Upload - ensure destination folder exists
 	dir := filepath.Dir(file.Path)
-	dir = strings.ReplaceAll(dir, "\\", "/")
+	dir = model.NormalizePath(dir)
 	if dir == "." || dir == "" {
 		dir = "/"
 	}
@@ -1173,7 +1173,7 @@ func (r *Runner) moveReplicaToPath(replica *model.Replica, fileName, targetPath 
 	}
 
 	targetDir := filepath.Dir(targetPath)
-	targetDir = strings.ReplaceAll(targetDir, "\\", "/")
+	targetDir = model.NormalizePath(targetDir)
 	if targetDir == "." || targetDir == "" {
 		targetDir = "/"
 	}
@@ -1194,7 +1194,7 @@ func (r *Runner) moveReplicaToPath(replica *model.Replica, fileName, targetPath 
 		return
 	}
 
-	replica.Path = strings.ReplaceAll(filepath.Join(targetDir, fileName), "\\", "/")
+	replica.Path = model.NormalizePath(filepath.Join(targetDir, fileName))
 	if err := r.db.UpdateReplica(replica); err != nil {
 		logger.Warning("Failed to update replica path in DB: %v", err)
 	}
@@ -1567,7 +1567,7 @@ func (r *Runner) syncFolderStructures() error {
 			continue
 		}
 
-		logger.InfoTagged([]string{string(u.Provider), u.Email}, "Verifying folder structure...")
+		logger.InfoTagged(u.LogTags(), "Verifying folder structure...")
 		client, err := r.GetOrCreateClient(u)
 		if err != nil {
 			continue
@@ -1597,7 +1597,7 @@ func (r *Runner) DeleteUnsyncedFiles() error {
 			continue
 		}
 
-		logger.InfoTagged([]string{string(user.Provider), user.Email}, "Checking for unsynced files...")
+		logger.InfoTagged(user.LogTags(), "Checking for unsynced files...")
 
 		client, err := r.GetOrCreateClient(&user)
 		if err != nil {
@@ -1622,12 +1622,12 @@ func (r *Runner) DeleteUnsyncedFiles() error {
 		for _, folder := range folders {
 			if folder.ID != syncFolderID {
 				if !r.safeMode {
-					logger.InfoTagged([]string{string(user.Provider), user.Email}, "Deleting unsynced folder: %s", folder.Name)
+					logger.InfoTagged(user.LogTags(), "Deleting unsynced folder: %s", folder.Name)
 					if err := client.DeleteFolder(folder.ID); err != nil {
 						logger.Error("Failed to delete folder %s: %v", folder.Name, err)
 					}
 				} else {
-					logger.DryRunTagged([]string{string(user.Provider), user.Email}, "Would delete unsynced folder: %s", folder.Name)
+					logger.DryRunTagged(user.LogTags(), "Would delete unsynced folder: %s", folder.Name)
 				}
 			}
 		}
@@ -1641,12 +1641,12 @@ func (r *Runner) DeleteUnsyncedFiles() error {
 
 		for _, file := range files {
 			if !r.safeMode {
-				logger.InfoTagged([]string{string(user.Provider), user.Email}, "Deleting unsynced file: %s", file.Name)
+				logger.InfoTagged(user.LogTags(), "Deleting unsynced file: %s", file.Name)
 				if err := client.DeleteFile(file.ID); err != nil {
 					logger.Error("Failed to delete file %s: %v", file.Name, err)
 				}
 			} else {
-				logger.DryRunTagged([]string{string(user.Provider), user.Email}, "Would delete unsynced file: %s", file.Name)
+				logger.DryRunTagged(user.LogTags(), "Would delete unsynced file: %s", file.Name)
 			}
 		}
 	}

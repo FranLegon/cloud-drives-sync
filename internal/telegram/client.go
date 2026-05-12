@@ -499,7 +499,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 				// Ensure CalculatedID is set if missing (backward compatibility or correction)
 				if file.CalculatedID == "" {
-					file.CalculatedID = fmt.Sprintf("%s-%d", file.Name, file.Size)
+					file.CalculatedID = model.GenerateCalculatedID(file.Name, file.Size)
 					meta.Replica.CalculatedID = file.CalculatedID
 				}
 
@@ -540,7 +540,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 	for fullPath, file := range fileMap {
 		if fragments, isFragmented := replicaFragmentMap[fullPath]; isFragmented && len(fragments) > 0 {
 			// This is a fragmented file
-			calculatedID := fmt.Sprintf("%s-%d", file.Name, file.Size)
+			calculatedID := model.GenerateCalculatedID(file.Name, file.Size)
 
 			// Ensure ID is set (use first fragment if part 1 was missing)
 			if file.ID == "" {
@@ -601,7 +601,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		return nil, fmt.Errorf("channel not initialized")
 	}
 
-	generatedID := fmt.Sprintf("%s-%d", name, size)
+	generatedID := model.GenerateCalculatedID(name, size)
 	calculatedID := generatedID
 	modTime := time.Now()
 	fullPath := folderID + "/" + name

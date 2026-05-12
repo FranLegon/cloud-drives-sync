@@ -1,8 +1,35 @@
 package model
 
 import (
+	"fmt"
+	"strings"
 	"time"
 )
+
+// GenerateCalculatedID creates a standard deduplication ID
+func GenerateCalculatedID(name string, size int64) string {
+	return fmt.Sprintf("%s-%d", name, size)
+}
+
+// NormalizePath ensures standard forward-slash separators
+func NormalizePath(p string) string {
+	return strings.ReplaceAll(p, "\\", "/")
+}
+
+// GenerateCacheKey creates a consistent cache string for provider and accountID
+func GenerateCacheKey(provider Provider, accountID string) string {
+	return string(provider) + ":" + accountID
+}
+
+// CacheKey returns a consistent key for caching per user
+func (u *User) CacheKey() string {
+	return GenerateCacheKey(u.Provider, u.GetAccountID())
+}
+
+// LogTags returns tags for logger
+func (u *User) LogTags() []string {
+	return []string{string(u.Provider), u.GetAccountID()}
+}
 
 // Provider represents a cloud storage provider
 type Provider string

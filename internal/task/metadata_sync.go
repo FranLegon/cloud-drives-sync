@@ -317,7 +317,7 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 		// Skip calling upload if token is known invalid? No, createClient handles refreshing.
 
 		if err := uploadToUser(user); err != nil {
-			logger.ErrorTagged([]string{string(user.Provider), user.Email}, "Failed to sync metadata: %v", err)
+			logger.ErrorTagged(user.LogTags(), "Failed to sync metadata: %v", err)
 		} else {
 			successCount++
 		}
