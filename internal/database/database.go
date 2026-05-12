@@ -41,7 +41,7 @@ func Open(masterPassword string) (*DB, error) {
 	// This is the proper way to set the encryption key for go-sqlcipher
 	// _pragma_key is used instead of _key to ensure the key is set via PRAGMA before any DB access
 	// Using WAL and busy_timeout to support concurrent reads/writes
-	connStr := fmt.Sprintf("file:%s?_pragma_key=%s&_journal_mode=WAL&_busy_timeout=5000", dbPath, url.QueryEscape(masterPassword))
+	connStr := fmt.Sprintf("file:%s?_pragma_key=%s&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000", dbPath, url.QueryEscape(masterPassword))
 
 	conn, err := sql.Open("sqlite3", connStr)
 	if err != nil {
@@ -1322,7 +1322,7 @@ func CreateDB(masterPassword string) error {
 	// Create database file with SQLCipher encryption using _pragma_key parameter
 	// This ensures the key is set via PRAGMA key before any DB operations
 	// Using WAL and busy_timeout to support concurrent reads/writes
-	connStr := fmt.Sprintf("file:%s?_pragma_key=%s&_journal_mode=WAL&_busy_timeout=5000", dbPath, url.QueryEscape(masterPassword))
+	connStr := fmt.Sprintf("file:%s?_pragma_key=%s&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000", dbPath, url.QueryEscape(masterPassword))
 	conn, err := sql.Open("sqlite3", connStr)
 	if err != nil {
 		return err
