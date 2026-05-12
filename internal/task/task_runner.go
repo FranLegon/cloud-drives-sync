@@ -165,7 +165,10 @@ func (r *Runner) GetMetadata() error {
 			}
 
 			// Scan files
-			if err := r.scanFolder(client, user, syncFolderID, "", fileChan, folderChan, apiSem); err != nil {
+			err = api.WithRetry(func() error {
+				return r.scanFolder(client, user, syncFolderID, "", fileChan, folderChan, apiSem)
+			})
+			if err != nil {
 				logger.ErrorTagged(user.LogTags(), "Failed to scan folder: %v", err)
 			}
 		}(&r.config.Users[i])
@@ -303,7 +306,10 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 		wg.Add(1)
 		go func(f *model.Folder) {
 			defer wg.Done()
-			if err := r.scanFolder(client, user, f.ID, f.Path, fileChan, folderChan, apiSem); err != nil {
+			err := api.WithRetry(func() error {
+				return r.scanFolder(client, user, f.ID, f.Path, fileChan, folderChan, apiSem)
+			})
+			if err != nil {
 				errCh <- err
 			}
 		}(folder)
@@ -1344,7 +1350,10 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 		go func() {
 			defer copyWg.Done()
 			for job := range jobChan {
-				if err := r.copyFile(job.masterFile, job.provider, job.targetName, job.syncRunID); err != nil {
+				err := api.WithRetry(func() error {
+					return r.copyFile(job.masterFile, job.provider, job.targetName, job.syncRunID)
+				})
+				if err != nil {
 					logger.Error("Failed to copy file %s to %s: %v", job.path, job.provider, err)
 					if r.stopOnError {
 						errChan <- fmt.Errorf("failed to copy file %s to %s: %w", job.path, job.provider, err)
@@ -1531,7 +1540,10 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 		go func() {
 			defer wg.Done()
 			for job := range jobChan {
-				if err := r.createShortcut(job.sourceFile, &job.user); err != nil {
+				err := api.WithRetry(func() error {
+					return r.createShortcut(job.sourceFile, &job.user)
+				})
+				if err != nil {
 					logger.Error("Failed to create shortcut for %s in %s: %v", job.path, job.user.Email, err)
 				}
 			}

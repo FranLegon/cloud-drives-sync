@@ -45,7 +45,7 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 				req.Body = body
 			} else if attempt > 1 {
 				// We cannot rewind the body, so we cannot retry
-				fromRetry := HTTPError{Code: 400, Status: "Cannot retry: body cannot be rewound"}
+				fromRetry := HTTPError{Code: 429, Status: "Cannot retry at HTTP layer: body cannot be rewound"}
 				return nil, backoff.Permanent(fromRetry)
 			}
 		}
