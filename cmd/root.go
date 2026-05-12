@@ -31,9 +31,20 @@ var rootCmd = &cobra.Command{
 across multiple cloud storage providers including Google Drive, Microsoft OneDrive for Business,
 and Telegram.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// Skip setup for init and help commands
+		// Gate commands based on build type
+		if AutoBuild {
+			allowed := map[string]bool{
+				"auto": true, "sync": true, "help": true,
+				"__complete": true, "__completeNoDesc": true,
+			}
+			if !allowed[cmd.Name()] {
+				return fmt.Errorf("command %q is not available in auto builds (only auto, sync, and help are available)", cmd.Name())
+			}
+		}
+
+		// Skip setup for init, help, and auto commands
 		skipSetup := map[string]bool{
-			"init": true, "help": true, "__complete": true, "__completeNoDesc": true,
+			"init": true, "help": true, "auto": true, "__complete": true, "__completeNoDesc": true,
 		}
 		if skipSetup[cmd.Name()] {
 			return nil
