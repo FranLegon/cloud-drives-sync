@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/cenkalti/backoff/v4"
 )
@@ -17,7 +19,7 @@ type RetryTransport struct {
 func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var bodyBytes []byte
 	var err error
-	
+
 	// Read the body if it exists so we can rewind it for retries.
 	// We only buffer if GetBody is nil and ContentLength is reasonable (< 128KB).
 	// Buffering large streams breaks pipelined streaming and consumes excessive memory.
@@ -55,10 +57,11 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 		// Check for rate limit or server errors
 		if resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode < 600) {
+			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
 			// Read body to prevent leak, then close
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
-			return nil, HTTPError{Code: resp.StatusCode, Status: resp.Status}
+			return nil, HTTPError{Code: resp.StatusCode, Status: resp.Status, RetryAfter: retryAfter}
 		}
 
 		return resp, nil
@@ -67,8 +70,9 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // HTTPError represents an HTTP status error
 type HTTPError struct {
-	Code   int
-	Status string
+	Code       int
+	Status     string
+	RetryAfter time.Duration
 }
 
 func (e HTTPError) Error() string {
@@ -80,6 +84,23 @@ func (e HTTPError) StatusCode() int {
 	return e.Code
 }
 
+// parseRetryAfter parses the Retry-After header value.
+// It supports both delay-seconds and HTTP-date formats.
+func parseRetryAfter(header string) time.Duration {
+	if header == "" {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(header); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if t, err := http.ParseTime(header); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
+
 // NewRetryClient returns an http.Client that retries transient errors
 func NewRetryClient(baseClient *http.Client) *http.Client {
 	if baseClient == nil {
@@ -89,7 +110,7 @@ func NewRetryClient(baseClient *http.Client) *http.Client {
 	if transport == nil {
 		transport = http.DefaultTransport
 	}
-	
+
 	newClient := *baseClient
 	newClient.Transport = &RetryTransport{Base: transport}
 	return &newClient

@@ -15,7 +15,7 @@ func IsRetriableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	
+
 	// Check for rate limit (429) or server errors (5xx)
 	// Some API clients might return errors with a StatusCode method
 	type statusCodeError interface {
@@ -28,7 +28,7 @@ func IsRetriableError(err error) bool {
 			return true
 		}
 	}
-	
+
 	// Also check typical string contained in googleapi errors (as fallback)
 	googleErrors := []string{"Error 429", "Error 500", "Error 502", "Error 503", "Error 504"}
 	for _, e := range googleErrors {
@@ -36,11 +36,11 @@ func IsRetriableError(err error) bool {
 			return true
 		}
 	}
-	
+
 	// Microsoft specific errors
 	msErrors := []string{
-		"TooManyRequests", "activityLimitReached", 
-		"503 Service Unavailable", "504 Gateway Timeout", 
+		"TooManyRequests", "activityLimitReached",
+		"503 Service Unavailable", "504 Gateway Timeout",
 		"502 Bad Gateway", "500 Internal Server Error",
 	}
 	for _, e := range msErrors {
@@ -54,13 +54,15 @@ func IsRetriableError(err error) bool {
 	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) { //nolint:staticcheck
 		return true
 	}
-	
+
 	// Connection reset, EOF, etc.
 	msg := err.Error()
 	connErrors := []string{
 		"connection reset by peer", "EOF", "unexpected EOF",
 		"context deadline exceeded", "read: connection timed out",
 		"client connection lost", "FLOOD_WAIT",
+		"forcibly closed",  // Windows WSAECONNRESET
+		"wsasend", "wsarecv", // Windows socket send/recv errors
 	}
 	for _, e := range connErrors {
 		if strings.Contains(msg, e) {
@@ -73,11 +75,13 @@ func IsRetriableError(err error) bool {
 
 // WithRetry executes the given operation with exponential backoff.
 // It only retries on transient network errors and rate limits.
+// When the error carries a Retry-After duration (from an HTTP 429 response),
+// that delay is respected before the next attempt.
 func WithRetry(operation func() error) error {
 	b := backoff.NewExponentialBackOff()
 	b.InitialInterval = 500 * time.Millisecond
 	b.MaxInterval = 30 * time.Second
-	b.MaxElapsedTime = 2 * time.Minute
+	b.MaxElapsedTime = 5 * time.Minute
 
 	return backoff.Retry(func() error {
 		err := operation()
@@ -88,6 +92,15 @@ func WithRetry(operation func() error) error {
 			return err
 		}
 		if IsRetriableError(err) {
+			// Respect Retry-After header if the server told us how long to wait.
+			var httpErr HTTPError
+			if errors.As(err, &httpErr) && httpErr.RetryAfter > 0 {
+				wait := httpErr.RetryAfter
+				if wait > 2*time.Minute {
+					wait = 2 * time.Minute
+				}
+				time.Sleep(wait)
+			}
 			return err // Returning error triggers a retry
 		}
 		return backoff.Permanent(err) // Wrap non-retriable errors

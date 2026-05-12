@@ -45,7 +45,7 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 		}
 
 		key := string(user.Provider) + ":" + user.GetAccountID()
-		
+
 		r.accountQuotasMu.Lock()
 		q, ok := r.accountQuotas[key]
 		r.accountQuotasMu.Unlock()
@@ -107,15 +107,15 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 	// Clean path and split
 	path = strings.Trim(path, "/\\")
 	accountID := client.GetUserIdentifier()
-	
+
 	cachePrefix := string(provider) + ":" + accountID + ":"
-	
+
 	// Quick fast-path memory cache lookup
 	cacheKey := cachePrefix + path
 	if cachedID, ok := r.folderCache.Load(cacheKey); ok {
 		return cachedID.(string), nil
 	}
-	
+
 	// Quick fast-path lookup in DB without any locks
 	if path != "" && path != "." {
 		dbFolder, err := r.db.GetFolderByPathAndAccount("/"+path, provider, accountID)
@@ -153,7 +153,7 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		} else {
 			currentPath += "/" + part
 		}
-		
+
 		// First check memory cache
 		partCacheKey := cachePrefix + currentPath
 		if cachedID, ok := r.folderCache.Load(partCacheKey); ok {
@@ -214,7 +214,7 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 				return "", err
 			}
 			currentID = folder.ID
-			
+
 			// Insert newly created folder into DB
 			folder.Path = "/" + currentPath
 			folder.Provider = provider
