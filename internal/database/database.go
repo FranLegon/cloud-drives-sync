@@ -1,6 +1,7 @@
 package database
 
 import (
+	"sync"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -31,7 +32,9 @@ func SetAuxFolderName(name string) {
 
 // DB represents the database connection
 type DB struct {
-	conn *sql.DB
+	conn      *sql.DB
+	stmtCache map[string]*sql.Stmt
+	stmtMutex sync.RWMutex
 }
 
 // GetDBPath returns the path to the database file
@@ -74,6 +77,90 @@ func Open(masterPassword string) (*DB, error) {
 
 	db := &DB{conn: conn}
 	return db, nil
+}
+
+
+// WithTx runs a function within a database transaction, managing commit/rollback.
+func (db *DB) WithTx(fn func(*sql.Tx) error) (err error) {
+	tx, errTx := db.conn.Begin()
+	if errTx != nil {
+		return fmt.Errorf("failed to begin transaction: %w", errTx)
+	}
+
+	defer func() {
+		if p := recover(); p != nil {
+			_ = tx.Rollback()
+			panic(p)
+		} else if err != nil {
+			_ = tx.Rollback()
+		} else {
+			if commitErr := tx.Commit(); commitErr != nil {
+				err = fmt.Errorf("failed to commit transaction: %w", commitErr)
+			}
+		}
+	}()
+
+	return fn(tx)
+}
+
+func (db *DB) getStmt(query string) (*sql.Stmt, error) {
+	db.stmtMutex.RLock()
+	stmt, ok := db.stmtCache[query]
+	db.stmtMutex.RUnlock()
+
+	if ok {
+		return stmt, nil
+	}
+
+	db.stmtMutex.Lock()
+	defer db.stmtMutex.Unlock()
+
+	if db.stmtCache == nil {
+		db.stmtCache = make(map[string]*sql.Stmt)
+	}
+	if stmt, ok := db.stmtCache[query]; ok {
+		return stmt, nil
+	}
+
+	stmt, err := db.conn.Prepare(query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to prepare statement: %w", err)
+	}
+
+	db.stmtCache[query] = stmt
+	return stmt, nil
+}
+
+func (db *DB) execTx(tx *sql.Tx, query string, args ...interface{}) (sql.Result, error) {
+	stmt, err := db.getStmt(query)
+	if err != nil {
+		return nil, err
+	}
+	return tx.Stmt(stmt).Exec(args...)
+}
+
+func (db *DB) exec(query string, args ...interface{}) (sql.Result, error) {
+	stmt, err := db.getStmt(query)
+	if err != nil {
+		return nil, err
+	}
+	return stmt.Exec(args...)
+}
+
+func (db *DB) query(query string, args ...interface{}) (*sql.Rows, error) {
+	stmt, err := db.getStmt(query)
+	if err != nil {
+		return nil, err
+	}
+	return stmt.Query(args...)
+}
+
+func (db *DB) queryRow(query string, args ...interface{}) *sql.Row {
+	stmt, err := db.getStmt(query)
+	if err != nil {
+		return db.conn.QueryRow(query, args...)
+	}
+	return stmt.QueryRow(args...)
 }
 
 // Reset clears all data from the database
@@ -120,6 +207,12 @@ func (db *DB) GetMetadataHash() (string, error) {
 // Close closes the database connection
 func (db *DB) Close() error {
 	if db.conn != nil {
+		db.stmtMutex.Lock()
+		for _, stmt := range db.stmtCache {
+			stmt.Close()
+		}
+		db.stmtCache = nil
+		db.stmtMutex.Unlock()
 		return db.conn.Close()
 	}
 	return nil
@@ -241,54 +334,34 @@ func (db *DB) Initialize() error {
 
 // InsertFile inserts a file record into the database
 func (db *DB) InsertFile(file *model.File) error {
-	tx, err := db.conn.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	// Insert into files table
-	fileQuery := `
-	INSERT OR REPLACE INTO files (
-		id, path, name, size, calculated_id, mod_time, status
-	) VALUES (?, ?, ?, ?, ?, ?, ?)
-	`
-	_, err = tx.Exec(fileQuery,
-		file.ID, file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status)
-	if err != nil {
-		return fmt.Errorf("failed to insert file: %w", err)
-	}
-
-	// Insert replicas
-	if len(file.Replicas) > 0 {
-		replicaQuery := `
-		INSERT OR REPLACE INTO replicas (
-			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	return db.WithTx(func(tx *sql.Tx) error {
+		fileQuery := `
+		INSERT OR REPLACE INTO files (
+			id, path, name, size, calculated_id, mod_time, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
 		`
-		stmt, err := tx.Prepare(replicaQuery)
-		if err != nil {
-			return fmt.Errorf("failed to prepare replica statement: %w", err)
+		if _, err := db.execTx(tx, fileQuery,
+			file.ID, file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status); err != nil {
+			return fmt.Errorf("failed to insert file: %w", err)
 		}
-		defer stmt.Close()
 
-		for _, replica := range file.Replicas {
-			_, err := stmt.Exec(
-				file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
-				string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-				replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
-			if err != nil {
-				return fmt.Errorf("failed to insert replica: %w", err)
+		if len(file.Replicas) > 0 {
+			replicaQuery := `
+			INSERT OR REPLACE INTO replicas (
+				file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`
+			for _, replica := range file.Replicas {
+				if _, err := db.execTx(tx, replicaQuery,
+					file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+					string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+					replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner); err != nil {
+					return fmt.Errorf("failed to insert replica: %w", err)
+				}
 			}
-			// Note: Fragments should be inserted separately via InsertReplicaFragment
-			// This is because fragments are associated with replicas, not files
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
 
 // BatchInsertFiles inserts multiple files (replicas and fragments) in a single transaction
@@ -455,7 +528,7 @@ func (db *DB) InsertReplica(replica *model.Replica) error {
 		file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
-	res, err := db.conn.Exec(query,
+	res, err := db.exec(query,
 		replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
@@ -478,7 +551,7 @@ func (db *DB) UpsertReplica(replica *model.Replica) error {
 		id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
-	_, err := db.conn.Exec(query,
+	_, err := db.exec(query,
 		replica.ID, replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
@@ -495,7 +568,7 @@ func (db *DB) InsertReplicaFragment(fragment *model.ReplicaFragment) error {
 		replica_id, fragment_number, fragments_total, size, native_fragment_id
 	) VALUES (?, ?, ?, ?, ?)
 	`
-	res, err := db.conn.Exec(query,
+	res, err := db.exec(query,
 		fragment.ReplicaID, fragment.FragmentNumber, fragment.FragmentsTotal, fragment.Size, fragment.NativeFragmentID)
 	if err != nil {
 		return fmt.Errorf("failed to insert fragment: %w", err)
@@ -532,7 +605,7 @@ func (db *DB) InsertFolder(folder *model.Folder) error {
 	   OR COALESCE(folders.owner_email, '') != COALESCE(excluded.owner_email, '')
 	`
 
-	_, err := db.conn.Exec(query,
+	_, err := db.exec(query,
 		folder.ID, folder.Name, folder.Path, string(folder.Provider),
 		folder.UserEmail, folder.UserPhone, folder.ParentFolderID, folder.OwnerEmail,
 	)
