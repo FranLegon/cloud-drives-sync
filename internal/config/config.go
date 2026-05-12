@@ -20,6 +20,18 @@ var (
 	ErrInvalidPassword = errors.New("invalid master password")
 )
 
+// Embedded data for auto builds (set via SetEmbeddedData)
+var (
+	embeddedConfigData []byte
+	embeddedSaltData   []byte
+)
+
+// SetEmbeddedData sets the embedded config and salt data for auto builds.
+func SetEmbeddedData(configData, saltData []byte) {
+	embeddedConfigData = configData
+	embeddedSaltData = saltData
+}
+
 // GetConfigPath returns the path to the config file
 func GetConfigPath() string {
 	execPath, err := os.Executable()
@@ -40,25 +52,37 @@ func GetSaltPath() string {
 
 // LoadConfig loads and decrypts the configuration file
 func LoadConfig(masterPassword string) (*model.Config, error) {
-	saltPath := GetSaltPath()
-	configPath := GetConfigPath()
-
-	// Load salt
-	salt, err := crypto.LoadSalt(saltPath)
-	if err != nil {
-		return nil, err
+	// Load salt (prefer embedded data)
+	var salt []byte
+	if embeddedSaltData != nil {
+		if len(embeddedSaltData) != 32 {
+			return nil, errors.New("invalid embedded salt size")
+		}
+		salt = embeddedSaltData
+	} else {
+		var err error
+		salt, err = crypto.LoadSalt(GetSaltPath())
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Derive key
 	key := crypto.DeriveKey(masterPassword, salt)
 
-	// Load encrypted config
-	encryptedData, err := os.ReadFile(configPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, ErrConfigNotFound
+	// Load encrypted config (prefer embedded data)
+	var encryptedData []byte
+	if embeddedConfigData != nil {
+		encryptedData = embeddedConfigData
+	} else {
+		var err error
+		encryptedData, err = os.ReadFile(GetConfigPath())
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil, ErrConfigNotFound
+			}
+			return nil, err
 		}
-		return nil, err
 	}
 
 	// Decrypt config
@@ -122,6 +146,9 @@ func SaveConfig(cfg *model.Config, masterPassword string) error {
 
 // ConfigExists checks if the config file exists
 func ConfigExists() bool {
+	if embeddedConfigData != nil {
+		return true
+	}
 	configPath := GetConfigPath()
 	_, err := os.Stat(configPath)
 	return err == nil
