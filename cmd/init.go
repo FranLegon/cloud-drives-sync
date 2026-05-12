@@ -364,7 +364,7 @@ func updateMainAccount(cfg *model.Config, password string) error {
 	}
 
 	// Only Google can be the main account
-	provider := "Google"
+	provider := string(model.ProviderGoogle)
 	fmt.Println("Adding Google as the main account provider.")
 
 	// Perform OAuth flow
@@ -398,7 +398,7 @@ func updateMainAccount(cfg *model.Config, password string) error {
 	logger.Info("Main account added/updated successfully")
 
 	// For Google, create the sync folder
-	if provider == "Google" {
+	if model.Provider(provider) == model.ProviderGoogle {
 		oauthConfig := auth.GetGoogleOAuthConfig(cfg.GoogleClient.ID, cfg.GoogleClient.Secret)
 		client, err := google.NewClient(&user, oauthConfig)
 		if err != nil {

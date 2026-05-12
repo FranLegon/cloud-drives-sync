@@ -46,7 +46,7 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no main account found - please add a Google main account using 'init' first")
 	}
 
-	if provider == "Telegram" {
+	if provider == string(model.ProviderTelegram) {
 		return addTelegramAccount(cfg, masterPassword)
 	}
 
@@ -77,8 +77,8 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 	}
 
 	// Provider-specific setup
-	switch provider {
-	case "Google":
+	switch model.Provider(provider) {
+	case model.ProviderGoogle:
 		// Share main account's folder with backup account
 		mainUser := config.GetMainAccount(cfg, model.ProviderGoogle)
 		oauthConfig := auth.GetGoogleOAuthConfig(cfg.GoogleClient.ID, cfg.GoogleClient.Secret)
@@ -101,7 +101,7 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 			logger.DryRun("Would share main sync folder with %s", email)
 		}
 
-	case "Microsoft":
+	case model.ProviderMicrosoft:
 		syncFolderName := "cloud-drives-sync"
 
 		// Create folder in backup account

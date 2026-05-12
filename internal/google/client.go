@@ -845,7 +845,7 @@ func (c *Client) CreateShortcut(parentID, name, targetID, targetDriveID string) 
 		Name:         createdShortcut.Name,
 		Size:         0,
 		Path:         "",
-		CalculatedID: fmt.Sprintf("%s-0", createdShortcut.Name),
+		CalculatedID: model.GenerateCalculatedID(createdShortcut.Name, 0),
 		ModTime:      time.Now(),
 		Status:       "active",
 		Replicas:     nil, // Shortcuts don't have physical replicas

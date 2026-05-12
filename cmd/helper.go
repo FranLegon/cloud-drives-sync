@@ -36,11 +36,11 @@ func performOAuthFlow(provider string, c *model.Config) (*oauth2.Token, string, 
 	var oauthConfig *oauth2.Config
 	var getEmail func(context.Context, *oauth2.Token, *oauth2.Config) (string, error)
 
-	switch provider {
-	case "Google":
+	switch model.Provider(provider) {
+	case model.ProviderGoogle:
 		oauthConfig = auth.GetGoogleOAuthConfig(c.GoogleClient.ID, c.GoogleClient.Secret)
 		getEmail = auth.GetGoogleUserEmail
-	case "Microsoft":
+	case model.ProviderMicrosoft:
 		oauthConfig = auth.GetMicrosoftOAuthConfig(c.MicrosoftClient.ID, c.MicrosoftClient.Secret)
 		getEmail = auth.GetMicrosoftUserEmail
 	default:
