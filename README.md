@@ -16,7 +16,13 @@ The tool uses a single "main account" (Google Drive) as the primary synchronizat
 ## Installation
 
 ```bash
+# Standard build (all commands available)
 go build -o cloud-drives-sync.exe .
+
+# Auto build (embeds config.json.enc and config.salt into the binary)
+# Only auto, sync, and help commands are available.
+# No init step needed — just provide the master password at runtime.
+go build -tags auto -o cloud-drives-sync-auto.exe .
 ```
 
 ## Quick Start
@@ -46,26 +52,50 @@ go build -o cloud-drives-sync.exe .
 
 ## Available Commands
 
-- `add-account` : Add a backup account for an existing provider
-- `balance-storage` : Balance storage usage across backup accounts
-- `check-for-duplicates` : Check for duplicate files within each provider
-- `check-tokens` : Validate all authentication tokens
-- `delete-unsynced-files` : Delete files in backup accounts that are not in the sync folder
-- `free-main` : Transfer all files from the main account to backup accounts
-- `get-metadata` : Scan all cloud providers and update the local metadata database
-- `init` : Initialize the application or add a main account
-- `quota` : Calculate and print total used and available quota for each provider
-- `reauth` : Re-authenticate cloud provider accounts
-- `remove-account` : Remove a backup account or an entire provider from the configuration
-- `remove-duplicates` : Interactively remove duplicate files
-- `remove-duplicates-unsafe` : Automatically remove duplicate files (keeps the oldest)
-- `share-with-main` : Verify and repair share permissions with main accounts
-- `sync` : Run the full synchronization workflow
-- `sync-providers` : Synchronize files across all cloud providers
-- `test` : Run system integration tests
+| Command | Description | Standard | Auto |
+|---|---|:---:|:---:|
+| `add-account` | Add a backup account for an existing provider | ✓ | ✗ |
+| `auto` | Manage automatic scheduled synchronization (scheduled task / systemd timer) | ✗ | ✓ |
+| `balance-storage` | Balance storage usage across backup accounts | ✓ | ✗ |
+| `check-for-duplicates` | Check for duplicate files within each provider | ✓ | ✗ |
+| `check-tokens` | Validate all authentication tokens | ✓ | ✗ |
+| `delete-unsynced-files` | Delete files in backup accounts that are not in the sync folder | ✓ | ✗ |
+| `free-main` | Transfer all files from the main account to backup accounts | ✓ | ✗ |
+| `get-metadata` | Scan all cloud providers and update the local metadata database | ✓ | ✗ |
+| `init` | Initialize the application or add a main account | ✓ | ✗ |
+| `quota` | Calculate and print total used and available quota for each provider | ✓ | ✗ |
+| `reauth` | Re-authenticate cloud provider accounts | ✓ | ✗ |
+| `remove-account` | Remove a backup account or an entire provider from the configuration | ✓ | ✗ |
+| `remove-duplicates` | Interactively remove duplicate files | ✓ | ✗ |
+| `remove-duplicates-unsafe` | Automatically remove duplicate files (keeps the oldest) | ✓ | ✗ |
+| `share-with-main` | Verify and repair share permissions with main accounts | ✓ | ✗ |
+| `sync` | Run the full synchronization workflow | ✓ | ✓ |
+| `sync-providers` | Synchronize files across all cloud providers | ✓ | ✗ |
+| `test` | Run system integration tests | ✓ | ✗ |
+
+### Auto Command
+
+The `auto` command is only available in auto builds (`go build -tags auto`). It creates or removes a scheduled task (Windows) or systemd timer (Linux) that runs `sync` every 8 hours.
+
+```bash
+# Create the scheduled sync (runs immediately + every 8 hours)
+cloud-drives-sync-auto auto --set -p <master-password>
+
+# Check current status
+cloud-drives-sync-auto auto
+
+# Remove the scheduled sync
+cloud-drives-sync-auto auto --disable
+```
+
+Flags:
+- `--set` : Create the scheduled task/service (requires `-p`)
+- `--disable`, `-d` : Remove the scheduled task/service
+- No flags : Show whether the schedule is currently installed
 
 ## Project Architecture & Data
 
 - **Sync Folder:** The tool only interacts with files inside a specific folder structure (`cloud-drives-sync` and `cloud-drives-sync-aux/soft-deleted`). It will never modify files outside of these directories.
 - **Database:** Local metadata is stored in `metadata.db`. You can view `DATABASE_ACCESS.md` for information on how to query it manually using Python, Go, or DB Browser for SQLCipher.
 - **Testing:** The `test` command runs a suite of full end-to-end integration tests mimicking complex file movements, fragmentation, soft deletions, and more. See `TEST.md` for instructions on the test suite loop.
+- **Auto Build:** When built with `-tags auto`, the binary embeds `config.json.enc` and `config.salt` at compile time. This creates a self-contained binary that requires no `init` step — only the master password at runtime. Available commands are restricted to `auto`, `sync`, and `help`.

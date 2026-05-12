@@ -438,6 +438,26 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 *   **`help`**
     *   Help output is provided by Cobra's built-in command/help handling and lists available commands, their purpose, and usage.
 
+*   **`auto`** *(auto build only)*
+    *   Only available when the binary is built with `-tags auto`.
+    *   Creates or removes a scheduled task (Windows) or systemd user timer (Linux) that runs `sync -p <password>` every 8 hours.
+    *   **Flags:**
+        *   `--set`: Creates the scheduled task/service. Requires `-p` (master password).
+        *   `--disable`, `-d`: Removes the scheduled task/service.
+        *   No flags: Shows current status (whether the schedule is installed/active).
+    *   `--set` and `--disable` are mutually exclusive; one must be provided to take action.
+    *   **Windows:** Uses `schtasks` to create a task named `cloud-drives-sync` that triggers on logon and repeats every 8 hours. Also runs immediately on `--set`.
+    *   **Linux:** Writes systemd user service and timer unit files to `~/.config/systemd/user/`, enables and starts the timer. Timer fires 5 minutes after boot and then every 8 hours.
+    *   **`--disable`:** Removes the scheduled task (Windows) or stops/disables the timer and removes unit files (Linux).
+
+#### **5B.1 Auto Build**
+
+When built with the `auto` build tag (`go build -tags auto`), the binary has the following differences from a standard build:
+
+*   **Embedded Configuration:** `config.json.enc` and `config.salt` are embedded into the binary at compile time using `//go:embed`. This removes the need for an `init` step or external config files. The master password is still required at runtime to decrypt the embedded config.
+*   **Command Gating:** Only `auto`, `sync`, and `help` commands are available. All other commands (init, test, add-account, etc.) return an error indicating they are not available in auto builds.
+*   **Use Case:** Designed for deployment scenarios where the binary should be self-contained and run on a schedule without manual setup.
+
 #### **5B. Detailed Functionality (Command-Line flags)**
 
 *   **`--safe`, `-s`**
