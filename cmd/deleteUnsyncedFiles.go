@@ -9,7 +9,7 @@ var deleteUnsyncedFilesCmd = &cobra.Command{
 	Use:   "delete-unsynced-files",
 	Short: "Delete files in backup accounts that are not in the sync folder",
 	Long: `Iterates through all backup accounts and deletes any files or folders
-found in the root directory that are not the designated 'sync-cloud-drives' folder.
+found in the root directory that are not the designated 'cloud-drives-sync' folder.
 This ensures backup accounts only contain synced data.`,
 	RunE: runDeleteUnsyncedFiles,
 }

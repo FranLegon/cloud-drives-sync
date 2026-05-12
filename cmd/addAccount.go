@@ -101,7 +101,7 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 		}
 
 	case "Microsoft":
-		syncFolderName := "sync-cloud-drives"
+		syncFolderName := "cloud-drives-sync"
 
 		// Create folder in backup account
 		if !safeMode {

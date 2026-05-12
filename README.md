@@ -66,6 +66,6 @@ go build -o cloud-drives-sync.exe .
 
 ## Project Architecture & Data
 
-- **Sync Folder:** The tool only interacts with files inside a specific folder structure (`sync-cloud-drives` and `sync-cloud-drives-aux/soft-deleted`). It will never modify files outside of these directories.
+- **Sync Folder:** The tool only interacts with files inside a specific folder structure (`cloud-drives-sync` and `cloud-drives-sync-aux/soft-deleted`). It will never modify files outside of these directories.
 - **Database:** Local metadata is stored in `metadata.db`. You can view `DATABASE_ACCESS.md` for information on how to query it manually using Python, Go, or DB Browser for SQLCipher.
 - **Testing:** The `test` command runs a suite of full end-to-end integration tests mimicking complex file movements, fragmentation, soft deletions, and more. See `TEST.md` for instructions on the test suite loop.

@@ -26,7 +26,7 @@ import (
 )
 
 const (
-	syncChannelName = "sync-cloud-drives"
+	syncChannelName = "cloud-drives-sync"
 )
 
 // ErrNotSupported is returned by operations that Telegram does not support
@@ -923,11 +923,11 @@ func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
 	}
 
 	// We need folderID. Since we lack it here, we assume standard sync channel?
-	// Actually, metadata.db is in "sync-cloud-drives-aux" "folder".
+	// Actually, metadata.db is in "cloud-drives-sync-aux" "folder".
 	// In Telegram, folders are just paths in metadata.
 	// We can try to upload with the standard Aux path.
 
-	folderID := "/sync-cloud-drives-aux"
+	folderID := "/cloud-drives-sync-aux"
 	_, err := c.UploadFile(folderID, "metadata.db", reader, size)
 	return err
 }
@@ -1139,5 +1139,3 @@ func (c *Client) GetDriveID() (string, error) {
 func (c *Client) CreateShortcut(parentID, name, targetID, targetDriveID string) (*model.File, error) {
 	return nil, ErrNotSupported
 }
-
-

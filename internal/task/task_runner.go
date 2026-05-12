@@ -1935,7 +1935,7 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 				logger.Info("File %s (CalculatedID: %s) found in %s but soft-deleted in another provider. Moving to soft-deleted.", path, file.CalculatedID, provider)
 
 				// Calculate target path
-				// "sync-cloud-drives-aux/soft-deleted" is relative to sync root.
+				// "cloud-drives-sync-aux/soft-deleted" is relative to sync root.
 				// target.Path includes the full path relative to sync root.
 				// We want to move 'file' to 'target.Path' (or construct if target is just representative)
 				// Ideally we move it to the path defined by the file in soft-deleted.

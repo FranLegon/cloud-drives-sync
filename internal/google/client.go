@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	syncFolderName = "sync-cloud-drives"
+	syncFolderName = "cloud-drives-sync"
 )
 
 // Client represents a Google Drive client

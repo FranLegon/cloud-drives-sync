@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	syncFolderPrefix      = "sync-cloud-drives"
+	syncFolderPrefix      = "cloud-drives-sync"
 	FakeShortcutExtension = ".placeholder"
 )
 
@@ -495,7 +495,7 @@ func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
 			resp.Body.Close()
 			return fmt.Errorf("chunk upload failed status %s: %s", resp.Status, string(body))
 		}
-		
+
 		// Discard the body to allow HTTP keep-alive connection reuse
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()

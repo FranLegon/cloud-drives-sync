@@ -654,7 +654,7 @@ func recreateSyncFolders(r *task.Runner, cfg *model.Config) error {
 		id, err := client.GetSyncFolderID()
 		if err != nil || id == "" {
 			logger.Info("Creating Main sync folder for %s...", mainUser.Email)
-			if _, err := client.CreateFolder("root", "sync-cloud-drives"); err != nil {
+			if _, err := client.CreateFolder("root", "cloud-drives-sync"); err != nil {
 				return fmt.Errorf("failed to create main sync folder: %w", err)
 			}
 		}
@@ -709,11 +709,11 @@ func recreateSyncFolders(r *task.Runner, cfg *model.Config) error {
 			}
 
 		case model.ProviderMicrosoft:
-			if _, err := client.CreateFolder("root", "sync-cloud-drives"); err != nil {
+			if _, err := client.CreateFolder("root", "cloud-drives-sync"); err != nil {
 				return fmt.Errorf("failed to create microsoft sync folder: %w", err)
 			}
 			if mainUser != nil {
-				if err := client.ShareFolder("root/sync-cloud-drives", mainUser.Email, "writer"); err != nil {
+				if err := client.ShareFolder("root/cloud-drives-sync", mainUser.Email, "writer"); err != nil {
 					nid, err := client.GetSyncFolderID()
 					if err != nil {
 						return err
@@ -726,7 +726,7 @@ func recreateSyncFolders(r *task.Runner, cfg *model.Config) error {
 			if err := client.PreFlightCheck(); err != nil {
 				return fmt.Errorf("telegram preflight check failed: %w", err)
 			}
-			if _, err := client.CreateFolder("", "sync-cloud-drives"); err != nil {
+			if _, err := client.CreateFolder("", "cloud-drives-sync"); err != nil {
 				logger.Warning("Telegram create folder/channel warning: %v", err)
 			}
 		}
@@ -766,7 +766,7 @@ func cleanupCloudFiles(r *task.Runner) error {
 			folders, err := c.ListFolders("root")
 			if err == nil {
 				for _, f := range folders {
-					if f.Name == "sync-cloud-drives-aux" {
+					if f.Name == "cloud-drives-sync-aux" {
 						logger.InfoTagged([]string{string(u.Provider), u.Email}, "Deleting aux folder %s...", f.ID)
 						// Try to empty it first
 						subs, _ := c.ListFolders(f.ID)
@@ -1241,7 +1241,7 @@ func runTestCase5(runner *task.Runner, _ *model.User, backups []*model.User) err
 	logger.Info("\n--- Test Case 5: Soft Deletion ---")
 
 	getSoftID := func(c api.CloudClient, rootID string) (string, error) {
-		aux, err := getOrCreateFolder(c, rootID, "sync-cloud-drives-aux")
+		aux, err := getOrCreateFolder(c, rootID, "cloud-drives-sync-aux")
 		if err != nil {
 			return "", err
 		}
@@ -1610,8 +1610,8 @@ func runTestCase7(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		return "", fmt.Errorf("folder %s not found in %s", name, parentID)
 	}
 
-	// Locate current test_5.txt in sync-cloud-drives-aux/soft-deleted
-	auxID, err := findFolderID(mainClient, mainSyncID, "sync-cloud-drives-aux")
+	// Locate current test_5.txt in cloud-drives-sync-aux/soft-deleted
+	auxID, err := findFolderID(mainClient, mainSyncID, "cloud-drives-sync-aux")
 	if err != nil {
 		return err
 	}
@@ -1696,7 +1696,7 @@ func runTestCase7(runner *task.Runner, mainUser *model.User, backups []*model.Us
 		}
 
 		// 2. Verify IN soft-deleted
-		auxID, err := findFolderID(client, sid, "sync-cloud-drives-aux")
+		auxID, err := findFolderID(client, sid, "cloud-drives-sync-aux")
 		if err != nil {
 			// If aux doesn't exist, that's definitely a fail for test_4.txt specific check
 			return fmt.Errorf("aux folder missing for %s: %w", u.Email, err)
@@ -2043,7 +2043,7 @@ func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.Us
 	logger.Info("\n--- Test Case 8: Hard Deletion ---")
 
 	getSoftID := func(c api.CloudClient, rootID string) (string, error) {
-		aux, err := getOrCreateFolder(c, rootID, "sync-cloud-drives-aux")
+		aux, err := getOrCreateFolder(c, rootID, "cloud-drives-sync-aux")
 		if err != nil {
 			return "", err
 		}

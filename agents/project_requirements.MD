@@ -11,17 +11,17 @@ The primary goals are to free main account, de-duplicate files, ensure data is m
 The application must only interact with files and folders contained within specific root folders:
 
 **Soft Deletion:**
-- A special folder `sync-cloud-drives-aux/soft-deleted` exists for soft-deleted files. Files here are excluded from standard sync but enforced if present in other providers.
+- A special folder `cloud-drives-sync-aux/soft-deleted` exists for soft-deleted files. Files here are excluded from standard sync but enforced if present in other providers.
 
 **Google Drive:**
-- A single folder named `sync-cloud-drives` resides in the main account.
+- A single folder named `cloud-drives-sync` resides in the main account.
 - The main account owns all folders within this structure.
 - Backup accounts own the files but do not own folders.
 
 **Microsoft OneDrive for Business:**
-- A single folder named `sync-cloud-drives` resides in each backup account.
-- Each backup account owns its own `sync-cloud-drives` folder and all subfolders within it.
-- Files are distributed across backup accounts. To maintain a consistent directory structure across all accounts, if a file is owned by Account A, Account B will contain a shortcut to that file in the corresponding location within its own `sync-cloud-drives` structure.
+- A single folder named `cloud-drives-sync` resides in each backup account.
+- Each backup account owns its own `cloud-drives-sync` folder and all subfolders within it.
+- Files are distributed across backup accounts. To maintain a consistent directory structure across all accounts, if a file is owned by Account A, Account B will contain a shortcut to that file in the corresponding location within its own `cloud-drives-sync` structure.
 - **Fallback for Shortcuts:** If creating a native OneDrive shortcut fails (e.g. due to cross-tenant permission issues or API limitations), the system creates a "Fake Shortcut" (placeholder file) named with the pattern `filename.ext.sz-<size>.placeholder`. This 0-byte placeholder carries existence and metadata info and is treated as a valid shortcut by the system to prevent data duplication.
 - **Folder Synchronization:** The system ensures that the complete directory structure is mirrored across all backup accounts (except Telegram). This includes empty folders or folders used only for hierarchy. If a folder exists in the Main account (Google) or in the Database `folders` table, it will be created in the corresponding path in Microsoft backup accounts.
 - Folder owner is always the file owner in OneDrive.
@@ -30,10 +30,10 @@ The application must only interact with files and folders contained within speci
 - Heavily relies on metadata.db and message caption to track files stored in Telegram, as Telegram does not have a folder structure.
 - Files bigger than Telegram's limits get uploaded as multiple parts, each tracked in the database.
 
-*   **Isolation:** The tool must never read, list, modify, or delete any file or folder outside of the designated `sync-cloud-drives` directories.
+*   **Isolation:** The tool must never read, list, modify, or delete any file or folder outside of the designated `cloud-drives-sync` directories.
 *   **Pre-flight Check:** Before executing any command that interacts with the cloud, the tool must perform a "pre-flight check":
-    *   **Google Drive:** Verifies that exactly one folder named `sync-cloud-drives` is owned by the main account. It will search all active folders and explicitly ignore any folders that are marked as trashed/in the recycle bin. If the folder is found but is not in the root directory, it will be moved there. If more than one active folder with this name are found, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
-    *   **Microsoft OneDrive:** Verifies that exactly one folder named `sync-cloud-drives` exists in each backup account. If more than one active folder with this name are found in a backup account, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
+    *   **Google Drive:** Verifies that exactly one folder named `cloud-drives-sync` is owned by the main account. It will search all active folders and explicitly ignore any folders that are marked as trashed/in the recycle bin. If the folder is found but is not in the root directory, it will be moved there. If more than one active folder with this name are found, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
+    *   **Microsoft OneDrive:** Verifies that exactly one folder named `cloud-drives-sync` exists in each backup account. If more than one active folder with this name are found in a backup account, the program must abort with a clear error message instructing the user to resolve the ambiguity manually.
     *   **Telegram:** Verifies that the Telegram account is accessible and ready for file operations.
 
 #### **3. Architecture & Design Principles**
@@ -56,8 +56,8 @@ The application must only interact with files and folders contained within speci
     *   Log all major actions, successes, and detailed errors to the console. Logs should be prefixed with tags when appropriate (e.g., `[Google]`, `[Microsoft]`, `[Telegram]`, `[main.user@gmail.com]`).
     *   The application will exit with a status code of `0` on success and a non-zero status code on any error, making it suitable for scripting.
     *   **Metadata Sync:**
-        *   **Upload:** All commands that alter `metadata.db` (e.g., `init`, `get-metadata`, `sync-providers`, `remove-duplicates*`, `balance-storage`, `free-main`) must upload the `metadata.db` file to a dedicated folder named `sync-cloud-drives/sync-cloud-drives-aux` in the main account (Google) and all backup accounts (Google/OneDrive/Telegram) at the end of successful execution.
-        *   **Download:** All commands that require `metadata.db` must first check for the file locally. If it is missing, the tool must attempt to download it from `sync-cloud-drives/sync-cloud-drives-aux/metadata.db`.
+        *   **Upload:** All commands that alter `metadata.db` (e.g., `init`, `get-metadata`, `sync-providers`, `remove-duplicates*`, `balance-storage`, `free-main`) must upload the `metadata.db` file to a dedicated folder named `cloud-drives-sync/cloud-drives-sync-aux` in the main account (Google) and all backup accounts (Google/OneDrive/Telegram) at the end of successful execution.
+        *   **Download:** All commands that require `metadata.db` must first check for the file locally. If it is missing, the tool must attempt to download it from `cloud-drives-sync/cloud-drives-sync-aux/metadata.db`.
         *   **Download Priority:** 
             1.  Local file system.
             2.  Google Drive (Main Account).
@@ -283,15 +283,15 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
         *   Microsoft: Requests `files.readwrite.all`, `user.read`, and `offline_access` for OneDrive for Business.
         *   Telegram: Uses Telegram API authentication with phone number and verification code.
     *   **Microsoft Account Types:** The Azure App Registration must be configured to support "Accounts in any organizational directory (Any Azure AD directory - Multitenant)" for OneDrive for Business.
-    *   After adding a Google main account, it creates the `sync-cloud-drives` folder in that account's root if it doesn't exist.
+    *   After adding a Google main account, it creates the `cloud-drives-sync` folder in that account's root if it doesn't exist.
     *   Subsequent runs of `init` allows updating client credentials or main account.
 
 *   **`add-account`**
     *   Adds a **backup account** to a provider.
     *   Exits with an error if no main account exists.
     *   Initiates OAuth 2.0 flow by starting a local web server.
-    *   **Google Drive:** Upon successful authorization, the main account shares its `sync-cloud-drives` folder with the new backup account, granting "editor" permissions.
-    *   **Microsoft OneDrive:** Upon successful authorization, creates a `sync-cloud-drives` folder in the backup account's root if it doesn't exist.
+    *   **Google Drive:** Upon successful authorization, the main account shares its `cloud-drives-sync` folder with the new backup account, granting "editor" permissions.
+    *   **Microsoft OneDrive:** Upon successful authorization, creates a `cloud-drives-sync` folder in the backup account's root if it doesn't exist.
     *   **Telegram:** Allows adding Telegram account for backup storage purposes.
 
 *   **`remove-account`**
@@ -301,8 +301,8 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 
 *   **`get-metadata`**
     *   After passing the pre-flight checks, it recursively scans the designated sync folders for every account.
-    *   **Google Drive:** Scans the `sync-cloud-drives` folder and all shared content within it.
-    *   **Microsoft OneDrive:** Scans the `sync-cloud-drives` folder in each account, handling both actual files and shortcuts to files owned by other accounts.
+    *   **Google Drive:** Scans the `cloud-drives-sync` folder and all shared content within it.
+    *   **Microsoft OneDrive:** Scans the `cloud-drives-sync` folder in each account, handling both actual files and shortcuts to files owned by other accounts.
     *   **Telegram:** Lists all files stored in the Telegram account.
     *   For each found file, it updates the `files` (logical) and `replicas` (physical) tables:
         *   **replicas:** Stores the provider-specific `native_id`, `native_hash` (MD5 for Google, SHA1 for OneDrive), `account_id`, and `provider`.
@@ -323,13 +323,13 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 
 *   **`share-with-main`**
     *   A utility command to repair permissions.
-    *   **Google Drive:** After passing the pre-flight check, it verifies that every backup account has "editor" access to the main account's `sync-cloud-drives` folder and re-applies the permission if it is missing.
+    *   **Google Drive:** After passing the pre-flight check, it verifies that every backup account has "editor" access to the main account's `cloud-drives-sync` folder and re-applies the permission if it is missing.
 
 *   **`sync-providers`**
     *   Ensures metadata is current by running the `get-metadata` logic.
     *   **Goal:** Make file content within sync folders consistent across Google Drive, Microsoft OneDrive, and Telegram.
     *   **Logic:** Compares file sets using normalized paths and file hashes. If a file is missing on one side, it's uploaded, replicating the directory structure. If a file name exists at the same path but with a different hash, it's treated as a conflict, and the incoming file is renamed with a `_conflict_YYYY-MM-DD_hh-mm-ss` suffix before upload/transfer.
-    *   **Soft Deletion:** The folder `sync-cloud-drives-aux/soft-deleted` is treated specially. Files in this folder are not synced to other providers if missing. If a file is found in `sync-cloud-drives-aux/soft-deleted` for one provider and in another folder for another provider, it is moved to `sync-cloud-drives-aux/soft-deleted` for all providers.
+    *   **Soft Deletion:** The folder `cloud-drives-sync-aux/soft-deleted` is treated specially. Files in this folder are not synced to other providers if missing. If a file is found in `cloud-drives-sync-aux/soft-deleted` for one provider and in another folder for another provider, it is moved to `cloud-drives-sync-aux/soft-deleted` for all providers.
     *   **Telegram Handling:** Files can be pushed to Telegram as backups but consider its limitations (file size limits, access patterns).
 
 *   **`balance-storage`**
@@ -369,9 +369,9 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
         5.  `balance-storage`: Re-distribute files to balance usage across backup accounts.
 
 *   **`delete-unsynced-files`**
-    *   Deletes all files in backup accounts that are not inside the `sync-cloud-drives` folder or its subfolders.
+    *   Deletes all files in backup accounts that are not inside the `cloud-drives-sync` folder or its subfolders.
     *   **Goal:** Clean up backup accounts to ensure they only contain synced data.
-    *   **Logic:** Iterates through all backup accounts. For each account, lists all files and folders in the root directory. Any item that is not the designated sync folder (e.g., `sync-cloud-drives`) is deleted.
+    *   **Logic:** Iterates through all backup accounts. For each account, lists all files and folders in the root directory. Any item that is not the designated sync folder (e.g., `cloud-drives-sync`) is deleted.
     *   **Safety:** Respects the `--safe` flag to perform a dry run.
 
 *   **`test`**
@@ -385,7 +385,7 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
         *   Inherits global `--password`, `-p` and standard Cobra help handling from the root command.
     *   **Process:**
         1.  **Cleanup (Unsafe Mode):** If `--safe` is not provided:
-            *   Deletes `sync-cloud-drives`, all subfolders, and files from all accounts (main and backups, all providers).
+            *   Deletes `cloud-drives-sync`, all subfolders, and files from all accounts (main and backups, all providers).
             *   Deletes local `metadata.db` and resets internal state to clean.
             *   Prompts user for confirmation before execution (unless `--force` is used).
         2.  **Metadata Initialization:** Re-initializes the database and runs `get-metadata`.
@@ -408,7 +408,7 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
             *   Runs `sync-providers`.
             *   Verifies move propagation.
         7.  **Test Case 5 (Soft Deletion):**
-            *   Moves `test_5.txt` and others to `sync-cloud-drives-aux/soft-deleted`.
+            *   Moves `test_5.txt` and others to `cloud-drives-sync-aux/soft-deleted`.
             *   Runs `sync-providers`.
             *   Verifies files are marked as soft-deleted everywhere (gone from active sync).
         8.  **Test Case 6 (Nested Folders):**
@@ -418,7 +418,7 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
             *   Runs `sync-providers`.
             *   Verifies file is restored and active on all providers.
         10. **Test Case 8 (Hard Deletion):**
-            *   Deletes all files from `sync-cloud-drives-aux/soft-deleted`.
+            *   Deletes all files from `cloud-drives-sync-aux/soft-deleted`.
             *   Runs `sync-providers`.
             *   Verifies files are permanently removed from DB and Cloud.
         11. **Test Case 9 (Quota Similarity Check):**
@@ -462,10 +462,10 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 
 **Google Drive:**
 - Main account owns folders; backup accounts own files.
-- Single `sync-cloud-drives` folder shared among all accounts.
+- Single `cloud-drives-sync` folder shared among all accounts.
 
 **Microsoft OneDrive for Business:**
-- Each backup account owns its own `sync-cloud-drives` folder.
+- Each backup account owns its own `cloud-drives-sync` folder.
 - Folder owner is always the file owner.
 - Consistency is maintained via shortcuts. If Account A owns a file, Account B holds a shortcut to it.
 - **Placeholder Mechanism:** If the system cannot create a native shortcut (common in cross-tenant scenarios), it falls back to creating a 0-byte placeholder file with a specific extension (`.placeholder`) that encodes the original file's size in its name (`.sz-<size>.placeholder`). The system reads these placeholders as valid replicas/shortcuts within the metadata.
@@ -473,7 +473,7 @@ CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 
 **Telegram:**
 - Subject to Telegram API file size limits and rate limits.
-- Files stored in dedicated channel called `sync-cloud-drives`.
+- Files stored in dedicated channel called `cloud-drives-sync`.
 - Each file (or fragment) serves as a container for metadata. The caption must contain a JSON object reflecting the `replicas` and `replica_fragments` database schema:
   ```json
   {

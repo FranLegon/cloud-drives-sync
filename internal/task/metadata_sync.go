@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	AuxFolder         = "sync-cloud-drives-aux"
+	AuxFolder         = "cloud-drives-sync-aux"
 	SoftDeletedFolder = "soft-deleted"
 	MetadataFileName  = "metadata.db"
 )
@@ -75,7 +75,7 @@ func DownloadMetadataDB(cfg *model.Config, dbPath string) error {
 
 		var auxID string
 		if user.Provider == model.ProviderTelegram {
-			auxID = "/sync-cloud-drives-aux"
+			auxID = "/cloud-drives-sync-aux"
 		} else {
 			folders, err := client.ListFolders(rootID)
 			if err != nil {

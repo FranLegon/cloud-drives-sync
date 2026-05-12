@@ -630,7 +630,7 @@ func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error)
 			allReplicas = append(allReplicas, replica)
 		}
 	}
-	
+
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
@@ -806,7 +806,7 @@ func (db *DB) batchLoadFragments(replicas []*model.Replica) error {
 				r.Fragments = append(r.Fragments, f)
 			}
 		}
-		
+
 		if err := rows.Err(); err != nil {
 			rows.Close()
 			return err
@@ -1186,8 +1186,8 @@ func (db *DB) HasActiveGoogleReplicaOutsideSoftDeleted(calculatedID string) (boo
 		WHERE calculated_id = ?
 		AND provider = 'google'
 		AND status = 'active'
-		AND path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
-		AND path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
+		AND path NOT LIKE '%cloud-drives-sync-aux/soft-deleted%'
+		AND path NOT LIKE '%cloud-drives-sync-aux\soft-deleted%'
 	)
 	`
 	var exists bool
@@ -1203,8 +1203,8 @@ func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs [
 		return result, nil
 	}
 
-	// Chunk the query if needed, SQLite limit is 999 variables usually, 
-	// but we can just fetch all matching ones without an IN clause if we want, 
+	// Chunk the query if needed, SQLite limit is 999 variables usually,
+	// but we can just fetch all matching ones without an IN clause if we want,
 	// or chunk the IN clause.
 	// Since this table could be huge, chunking the IN clause is safer.
 	chunkSize := 900
@@ -1214,28 +1214,28 @@ func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs [
 			end = len(calculatedIDs)
 		}
 		chunk := calculatedIDs[i:end]
-		
+
 		placeholders := make([]string, len(chunk))
 		args := make([]interface{}, len(chunk))
 		for j, id := range chunk {
 			placeholders[j] = "?"
 			args[j] = id
 		}
-		
+
 		query := fmt.Sprintf(`
 		SELECT DISTINCT calculated_id FROM replicas
 		WHERE calculated_id IN (%s)
 		AND provider = 'google'
 		AND status = 'active'
-		AND path NOT LIKE '%%sync-cloud-drives-aux/soft-deleted%%'
-		AND path NOT LIKE '%%sync-cloud-drives-aux\soft-deleted%%'
+		AND path NOT LIKE '%%cloud-drives-sync-aux/soft-deleted%%'
+		AND path NOT LIKE '%%cloud-drives-sync-aux\soft-deleted%%'
 		`, strings.Join(placeholders, ","))
-		
+
 		rows, err := db.conn.Query(query, args...)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err == nil {
@@ -1244,7 +1244,7 @@ func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs [
 		}
 		rows.Close()
 	}
-	
+
 	return result, nil
 }
 
@@ -1258,9 +1258,9 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 	updateQuery := `
 	WITH ReplicaAgg AS (
 		SELECT file_id,
-			SUM(CASE WHEN provider = 'google' AND path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%' AND path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%' THEN 1 ELSE 0 END) as active_google,
+			SUM(CASE WHEN provider = 'google' AND path NOT LIKE '%cloud-drives-sync-aux/soft-deleted%' AND path NOT LIKE '%cloud-drives-sync-aux\soft-deleted%' THEN 1 ELSE 0 END) as active_google,
 			SUM(CASE WHEN provider = 'google' THEN 1 ELSE 0 END) as total_google,
-			SUM(CASE WHEN path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%' AND path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%' THEN 1 ELSE 0 END) as active_any,
+			SUM(CASE WHEN path NOT LIKE '%cloud-drives-sync-aux/soft-deleted%' AND path NOT LIKE '%cloud-drives-sync-aux\soft-deleted%' THEN 1 ELSE 0 END) as active_any,
 			COUNT(*) as total_any
 		FROM replicas
 		WHERE status = 'active' AND last_seen_at >= ?
@@ -1299,8 +1299,8 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 		WHERE status = 'active'
 		AND provider = 'google'
 		AND last_seen_at >= ?
-		AND path NOT LIKE '%sync-cloud-drives-aux/soft-deleted%'
-		AND path NOT LIKE '%sync-cloud-drives-aux\soft-deleted%'
+		AND path NOT LIKE '%cloud-drives-sync-aux/soft-deleted%'
+		AND path NOT LIKE '%cloud-drives-sync-aux\soft-deleted%'
 	)
 	UPDATE files
 	SET status = 'active',
