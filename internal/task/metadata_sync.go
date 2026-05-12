@@ -124,7 +124,8 @@ func DownloadMetadataDB(cfg *model.Config, dbPath string) error {
 	logger.Info("Local metadata.db missing. Attempting to download from cloud providers...")
 
 	tryDownload := func(user *model.User) error {
-		client, err := createClient(user, cfg, true)
+		return api.WithRetry(func() error {
+			client, err := createClient(user, cfg, true)
 		if err != nil {
 			return err
 		}
@@ -153,11 +154,12 @@ func DownloadMetadataDB(cfg *model.Config, dbPath string) error {
 
 		logger.Info("Downloading metadata.db from %s (%s)...", user.Provider, user.Email)
 		if err := client.DownloadFile(fileID, out); err != nil {
-			out.Close()
-			os.Remove(dbPath) // Clean up partial
-			return err
-		}
-		return nil
+				out.Close()
+				os.Remove(dbPath) // Clean up partial
+				return err
+			}
+			return nil
+		})
 	}
 
 	priorities := []struct {
@@ -201,7 +203,8 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 	logger.Info("Uploading metadata.db to cloud providers...")
 
 	uploadToUser := func(user *model.User) error {
-		client, err := createClient(user, cfg, true)
+		return api.WithRetry(func() error {
+			client, err := createClient(user, cfg, true)
 		if err != nil {
 			return err
 		}
@@ -257,13 +260,14 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 				return fmt.Errorf("failed to update metadata.db: %w", err)
 			}
 		} else {
-			logger.Info("Uploading new metadata.db to %s (%s)...", user.Provider, user.Email)
-			if _, err := client.UploadFile(auxID, MetadataFileName, file, size); err != nil {
-				return fmt.Errorf("failed to upload metadata.db: %w", err)
+				logger.Info("Uploading new metadata.db to %s (%s)...", user.Provider, user.Email)
+				if _, err := client.UploadFile(auxID, MetadataFileName, file, size); err != nil {
+					return fmt.Errorf("failed to upload metadata.db: %w", err)
+				}
 			}
-		}
 
-		return nil
+			return nil
+		})
 	}
 
 	// Standardize path separators for logs

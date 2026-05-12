@@ -183,7 +183,9 @@ func (r *Runner) GetMetadata() error {
 			}
 
 			// Get sync folder ID
-			syncFolderID, err := client.GetSyncFolderID()
+			syncFolderID, err := api.WithRetryT(func() (string, error) {
+				return client.GetSyncFolderID()
+			})
 			if err != nil {
 				logger.ErrorTagged(user.LogTags(), "Failed to get sync folder: %v", err)
 				return
@@ -450,7 +452,9 @@ func (r *Runner) ShareWithMain() error {
 			return err
 		}
 
-		syncFolderID, err := client.GetSyncFolderID()
+		syncFolderID, err := api.WithRetryT(func() (string, error) {
+			return client.GetSyncFolderID()
+		})
 		if err != nil {
 			return err
 		}
@@ -1648,7 +1652,9 @@ func (r *Runner) DeleteUnsyncedFiles() error {
 		}
 
 		// Get sync folder ID
-		syncFolderID, err := client.GetSyncFolderID()
+		syncFolderID, err := api.WithRetryT(func() (string, error) {
+			return client.GetSyncFolderID()
+		})
 		if err != nil {
 			logger.Error("Failed to get sync folder for %s: %v", user.Email, err)
 			continue
