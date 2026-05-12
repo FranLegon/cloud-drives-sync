@@ -188,6 +188,25 @@ func (db *DB) Initialize() error {
 
 	CREATE INDEX IF NOT EXISTS idx_folders_provider ON folders(provider);
 	CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
+
+	CREATE TABLE IF NOT EXISTS sync_runs (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		started_at INTEGER NOT NULL,
+		completed_at INTEGER,
+		last_completed_step INTEGER NOT NULL DEFAULT 0,
+		safe_mode BOOLEAN NOT NULL DEFAULT 0
+	);
+
+	CREATE TABLE IF NOT EXISTS sync_copy_log (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		sync_run_id INTEGER NOT NULL,
+		file_id TEXT NOT NULL,
+		target_provider TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		FOREIGN KEY(sync_run_id) REFERENCES sync_runs(id) ON DELETE CASCADE
+	);
+
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_copy_log_unique ON sync_copy_log(sync_run_id, file_id, target_provider);
 	`
 
 	if _, err := db.conn.Exec(schema); err != nil {
@@ -1697,4 +1716,109 @@ func (db *DB) GetProviderUsage(provider model.Provider) (int64, error) {
 		return 0, err
 	}
 	return size, nil
+}
+
+// CreateSyncRun inserts a new sync run and returns its ID
+func (db *DB) CreateSyncRun(safeMode bool) (int64, error) {
+	query := `INSERT INTO sync_runs (started_at, safe_mode) VALUES (?, ?)`
+	res, err := db.conn.Exec(query, time.Now().Unix(), safeMode)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create sync run: %w", err)
+	}
+	return res.LastInsertId()
+}
+
+// GetIncompleteSyncRun returns the most recent sync run that has not completed, or nil
+func (db *DB) GetIncompleteSyncRun() (*model.SyncRun, error) {
+	query := `SELECT id, started_at, last_completed_step, safe_mode FROM sync_runs WHERE completed_at IS NULL ORDER BY id DESC LIMIT 1`
+	row := db.conn.QueryRow(query)
+
+	var run model.SyncRun
+	var startedAt int64
+	err := row.Scan(&run.ID, &startedAt, &run.LastCompletedStep, &run.SafeMode)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to get incomplete sync run: %w", err)
+	}
+	run.StartedAt = time.Unix(startedAt, 0)
+	return &run, nil
+}
+
+// MarkStepCompleted updates the last completed step for a sync run
+func (db *DB) MarkStepCompleted(runID int64, step int) error {
+	query := `UPDATE sync_runs SET last_completed_step = ? WHERE id = ?`
+	_, err := db.conn.Exec(query, step, runID)
+	return err
+}
+
+// CompleteSyncRun marks a sync run as fully completed
+func (db *DB) CompleteSyncRun(runID int64) error {
+	query := `UPDATE sync_runs SET completed_at = ?, last_completed_step = 5 WHERE id = ?`
+	_, err := db.conn.Exec(query, time.Now().Unix(), runID)
+	return err
+}
+
+// LogSyncCopy records a successful file copy within a sync run
+func (db *DB) LogSyncCopy(runID int64, fileID string, targetProvider string) error {
+	query := `INSERT OR IGNORE INTO sync_copy_log (sync_run_id, file_id, target_provider, created_at) VALUES (?, ?, ?, ?)`
+	_, err := db.conn.Exec(query, runID, fileID, targetProvider, time.Now().Unix())
+	return err
+}
+
+// IsSyncCopyDone checks whether a file has already been copied to a provider in this sync run
+func (db *DB) IsSyncCopyDone(runID int64, fileID string, targetProvider string) (bool, error) {
+	query := `SELECT 1 FROM sync_copy_log WHERE sync_run_id = ? AND file_id = ? AND target_provider = ? LIMIT 1`
+	var exists int
+	err := db.conn.QueryRow(query, runID, fileID, targetProvider).Scan(&exists)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+// BatchCheckSyncCopyDone checks which (file_id, target_provider) pairs have already been copied in this sync run.
+// Returns a set of "fileID\x00provider" keys for O(1) lookup.
+func (db *DB) BatchCheckSyncCopyDone(runID int64) (map[string]bool, error) {
+	query := `SELECT file_id, target_provider FROM sync_copy_log WHERE sync_run_id = ?`
+	rows, err := db.conn.Query(query, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[string]bool)
+	for rows.Next() {
+		var fileID, provider string
+		if err := rows.Scan(&fileID, &provider); err != nil {
+			return nil, err
+		}
+		result[fileID+"\x00"+provider] = true
+	}
+	return result, rows.Err()
+}
+
+// CleanupOldSyncRuns deletes completed sync runs beyond the most recent keepLast
+func (db *DB) CleanupOldSyncRuns(keepLast int) error {
+	delCopyLog := `
+	DELETE FROM sync_copy_log WHERE sync_run_id IN (
+		SELECT id FROM sync_runs WHERE completed_at IS NOT NULL
+		ORDER BY id DESC LIMIT -1 OFFSET ?
+	)`
+	if _, err := db.conn.Exec(delCopyLog, keepLast); err != nil {
+		return err
+	}
+
+	delRuns := `
+	DELETE FROM sync_runs WHERE completed_at IS NOT NULL
+		AND id NOT IN (
+			SELECT id FROM sync_runs WHERE completed_at IS NOT NULL
+			ORDER BY id DESC LIMIT ?
+		)`
+	_, err := db.conn.Exec(delRuns, keepLast)
+	return err
 }

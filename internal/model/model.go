@@ -120,3 +120,12 @@ type Folder struct {
 	ParentFolderID string
 	OwnerEmail     string
 }
+
+// SyncRun represents a tracked sync pipeline execution for crash recovery
+type SyncRun struct {
+	ID                 int64
+	StartedAt          time.Time
+	CompletedAt        *time.Time
+	LastCompletedStep  int
+	SafeMode           bool
+}

@@ -19,11 +19,12 @@ func init() {
 }
 
 func runSyncProviders(cmd *cobra.Command, args []string) error {
-	return SyncProvidersAction(sharedRunner, true)
+	return SyncProvidersAction(sharedRunner, true, 0)
 }
 
-// SyncProvidersAction runs the sync logic with optional metadata update
-func SyncProvidersAction(runner *task.Runner, updateMetadata bool) error {
+// SyncProvidersAction runs the sync logic with optional metadata update.
+// syncRunID is used for copy checkpointing; pass 0 to disable checkpointing.
+func SyncProvidersAction(runner *task.Runner, updateMetadata bool, syncRunID int64) error {
 	if updateMetadata {
 		// Update metadata first
 		logger.Info("Updating metadata...")
@@ -32,5 +33,5 @@ func SyncProvidersAction(runner *task.Runner, updateMetadata bool) error {
 		}
 	}
 
-	return runner.SyncProviders()
+	return runner.SyncProviders(syncRunID)
 }

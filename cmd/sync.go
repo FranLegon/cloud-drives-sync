@@ -28,44 +28,101 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 // SyncAction runs the full synchronization pipeline
 func SyncAction(runner *task.Runner, isSafeMode bool) error {
+	// Check for an interrupted previous run to resume
+	startStep := 1
+	var syncRunID int64
+
+	prevRun, err := db.GetIncompleteSyncRun()
+	if err != nil {
+		logger.Warning("Failed to check for incomplete sync run: %v", err)
+	}
+
+	if prevRun != nil && prevRun.SafeMode == isSafeMode {
+		syncRunID = prevRun.ID
+		startStep = prevRun.LastCompletedStep + 1
+		logger.Info("Resuming interrupted sync run #%d from step %d/5", syncRunID, startStep)
+	} else {
+		syncRunID, err = db.CreateSyncRun(isSafeMode)
+		if err != nil {
+			return err
+		}
+	}
+
 	// 1. Quota
-	logger.Info("[Step 1/5] Checking Quota...")
-	if err := QuotaAction(runner, true); err != nil {
-		return err
+	if startStep <= 1 {
+		logger.Info("[Step 1/5] Checking Quota...")
+		if err := QuotaAction(runner, true); err != nil {
+			return err
+		}
+		if err := db.MarkStepCompleted(syncRunID, 1); err != nil {
+			logger.Warning("Failed to checkpoint step 1: %v", err)
+		}
+	} else {
+		logger.Info("[Step 1/5] Skipping Quota (already completed)")
 	}
 
 	// 2. Free Main
-	logger.Info("[Step 2/5] Freeing Main Account...")
-	_, err := runner.FreeMain()
-	if err != nil {
-		return err
+	if startStep <= 2 {
+		logger.Info("[Step 2/5] Freeing Main Account...")
+		_, err := runner.FreeMain()
+		if err != nil {
+			return err
+		}
+		if err := db.MarkStepCompleted(syncRunID, 2); err != nil {
+			logger.Warning("Failed to checkpoint step 2: %v", err)
+		}
+	} else {
+		logger.Info("[Step 2/5] Skipping Free Main (already completed)")
 	}
 
 	// 3. Remove Duplicates
-	logger.Info("[Step 3/5] Removing Duplicates...")
-	if isSafeMode {
-		// If safe mode, run interactive remove-duplicates (with false for metadata update)
-		if err := RemoveDuplicatesAction(runner, false); err != nil {
-			return err
+	if startStep <= 3 {
+		logger.Info("[Step 3/5] Removing Duplicates...")
+		if isSafeMode {
+			if err := RemoveDuplicatesAction(runner, false); err != nil {
+				return err
+			}
+		} else {
+			if err := RemoveDuplicatesUnsafeAction(runner, false); err != nil {
+				return err
+			}
+		}
+		if err := db.MarkStepCompleted(syncRunID, 3); err != nil {
+			logger.Warning("Failed to checkpoint step 3: %v", err)
 		}
 	} else {
-		// Normal mode, run unsafe automatic removal (with false for metadata update)
-		if err := RemoveDuplicatesUnsafeAction(runner, false); err != nil {
-			return err
-		}
+		logger.Info("[Step 3/5] Skipping Remove Duplicates (already completed)")
 	}
 
 	// 4. Sync Providers
-	logger.Info("[Step 4/5] Syncing Providers...")
-	// Refresh metadata after FreeMain to avoid stale replica IDs before provider sync.
-	if err := SyncProvidersAction(runner, true); err != nil {
-		return err
+	if startStep <= 4 {
+		logger.Info("[Step 4/5] Syncing Providers...")
+		if err := SyncProvidersAction(runner, true, syncRunID); err != nil {
+			return err
+		}
+		if err := db.MarkStepCompleted(syncRunID, 4); err != nil {
+			logger.Warning("Failed to checkpoint step 4: %v", err)
+		}
+	} else {
+		logger.Info("[Step 4/5] Skipping Sync Providers (already completed)")
 	}
 
 	// 5. Balance Storage
-	logger.Info("[Step 5/5] Balancing Storage...")
-	if err := runner.BalanceStorage(); err != nil {
-		return err
+	if startStep <= 5 {
+		logger.Info("[Step 5/5] Balancing Storage...")
+		if err := runner.BalanceStorage(); err != nil {
+			return err
+		}
+	}
+
+	// Mark run fully completed
+	if err := db.CompleteSyncRun(syncRunID); err != nil {
+		logger.Warning("Failed to mark sync run as completed: %v", err)
+	}
+
+	// Housekeeping: remove old completed sync runs
+	if err := db.CleanupOldSyncRuns(5); err != nil {
+		logger.Warning("Failed to cleanup old sync runs: %v", err)
 	}
 
 	return nil

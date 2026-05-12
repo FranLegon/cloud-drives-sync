@@ -231,8 +231,9 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 	return currentID, nil
 }
 
-// copyFile copies a file from one provider to another
-func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider, targetName string) error {
+// copyFile copies a file from one provider to another.
+// syncRunID is used to checkpoint the copy for crash recovery; pass 0 to disable.
+func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider, targetName string, syncRunID int64) error {
 	// 1. Get source replica to determine which client to use
 	if len(masterFile.Replicas) == 0 {
 		return fmt.Errorf("file has no replicas")
@@ -416,6 +417,13 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 			}
 			// Update in-memory masterFile to include new replica
 			masterFile.Replicas = append(masterFile.Replicas, newReplica)
+
+			// Checkpoint successful copy for crash recovery
+			if syncRunID > 0 {
+				if err := r.db.LogSyncCopy(syncRunID, masterFile.ID, string(targetProvider)); err != nil {
+					logger.Warning("Failed to log sync copy checkpoint: %v", err)
+				}
+			}
 		}
 
 		logger.Info("File copied successfully")

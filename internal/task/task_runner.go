@@ -940,8 +940,9 @@ func (r *Runner) reconcileFallbackDB(uploadedFile *model.File, oldReplicaDB *mod
 	}
 }
 
-// SyncProviders synchronizes files across all providers
-func (r *Runner) SyncProviders() error {
+// SyncProviders synchronizes files across all providers.
+// syncRunID is used for copy checkpointing; pass 0 to disable checkpointing.
+func (r *Runner) SyncProviders(syncRunID int64) error {
 	logger.Info("Synchronizing providers...")
 
 	// Get all files
@@ -959,7 +960,7 @@ func (r *Runner) SyncProviders() error {
 
 	// Phase 2: Copy missing files and resolve conflicts
 	filesByPath := buildFilesByPath(files)
-	if err := r.syncMissingAndConflicts(filesByPath, softDeletedPath); err != nil {
+	if err := r.syncMissingAndConflicts(filesByPath, softDeletedPath, syncRunID); err != nil {
 		return err
 	}
 
@@ -1205,6 +1206,7 @@ type copyJob struct {
 	provider   model.Provider
 	targetName string // empty for normal copy, non-empty for conflict resolution
 	path       string // for error reporting
+	syncRunID  int64  // for copy checkpointing (0 to disable)
 }
 
 // getMasterFile resolves the primary file from a file map using priority logic
@@ -1226,8 +1228,9 @@ func sortFilesBySizeDesc(files []*model.File) {
 	})
 }
 
-// syncMissingAndConflicts copies missing files across providers, resolves conflicts, and enforces soft-delete placement
-func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string) error {
+// syncMissingAndConflicts copies missing files across providers, resolves conflicts, and enforces soft-delete placement.
+// syncRunID is used to skip files already copied in a previous attempt of this run (crash recovery).
+func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string, syncRunID int64) error {
 	// Determine active providers from config
 	activeProviders := make(map[model.Provider]bool)
 	for _, u := range r.config.Users {
@@ -1236,6 +1239,19 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 	var providers []model.Provider
 	for p := range activeProviders {
 		providers = append(providers, p)
+	}
+
+	// Pre-load already-copied files for this sync run to skip on resume
+	var doneCopies map[string]bool
+	if syncRunID > 0 {
+		var err error
+		doneCopies, err = r.db.BatchCheckSyncCopyDone(syncRunID)
+		if err != nil {
+			logger.Warning("Failed to load sync copy log for run %d: %v", syncRunID, err)
+			doneCopies = nil
+		} else if len(doneCopies) > 0 {
+			logger.Info("Loaded %d already-copied entries from previous attempt", len(doneCopies))
+		}
 	}
 
 	// Phase 1 and 2: Handle soft-deleted placements and collect copy jobs
@@ -1256,6 +1272,12 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 
 		for _, provider := range providers {
 			if _, exists := fileMap[provider]; !exists {
+				// Skip if already copied in a previous attempt of this sync run
+				if doneCopies != nil && doneCopies[masterFile.ID+"\x00"+string(provider)] {
+					logger.Info("Skipping already-synced file %s to %s", path, provider)
+					continue
+				}
+
 				logger.Info("File %s missing in %s", path, provider)
 
 				if r.safeMode {
@@ -1270,6 +1292,7 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 						provider:   provider,
 						targetName: "",
 						path:       path,
+						syncRunID:  syncRunID,
 					})
 				}
 			} else {
@@ -1291,6 +1314,7 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 							provider:   provider,
 							targetName: conflictName,
 							path:       path,
+							syncRunID:  syncRunID,
 						})
 					}
 				}
@@ -1320,7 +1344,7 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 		go func() {
 			defer copyWg.Done()
 			for job := range jobChan {
-				if err := r.copyFile(job.masterFile, job.provider, job.targetName); err != nil {
+				if err := r.copyFile(job.masterFile, job.provider, job.targetName, job.syncRunID); err != nil {
 					logger.Error("Failed to copy file %s to %s: %v", job.path, job.provider, err)
 					if r.stopOnError {
 						errChan <- fmt.Errorf("failed to copy file %s to %s: %w", job.path, job.provider, err)
