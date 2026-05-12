@@ -152,7 +152,7 @@ while ($iteration -le $maxIterations) {
     $commitMsg = if (Test-Path .commitmsg) { (Get-Content .commitmsg -Raw).Trim() } else { "" }
     Remove-Item .commitmsg -ErrorAction SilentlyContinue
     if ($commitMsg) {
-        .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --with-commit $commitMsg | Tee-Object -Variable testOutput
+        .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS "--with-commit=$commitMsg" | Tee-Object -Variable testOutput
     } else {
         .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --with-commit | Tee-Object -Variable testOutput
     }
