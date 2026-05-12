@@ -912,9 +912,9 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	return files, nil
 }
 
-// GetAllFilesAcrossProviders returns all files (alias for GetAllFiles for backwards compatibility)
+// GetAllFilesAcrossProviders returns all active files (optimized alias)
 func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
-	return db.GetAllFiles()
+	return db.GetFilesByStatus("active")
 }
 
 // GetReplicas returns all replicas for a file
