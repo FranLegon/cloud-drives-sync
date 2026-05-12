@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net"
 	"net/http"
@@ -8,11 +9,17 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
+	"github.com/gotd/td/tgerr"
 )
 
 // IsRetriableError determines if an error is transient and should be retried.
 func IsRetriableError(err error) bool {
 	if err == nil {
+		return false
+	}
+
+	// Do not retry context cancellation or deadline exceeded
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 
@@ -93,9 +100,15 @@ func WithRetry(operation func() error) error {
 		}
 		if IsRetriableError(err) {
 			// Respect Retry-After header if the server told us how long to wait.
+			var wait time.Duration
 			var httpErr HTTPError
 			if errors.As(err, &httpErr) && httpErr.RetryAfter > 0 {
-				wait := httpErr.RetryAfter
+				wait = httpErr.RetryAfter
+			} else if d, ok := tgerr.AsFloodWait(err); ok {
+				wait = d
+			}
+
+			if wait > 0 {
 				if wait > 2*time.Minute {
 					wait = 2 * time.Minute
 				}
