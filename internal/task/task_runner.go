@@ -1403,7 +1403,7 @@ func (r *Runner) distributeShortcuts(files []*model.File) error {
 	logger.Info("Distributing OneDrive shortcuts...")
 
 	// Group files by Path
-	filesByPath := make(map[string][]*model.File)
+	filesByPath := make(map[string][]*model.File, len(files))
 	for _, f := range files {
 		filesByPath[f.Path] = append(filesByPath[f.Path], f)
 	}
@@ -1526,7 +1526,7 @@ func (r *Runner) syncFolderStructures() error {
 	}
 
 	paths := make([]string, 0, len(allFolders))
-	seen := make(map[string]bool)
+	seen := make(map[string]bool, len(allFolders))
 	for _, f := range allFolders {
 		if f.Name == MetadataFileName || f.Name == AuxFolder || f.Name == SoftDeletedFolder || strings.Contains(f.Path, AuxFolder) {
 			continue

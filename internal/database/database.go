@@ -1208,7 +1208,7 @@ func (db *DB) HasActiveGoogleReplicaOutsideSoftDeleted(calculatedID string) (boo
 // GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk returns a map of all calculated_ids that have an active Google replica
 // outside the soft-deleted folder. This is used to optimize ProcessHardDeletes.
 func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs []string) (map[string]bool, error) {
-	result := make(map[string]bool)
+	result := make(map[string]bool, len(calculatedIDs))
 	if len(calculatedIDs) == 0 {
 		return result, nil
 	}
