@@ -399,15 +399,6 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		if err := r.db.InsertReplica(newReplica); err != nil {
 			logger.Error("Failed to insert new replica to DB: %v", err)
 		} else {
-			// Insert fragments if any
-			if newReplica.Fragmented && len(newReplica.Fragments) > 0 {
-				for _, frag := range newReplica.Fragments {
-					frag.ReplicaID = newReplica.ID
-					if err := r.db.InsertReplicaFragment(frag); err != nil {
-						logger.Error("Failed to insert fragment into DB: %v", err)
-					}
-				}
-			}
 			// Update in-memory masterFile to include new replica
 			masterFile.Replicas = append(masterFile.Replicas, newReplica)
 

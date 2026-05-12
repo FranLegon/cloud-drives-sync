@@ -521,27 +521,49 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 	return nil
 }
 
-// InsertReplica inserts a replica record into the database
+// InsertReplica inserts a replica record and its fragments into the database within a transaction
 func (db *DB) InsertReplica(replica *model.Replica) error {
-	query := `
-	INSERT INTO replicas (
-		file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
-	res, err := db.exec(query,
-		replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
-		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
-	if err != nil {
-		return fmt.Errorf("failed to insert replica: %w", err)
-	}
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `
+		INSERT INTO replicas (
+			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`
+		res, err := db.execTx(tx, query,
+			replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
+		if err != nil {
+			return fmt.Errorf("failed to insert replica: %w", err)
+		}
 
-	id, err := res.LastInsertId()
-	if err != nil {
-		return fmt.Errorf("failed to get replica ID: %w", err)
-	}
-	replica.ID = id
-	return nil
+		id, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("failed to get replica ID: %w", err)
+		}
+		replica.ID = id
+
+		if replica.Fragmented && len(replica.Fragments) > 0 {
+			fragQuery := `
+			INSERT INTO replica_fragments (
+				replica_id, fragment_number, fragments_total, size, native_fragment_id
+			) VALUES (?, ?, ?, ?, ?)
+			`
+			for _, frag := range replica.Fragments {
+				resFrag, err := db.execTx(tx, fragQuery,
+					replica.ID, frag.FragmentNumber, frag.FragmentsTotal, frag.Size, frag.NativeFragmentID)
+				if err != nil {
+					return fmt.Errorf("failed to insert fragment: %w", err)
+				}
+				fragID, err := resFrag.LastInsertId()
+				if err == nil {
+					frag.ID = fragID
+					frag.ReplicaID = replica.ID
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // UpsertReplica inserts or updates a replica record
@@ -1109,13 +1131,15 @@ func (db *DB) GetReplicas(fileID string) ([]*model.Replica, error) {
 	}
 
 	// Load fragments for fragmented replicas
+	fragmented := make([]*model.Replica, 0, len(replicas))
 	for _, r := range replicas {
 		if r.Fragmented {
-			fragments, err := db.GetReplicaFragments(r.ID)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get fragments for replica %d: %w", r.ID, err)
-			}
-			r.Fragments = fragments
+			fragmented = append(fragmented, r)
+		}
+	}
+	if len(fragmented) > 0 {
+		if err := db.batchLoadFragments(fragmented); err != nil {
+			return nil, fmt.Errorf("failed to batch load fragments: %w", err)
 		}
 	}
 
