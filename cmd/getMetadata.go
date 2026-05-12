@@ -18,13 +18,7 @@ func init() {
 }
 
 func runGetMetadata(cmd *cobra.Command, args []string) error {
-	runner := getTaskRunner()
-
-	if err := requiresPreFlightCheck(runner); err != nil {
-		return err
-	}
-
-	if err := runner.GetMetadata(); err != nil {
+	if err := sharedRunner.GetMetadata(); err != nil {
 		return err
 	}
 

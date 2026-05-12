@@ -18,18 +18,7 @@ func init() {
 }
 
 func runBalanceStorage(cmd *cobra.Command, args []string) error {
-	runner := getTaskRunner()
-
-	if err := requiresPreFlightCheck(runner); err != nil {
-		return err
-	}
-
 	// Check quotas
 	logger.Info("Checking storage quotas...")
-
-	if err := runner.BalanceStorage(); err != nil {
-		return err
-	}
-
-	return nil
+	return sharedRunner.BalanceStorage()
 }

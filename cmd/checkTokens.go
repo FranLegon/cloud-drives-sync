@@ -18,9 +18,7 @@ func init() {
 }
 
 func runCheckTokens(cmd *cobra.Command, args []string) error {
-	runner := getTaskRunner()
-
-	if err := runner.CheckTokens(); err != nil {
+	if err := sharedRunner.CheckTokens(); err != nil {
 		logger.Error("Token validation completed with errors")
 		return err
 	}

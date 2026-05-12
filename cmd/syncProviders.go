@@ -19,13 +19,7 @@ func init() {
 }
 
 func runSyncProviders(cmd *cobra.Command, args []string) error {
-	runner := getTaskRunner()
-
-	if err := requiresPreFlightCheck(runner); err != nil {
-		return err
-	}
-
-	return SyncProvidersAction(runner, true)
+	return SyncProvidersAction(sharedRunner, true)
 }
 
 // SyncProvidersAction runs the sync logic with optional metadata update

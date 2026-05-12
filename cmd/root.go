@@ -20,6 +20,7 @@ var (
 	db             *database.DB
 	masterPassword string
 	initialDBHash  string
+	sharedRunner   *task.Runner
 )
 
 // rootCmd represents the base command
@@ -31,7 +32,10 @@ across multiple cloud storage providers including Google Drive, Microsoft OneDri
 and Telegram.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		// Skip setup for init and help commands
-		if cmd.Name() == "init" || cmd.Name() == "help" || cmd.Name() == "__complete" || cmd.Name() == "__completeNoDesc" {
+		skipSetup := map[string]bool{
+			"init": true, "help": true, "__complete": true, "__completeNoDesc": true,
+		}
+		if skipSetup[cmd.Name()] {
 			return nil
 		}
 
@@ -66,7 +70,10 @@ and Telegram.`,
 		}
 
 		// Skip DB/Metadata setup for commands that manage their own lifecycle or don't need it
-		if cmd.Name() == "test" || cmd.Name() == "reauth" {
+		skipDB := map[string]bool{
+			"test": true, "reauth": true,
+		}
+		if skipDB[cmd.Name()] {
 			return nil
 		}
 
@@ -88,6 +95,18 @@ and Telegram.`,
 
 		if hash, err := db.GetMetadataHash(); err == nil {
 			initialDBHash = hash
+		}
+
+		sharedRunner = task.NewRunner(cfg, db, safeMode)
+
+		skipPreFlight := map[string]bool{
+			"add-account": true, "remove-account": true, "check-tokens": true,
+		}
+		if !skipPreFlight[cmd.Name()] {
+			logger.Info("Running pre-flight checks...")
+			if err := sharedRunner.RunPreFlightChecks(); err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -141,15 +160,4 @@ func Execute() {
 func init() {
 	rootCmd.PersistentFlags().BoolVarP(&safeMode, "safe", "s", false, "Dry run mode - no actual changes will be made")
 	rootCmd.PersistentFlags().StringVarP(&passwordFlag, "password", "p", "", "Master password (non-interactive)")
-}
-
-// getTaskRunner creates a task runner with current config and db
-func getTaskRunner() *task.Runner {
-	return task.NewRunner(cfg, db, safeMode)
-}
-
-// requiresPreFlightCheck runs pre-flight checks for commands that need them
-func requiresPreFlightCheck(runner *task.Runner) error {
-	logger.Info("Running pre-flight checks...")
-	return runner.RunPreFlightChecks()
 }

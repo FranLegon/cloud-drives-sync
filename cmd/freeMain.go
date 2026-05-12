@@ -17,12 +17,6 @@ func init() {
 }
 
 func runFreeMain(cmd *cobra.Command, args []string) error {
-	runner := getTaskRunner()
-
-	if err := requiresPreFlightCheck(runner); err != nil {
-		return err
-	}
-
-	_, err := runner.FreeMain()
+	_, err := sharedRunner.FreeMain()
 	return err
 }

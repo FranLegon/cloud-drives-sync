@@ -18,19 +18,14 @@ func init() {
 }
 
 func runCheckForDuplicates(cmd *cobra.Command, args []string) error {
-	runner := getTaskRunner()
-
 	// First, update metadata
 	logger.Info("Updating metadata before checking for duplicates...")
-	if err := requiresPreFlightCheck(runner); err != nil {
-		return err
-	}
-	if err := runner.GetMetadata(); err != nil {
+	if err := sharedRunner.GetMetadata(); err != nil {
 		return err
 	}
 
 	// Check for duplicates
-	if err := runner.CheckForDuplicates(); err != nil {
+	if err := sharedRunner.CheckForDuplicates(); err != nil {
 		return err
 	}
 

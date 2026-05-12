@@ -19,15 +19,8 @@ func init() {
 }
 
 func runDeleteUnsyncedFiles(cmd *cobra.Command, args []string) error {
-	runner := getTaskRunner()
-
-	// Run pre-flight checks to ensure sync folders are identified correctly
-	if err := requiresPreFlightCheck(runner); err != nil {
-		return err
-	}
-
 	logger.Info("Starting cleanup of unsynced files...")
-	if err := runner.DeleteUnsyncedFiles(); err != nil {
+	if err := sharedRunner.DeleteUnsyncedFiles(); err != nil {
 		return err
 	}
 

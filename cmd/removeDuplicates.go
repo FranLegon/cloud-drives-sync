@@ -32,13 +32,7 @@ func init() {
 }
 
 func runRemoveDuplicates(cmd *cobra.Command, args []string) error {
-	runner := getTaskRunner()
-
-	if err := requiresPreFlightCheck(runner); err != nil {
-		return err
-	}
-
-	return RemoveDuplicatesAction(runner, true)
+	return RemoveDuplicatesAction(sharedRunner, true)
 }
 
 // prepareDuplicatesCheck handles metadata updates and duplicate ID retrieval
@@ -164,13 +158,7 @@ func RemoveDuplicatesAction(runner *task.Runner, updateMetadata bool) error {
 }
 
 func runRemoveDuplicatesUnsafe(cmd *cobra.Command, args []string) error {
-	runner := getTaskRunner()
-
-	if err := requiresPreFlightCheck(runner); err != nil {
-		return err
-	}
-
-	return RemoveDuplicatesUnsafeAction(runner, true)
+	return RemoveDuplicatesUnsafeAction(sharedRunner, true)
 }
 
 func RemoveDuplicatesUnsafeAction(runner *task.Runner, updateMetadata bool) error {

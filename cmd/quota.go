@@ -22,13 +22,7 @@ func init() {
 }
 
 func runQuota(cmd *cobra.Command, args []string) error {
-	runner := getTaskRunner()
-
-	if err := requiresPreFlightCheck(runner); err != nil {
-		return err
-	}
-
-	return QuotaAction(runner, true)
+	return QuotaAction(sharedRunner, true)
 }
 
 func QuotaAction(runner *task.Runner, updateMetadata bool) error {

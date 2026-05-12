@@ -23,15 +23,7 @@ func init() {
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
-	// Create shared runner
-	runner := getTaskRunner()
-
-	// Run pre-flight checks once
-	if err := requiresPreFlightCheck(runner); err != nil {
-		return err
-	}
-
-	return SyncAction(runner, safeMode)
+	return SyncAction(sharedRunner, safeMode)
 }
 
 // SyncAction runs the full synchronization pipeline
