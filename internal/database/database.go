@@ -78,13 +78,23 @@ func Open(masterPassword string) (*DB, error) {
 
 // Reset clears all data from the database
 func (db *DB) Reset() error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	tables := []string{"replica_fragments", "replicas", "files", "folders"}
 	for _, table := range tables {
-		_, err := db.conn.Exec(fmt.Sprintf("DELETE FROM %s", table))
+		_, err := tx.Exec(fmt.Sprintf("DELETE FROM %s", table))
 		if err != nil {
 			// Ignore if table doesn't exist
 			continue
 		}
+	}
+	
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
@@ -117,6 +127,12 @@ func (db *DB) Close() error {
 
 // Initialize creates the database schema
 func (db *DB) Initialize() error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	schema := `
 	CREATE TABLE IF NOT EXISTS files (
 		id TEXT PRIMARY KEY,
@@ -209,14 +225,17 @@ func (db *DB) Initialize() error {
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_copy_log_unique ON sync_copy_log(sync_run_id, file_id, target_provider);
 	`
 
-	if _, err := db.conn.Exec(schema); err != nil {
-		return err
+	if _, err := tx.Exec(schema); err != nil {
+		return fmt.Errorf("failed to create schema: %w", err)
 	}
 
 	// Migrations
-	_, _ = db.conn.Exec("ALTER TABLE replicas ADD COLUMN last_seen_at INTEGER DEFAULT 0")
-	_, _ = db.conn.Exec("ALTER TABLE replicas ADD COLUMN owner TEXT DEFAULT ''")
+	_, _ = tx.Exec("ALTER TABLE replicas ADD COLUMN last_seen_at INTEGER DEFAULT 0")
+	_, _ = tx.Exec("ALTER TABLE replicas ADD COLUMN owner TEXT DEFAULT ''")
 
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
 	return nil
 }
 
@@ -224,7 +243,7 @@ func (db *DB) Initialize() error {
 func (db *DB) InsertFile(file *model.File) error {
 	tx, err := db.conn.Begin()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -241,25 +260,35 @@ func (db *DB) InsertFile(file *model.File) error {
 	}
 
 	// Insert replicas
-	for _, replica := range file.Replicas {
+	if len(file.Replicas) > 0 {
 		replicaQuery := `
 		INSERT OR REPLACE INTO replicas (
 			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
-		_, err := tx.Exec(replicaQuery,
-			file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
-			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
+		stmt, err := tx.Prepare(replicaQuery)
 		if err != nil {
-			return fmt.Errorf("failed to insert replica: %w", err)
+			return fmt.Errorf("failed to prepare replica statement: %w", err)
 		}
+		defer stmt.Close()
 
-		// Note: Fragments should be inserted separately via InsertReplicaFragment
-		// This is because fragments are associated with replicas, not files
+		for _, replica := range file.Replicas {
+			_, err := stmt.Exec(
+				file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+				string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+				replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
+			if err != nil {
+				return fmt.Errorf("failed to insert replica: %w", err)
+			}
+			// Note: Fragments should be inserted separately via InsertReplicaFragment
+			// This is because fragments are associated with replicas, not files
+		}
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
 }
 
 // BatchInsertFiles inserts multiple files (replicas and fragments) in a single transaction
@@ -369,10 +398,16 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 // UpdateReplicaOwner updates the owner (account_id) of a replica.
 // This is used during FreeMain when ownership is transferred.
 func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAccountID string) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	// Check if target replica already exists to avoid UNIQUE constraint violation
 	var exists int
 	checkQuery := `SELECT 1 FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`
-	err := db.conn.QueryRow(checkQuery, provider, newAccountID, nativeID).Scan(&exists)
+	err = tx.QueryRow(checkQuery, provider, newAccountID, nativeID).Scan(&exists)
 	if err != nil && err != sql.ErrNoRows {
 		return fmt.Errorf("failed to check existing replica: %w", err)
 	}
@@ -381,8 +416,11 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 		// Target already exists, so we just remove the old one to reflect the move/change
 		// (The new owner is already tracked, so we don't need to update the old record to it)
 		delQuery := `DELETE FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`
-		if _, err := db.conn.Exec(delQuery, provider, oldAccountID, nativeID); err != nil {
+		if _, err := tx.Exec(delQuery, provider, oldAccountID, nativeID); err != nil {
 			return fmt.Errorf("failed to delete old replica: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit transaction: %w", err)
 		}
 		return nil
 	}
@@ -392,17 +430,20 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 		SET account_id = ?
 		WHERE provider = ? AND account_id = ? AND native_id = ?
 	`
-	res, err := db.conn.Exec(query, newAccountID, provider, oldAccountID, nativeID)
+	res, err := tx.Exec(query, newAccountID, provider, oldAccountID, nativeID)
 	if err != nil {
 		return fmt.Errorf("failed to update replica owner: %w", err)
 	}
 
 	rows, err := res.RowsAffected()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to get rows affected: %w", err)
 	}
 	if rows == 0 {
 		return fmt.Errorf("no replica found to update (prov=%s, acc=%s, id=%s)", provider, oldAccountID, nativeID)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
@@ -441,7 +482,10 @@ func (db *DB) UpsertReplica(replica *model.Replica) error {
 		replica.ID, replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to upsert replica: %w", err)
+	}
+	return nil
 }
 
 // InsertReplicaFragment inserts a fragment record into the database
@@ -492,7 +536,10 @@ func (db *DB) InsertFolder(folder *model.Folder) error {
 		folder.ID, folder.Name, folder.Path, string(folder.Provider),
 		folder.UserEmail, folder.UserPhone, folder.ParentFolderID, folder.OwnerEmail,
 	)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to insert folder: %w", err)
+	}
+	return nil
 }
 
 // BatchInsertFolders inserts multiple folders in a single transaction
@@ -1138,14 +1185,20 @@ func (db *DB) GetReplicaByNativeFragmentID(nativeFragmentID string) (*model.Repl
 func (db *DB) DeleteFile(id string) error {
 	query := "DELETE FROM files WHERE id = ?"
 	_, err := db.conn.Exec(query, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to delete file: %w", err)
+	}
+	return nil
 }
 
 // DeleteFolder deletes a folder from the database
 func (db *DB) DeleteFolder(id string) error {
 	query := "DELETE FROM folders WHERE id = ?"
 	_, err := db.conn.Exec(query, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to delete folder: %w", err)
+	}
+	return nil
 }
 
 // GetDuplicateCalculatedIDs returns calculated_ids that appear more than once
@@ -1183,13 +1236,19 @@ func (db *DB) GetDuplicateCalculatedIDs() ([]string, error) {
 // DeleteReplicasForProvider removes all replicas for a specific provider
 func (db *DB) DeleteReplicasForProvider(provider model.Provider) error {
 	_, err := db.conn.Exec("DELETE FROM replicas WHERE provider = ?", string(provider))
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to delete replicas for provider: %w", err)
+	}
+	return nil
 }
 
 // DeleteReplica removes a specific replica by ID
 func (db *DB) DeleteReplica(id int64) error {
 	_, err := db.conn.Exec("DELETE FROM replicas WHERE id = ?", id)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to delete replica: %w", err)
+	}
+	return nil
 }
 
 // DeleteStaleReplicasByNativeID marks as deleted all replicas pointing to a stale native_id
@@ -1202,7 +1261,10 @@ func (db *DB) DeleteStaleReplicasByNativeID(provider model.Provider, oldNativeID
 	WHERE provider = ? AND native_id = ? AND id != ? AND status = 'active'
 	`
 	_, err := db.conn.Exec(query, string(provider), oldNativeID, excludeReplicaID)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to delete stale replicas: %w", err)
+	}
+	return nil
 }
 
 // HasActiveGoogleReplicaOutsideSoftDeleted checks if there's any active Google replica
@@ -1281,6 +1343,12 @@ func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs [
 // Priority: Google provider state takes precedence when replicas disagree
 // Only considers recently scanned replicas (last_seen_at >= query start time)
 func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	minTimestamp := scanStartTime.Unix()
 
 	softDeletedPattern := auxFolderName + "/soft-deleted"
@@ -1317,7 +1385,7 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 	END
 	`, softDeletedPattern, softDeletedPatternWin, softDeletedPattern, softDeletedPatternWin)
 
-	if _, err := db.conn.Exec(updateQuery, minTimestamp); err != nil {
+	if _, err := tx.Exec(updateQuery, minTimestamp); err != nil {
 		return fmt.Errorf("failed to update soft-deleted status: %w", err)
 	}
 
@@ -1343,10 +1411,13 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 	AND files.status = 'softdeleted'
 	AND (files.calculated_id != '' AND files.calculated_id IS NOT NULL)
 	`, softDeletedPattern, softDeletedPatternWin)
-	if _, err := db.conn.Exec(fallbackQuery, minTimestamp); err != nil {
+	if _, err := tx.Exec(fallbackQuery, minTimestamp); err != nil {
 		return fmt.Errorf("failed to update soft-deleted status (fallback): %w", err)
 	}
 
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
 	return nil
 }
 
@@ -1455,7 +1526,10 @@ func (db *DB) UpdateFile(file *model.File) error {
 	`
 	_, err := db.conn.Exec(query,
 		file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status, file.ID)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update file: %w", err)
+	}
+	return nil
 }
 
 // UpdateReplica updates a replica record
@@ -1471,28 +1545,40 @@ func (db *DB) UpdateReplica(replica *model.Replica) error {
 		replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner, replica.ID)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update replica: %w", err)
+	}
+	return nil
 }
 
 // UpdateFileStatus updates the status of a file
 func (db *DB) UpdateFileStatus(id string, status string) error {
 	query := "UPDATE files SET status = ? WHERE id = ?"
 	_, err := db.conn.Exec(query, status, id)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update file status: %w", err)
+	}
+	return nil
 }
 
 // UpdateFileModTime updates the modification time of a file
 func (db *DB) UpdateFileModTime(id string, modTime time.Time) error {
 	query := "UPDATE files SET mod_time = ? WHERE id = ?"
 	_, err := db.conn.Exec(query, modTime.Unix(), id)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update file mod time: %w", err)
+	}
+	return nil
 }
 
 // UpdateReplicaFileID updates the file_id of a replica
 func (db *DB) UpdateReplicaFileID(replicaID int64, fileID string) error {
 	query := "UPDATE replicas SET file_id = ? WHERE id = ?"
 	_, err := db.conn.Exec(query, fileID, replicaID)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update replica file ID: %w", err)
+	}
+	return nil
 }
 
 // GetReplicasWithNullFileID returns all replicas without a file_id
@@ -1549,7 +1635,10 @@ func (db *DB) LinkOrphanedReplicas() error {
 	AND replicas.calculated_id = fm.calculated_id
 	`
 	_, err := db.conn.Exec(query)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to link orphaned replicas: %w", err)
+	}
+	return nil
 }
 
 // PromoteOrphanedReplicasToFiles creates new file records for replicas that don't match any existing file
@@ -1686,7 +1775,10 @@ func (db *DB) UpdateLogicalFilesFromReplicas() error {
 	)
 	`
 	_, err := db.conn.Exec(query)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to update logical files from replicas: %w", err)
+	}
+	return nil
 }
 
 // MarkDeletedReplicas marks replicas as deleted if they weren't seen since the given time
@@ -1697,7 +1789,10 @@ func (db *DB) MarkDeletedReplicas(startTime time.Time) error {
 	WHERE last_seen_at < ? AND status != 'deleted'
 	`
 	_, err := db.conn.Exec(query, startTime.Unix())
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to mark deleted replicas: %w", err)
+	}
+	return nil
 }
 
 // GetProviderUsage returns the total size of active files for a provider
@@ -1750,21 +1845,30 @@ func (db *DB) GetIncompleteSyncRun() (*model.SyncRun, error) {
 func (db *DB) MarkStepCompleted(runID int64, step int) error {
 	query := `UPDATE sync_runs SET last_completed_step = ? WHERE id = ?`
 	_, err := db.conn.Exec(query, step, runID)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to mark step completed: %w", err)
+	}
+	return nil
 }
 
 // CompleteSyncRun marks a sync run as fully completed
 func (db *DB) CompleteSyncRun(runID int64) error {
 	query := `UPDATE sync_runs SET completed_at = ?, last_completed_step = 5 WHERE id = ?`
 	_, err := db.conn.Exec(query, time.Now().Unix(), runID)
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to complete sync run: %w", err)
+	}
+	return nil
 }
 
 // LogSyncCopy records a successful file copy within a sync run
 func (db *DB) LogSyncCopy(runID int64, fileID string, targetProvider string) error {
 	query := `INSERT OR IGNORE INTO sync_copy_log (sync_run_id, file_id, target_provider, created_at) VALUES (?, ?, ?, ?)`
 	_, err := db.conn.Exec(query, runID, fileID, targetProvider, time.Now().Unix())
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to log sync copy: %w", err)
+	}
+	return nil
 }
 
 // IsSyncCopyDone checks whether a file has already been copied to a provider in this sync run
@@ -1804,13 +1908,19 @@ func (db *DB) BatchCheckSyncCopyDone(runID int64) (map[string]bool, error) {
 
 // CleanupOldSyncRuns deletes completed sync runs beyond the most recent keepLast
 func (db *DB) CleanupOldSyncRuns(keepLast int) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
 	delCopyLog := `
 	DELETE FROM sync_copy_log WHERE sync_run_id IN (
 		SELECT id FROM sync_runs WHERE completed_at IS NOT NULL
 		ORDER BY id DESC LIMIT -1 OFFSET ?
 	)`
-	if _, err := db.conn.Exec(delCopyLog, keepLast); err != nil {
-		return err
+	if _, err := tx.Exec(delCopyLog, keepLast); err != nil {
+		return fmt.Errorf("failed to delete old sync copy logs: %w", err)
 	}
 
 	delRuns := `
@@ -1819,6 +1929,12 @@ func (db *DB) CleanupOldSyncRuns(keepLast int) error {
 			SELECT id FROM sync_runs WHERE completed_at IS NOT NULL
 			ORDER BY id DESC LIMIT ?
 		)`
-	_, err := db.conn.Exec(delRuns, keepLast)
-	return err
+	if _, err := tx.Exec(delRuns, keepLast); err != nil {
+		return fmt.Errorf("failed to delete old sync runs: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
 }
