@@ -19,8 +19,9 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var err error
 	
 	// Read the body if it exists so we can rewind it for retries.
-	// We only buffer if GetBody is nil and ContentLength is reasonable (< 32MB).
-	if req.Body != nil && req.GetBody == nil && req.ContentLength >= 0 && req.ContentLength < 32*1024*1024 {
+	// We only buffer if GetBody is nil and ContentLength is reasonable (< 128KB).
+	// Buffering large streams breaks pipelined streaming and consumes excessive memory.
+	if req.Body != nil && req.GetBody == nil && req.ContentLength >= 0 && req.ContentLength < 128*1024 {
 		bodyBytes, err = io.ReadAll(req.Body)
 		if err == nil {
 			req.Body.Close()

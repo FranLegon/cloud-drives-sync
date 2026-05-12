@@ -1047,12 +1047,13 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 	}
 
 	intents := make(map[string]statusIntent, len(filesByCalculatedID))
+	softPathWin := strings.ReplaceAll(softDeletedPath, "/", "\\")
 	for _, f := range files {
 		if f.Status != "active" || f.CalculatedID == "" {
 			continue
 		}
 
-		inSoftDeleted := strings.Contains(strings.ReplaceAll(f.Path, "\\", "/"), softDeletedPath)
+		inSoftDeleted := strings.Contains(f.Path, softDeletedPath) || strings.Contains(f.Path, softPathWin)
 
 		for _, replica := range f.Replicas {
 			if replica.Status != "active" {
@@ -1087,7 +1088,7 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 					continue
 				}
 
-				replicaInSoftDeleted := strings.Contains(strings.ReplaceAll(replica.Path, "\\", "/"), softDeletedPath)
+				replicaInSoftDeleted := strings.Contains(replica.Path, softDeletedPath) || strings.Contains(replica.Path, softPathWin)
 
 				switch intent.Status {
 				case "soft-deleted":
