@@ -28,6 +28,11 @@ func SetSyncFolderName(name string) {
 	syncFolderName = name
 }
 
+// GetSyncFolderName returns the current sync folder name.
+func GetSyncFolderName() string {
+	return syncFolderName
+}
+
 // Client represents a Google Drive client
 type Client struct {
 	service       *drive.Service

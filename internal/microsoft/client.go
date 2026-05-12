@@ -38,6 +38,11 @@ func SetSyncFolderName(name string) {
 	syncFolderPrefix = name
 }
 
+// GetSyncFolderName returns the current sync folder name.
+func GetSyncFolderName() string {
+	return syncFolderPrefix
+}
+
 var fakeShortcutRegex = regexp.MustCompile(`^(.*)\.sz-(\d+)` + regexp.QuoteMeta(FakeShortcutExtension) + `$`)
 
 // Client represents a Microsoft OneDrive client

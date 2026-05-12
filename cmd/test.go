@@ -668,7 +668,7 @@ func recreateSyncFolders(r *task.Runner, cfg *model.Config) error {
 		id, err := client.GetSyncFolderID()
 		if err != nil || id == "" {
 			logger.Info("Creating Main sync folder for %s...", mainUser.Email)
-			if _, err := client.CreateFolder("root", "cloud-drives-sync"); err != nil {
+			if _, err := client.CreateFolder("root", google.GetSyncFolderName()); err != nil {
 				return fmt.Errorf("failed to create main sync folder: %w", err)
 			}
 		}
@@ -723,11 +723,11 @@ func recreateSyncFolders(r *task.Runner, cfg *model.Config) error {
 			}
 
 		case model.ProviderMicrosoft:
-			if _, err := client.CreateFolder("root", "cloud-drives-sync"); err != nil {
+			if _, err := client.CreateFolder("root", microsoft.GetSyncFolderName()); err != nil {
 				return fmt.Errorf("failed to create microsoft sync folder: %w", err)
 			}
 			if mainUser != nil {
-				if err := client.ShareFolder("root/cloud-drives-sync", mainUser.Email, "writer"); err != nil {
+				if err := client.ShareFolder("root/"+microsoft.GetSyncFolderName(), mainUser.Email, "writer"); err != nil {
 					nid, err := client.GetSyncFolderID()
 					if err != nil {
 						return err
@@ -739,9 +739,6 @@ func recreateSyncFolders(r *task.Runner, cfg *model.Config) error {
 		case model.ProviderTelegram:
 			if err := client.PreFlightCheck(); err != nil {
 				return fmt.Errorf("telegram preflight check failed: %w", err)
-			}
-			if _, err := client.CreateFolder("", "cloud-drives-sync"); err != nil {
-				logger.Warning("Telegram create folder/channel warning: %v", err)
 			}
 		}
 	}
