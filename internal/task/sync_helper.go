@@ -231,6 +231,17 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 	return currentID, nil
 }
 
+func handleDownloadError(err error, errChan chan error, contextStr string) {
+	if err != io.ErrClosedPipe && !strings.Contains(err.Error(), "closed pipe") {
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "notFound") {
+			logger.Info("Download source skipped (404 Not Found) %s: %v", contextStr, err)
+		} else {
+			logger.Warning("Download error in pipe %s: %v", contextStr, err)
+		}
+		errChan <- err
+	}
+}
+
 // copyFile copies a file from one provider to another.
 // syncRunID is used to checkpoint the copy for crash recovery; pass 0 to disable.
 func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider, targetName string, syncRunID int64) error {
@@ -313,31 +324,13 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 				}
 				for _, frag := range sourceReplica.Fragments {
 					if err := sourceClient.DownloadFile(frag.NativeFragmentID, pw); err != nil {
-						// Ignore closed pipe error (happens if upload is skipped or finishes early)
-						if err != io.ErrClosedPipe && !strings.Contains(err.Error(), "closed pipe") {
-							// Downgrade 404 errors
-							if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "notFound") {
-								logger.Info("Download source fragment skipped (404): %v", err)
-							} else {
-								logger.Warning("Download error in pipe (fragment %d): %v", frag.FragmentNumber, err)
-							}
-							errChan <- err
-						}
+						handleDownloadError(err, errChan, fmt.Sprintf("(fragment %d)", frag.FragmentNumber))
 						return
 					}
 				}
 			} else {
 				if err := sourceClient.DownloadFile(sourceReplica.NativeID, pw); err != nil {
-					// Ignore closed pipe error (happens if upload is skipped or finishes early)
-					if err != io.ErrClosedPipe && !strings.Contains(err.Error(), "closed pipe") {
-						// Downgrade 404 errors to Info as they are expected during sync of moved files
-						if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "notFound") {
-							logger.Info("Download source skipped (404 Not Found): %v", err)
-						} else {
-							logger.Warning("Download error in pipe: %v", err)
-						}
-						errChan <- err
-					}
+					handleDownloadError(err, errChan, "")
 					return // Return early on error
 				}
 			}

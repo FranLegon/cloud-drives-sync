@@ -58,6 +58,61 @@ func createClient(user *model.User, cfg *model.Config, runPreFlight bool) (api.C
 	return c, nil
 }
 
+func getAuxFolderID(client api.CloudClient, user *model.User, rootID string, create bool) (string, error) {
+	if user.Provider == model.ProviderTelegram {
+		if create {
+			f, err := client.CreateFolder(rootID, AuxFolder)
+			if err != nil {
+				return "", err
+			}
+			return f.ID, nil
+		}
+		return "/" + AuxFolder, nil
+	}
+
+	folders, err := client.ListFolders(rootID)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range folders {
+		if f.Name == AuxFolder {
+			return f.ID, nil
+		}
+	}
+
+	if create {
+		folder, err := client.CreateFolder(rootID, AuxFolder)
+		if err != nil {
+			return "", err
+		}
+		return folder.ID, nil
+	}
+	return "", fmt.Errorf("aux folder not found")
+}
+
+func getMetadataFileID(client api.CloudClient, user *model.User, auxID string) (string, error) {
+	files, err := client.ListFiles(auxID)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range files {
+		match := false
+		if user.Provider == model.ProviderTelegram {
+			if f.Name == MetadataFileName && strings.Contains(f.Path, auxID) {
+				match = true
+			}
+		} else {
+			if f.Name == MetadataFileName {
+				match = true
+			}
+		}
+		if match {
+			return f.ID, nil
+		}
+	}
+	return "", fmt.Errorf("metadata.db not found in aux folder")
+}
+
 // DownloadMetadataDB attempts to download metadata.db from providers
 func DownloadMetadataDB(cfg *model.Config, dbPath string) error {
 	// Check existence
@@ -79,53 +134,14 @@ func DownloadMetadataDB(cfg *model.Config, dbPath string) error {
 			return err
 		}
 
-		var auxID string
-		if user.Provider == model.ProviderTelegram {
-			auxID = "/" + AuxFolder
-		} else {
-			folders, err := client.ListFolders(rootID)
-			if err != nil {
-				return err
-			}
-			for _, f := range folders {
-				if f.Name == AuxFolder {
-					auxID = f.ID
-					break
-				}
-			}
-		}
-
-		if auxID == "" {
-			return fmt.Errorf("aux folder not found")
-		}
-
-		files, err := client.ListFiles(auxID)
+		auxID, err := getAuxFolderID(client, user, rootID, false)
 		if err != nil {
 			return err
 		}
 
-		var fileID string
-		for _, f := range files {
-			match := false
-			if user.Provider == model.ProviderTelegram {
-				// For Telegram, check if the file's path matches the aux folder structure
-				if f.Name == MetadataFileName && strings.Contains(f.Path, auxID) {
-					match = true
-				}
-			} else {
-				if f.Name == MetadataFileName {
-					match = true
-				}
-			}
-
-			if match {
-				fileID = f.ID
-				break
-			}
-		}
-
-		if fileID == "" {
-			return fmt.Errorf("metadata.db not found in aux folder")
+		fileID, err := getMetadataFileID(client, user, auxID)
+		if err != nil {
+			return err
 		}
 
 		// Create file locally
@@ -144,35 +160,23 @@ func DownloadMetadataDB(cfg *model.Config, dbPath string) error {
 		return nil
 	}
 
-	// Priority 1: Google Main
-	for i := range cfg.Users {
-		if cfg.Users[i].Provider == model.ProviderGoogle && cfg.Users[i].IsMain {
-			if err := tryDownload(&cfg.Users[i]); err == nil {
-				return nil
-			} else {
-				logger.Info("Failed to download from Google Main: %v", err)
-			}
-		}
+	priorities := []struct {
+		check func(u *model.User) bool
+		name  string
+	}{
+		{func(u *model.User) bool { return u.Provider == model.ProviderGoogle && u.IsMain }, "Google Main"},
+		{func(u *model.User) bool { return u.Provider == model.ProviderMicrosoft }, "OneDrive"},
+		{func(u *model.User) bool { return u.Provider == model.ProviderTelegram }, "Telegram"},
 	}
 
-	// Priority 2: OneDrive
-	for i := range cfg.Users {
-		if cfg.Users[i].Provider == model.ProviderMicrosoft {
-			if err := tryDownload(&cfg.Users[i]); err == nil {
-				return nil
-			} else {
-				logger.Info("Failed to download from OneDrive: %v", err)
-			}
-		}
-	}
-
-	// Priority 3: Telegram
-	for i := range cfg.Users {
-		if cfg.Users[i].Provider == model.ProviderTelegram {
-			if err := tryDownload(&cfg.Users[i]); err == nil {
-				return nil
-			} else {
-				logger.Info("Failed to download from Telegram: %v", err)
+	for _, p := range priorities {
+		for i := range cfg.Users {
+			if p.check(&cfg.Users[i]) {
+				if err := tryDownload(&cfg.Users[i]); err == nil {
+					return nil
+				} else {
+					logger.Info("Failed to download from %s: %v", p.name, err)
+				}
 			}
 		}
 	}
@@ -208,35 +212,9 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 		}
 
 		// Find or Create Aux Folder
-		var auxID string
-		if user.Provider == model.ProviderTelegram {
-			// Check if we need to 'create' it or just use the path string.
-			// CreateFolder calls return a dummy folder with ID=Path usually.
-			// Let's call CreateFolder to be consistent and get the 'ID'.
-			f, err := client.CreateFolder(rootID, AuxFolder)
-			if err != nil {
-				return err
-			}
-			auxID = f.ID
-		} else {
-			folders, err := client.ListFolders(rootID)
-			if err != nil {
-				return err
-			}
-			for _, f := range folders {
-				if f.Name == AuxFolder {
-					auxID = f.ID
-					break
-				}
-			}
-
-			if auxID == "" {
-				folder, err := client.CreateFolder(rootID, AuxFolder)
-				if err != nil {
-					return err
-				}
-				auxID = folder.ID
-			}
+		auxID, err := getAuxFolderID(client, user, rootID, true)
+		if err != nil {
+			return err
 		}
 
 		// Ensure soft-deleted folder exists
@@ -264,29 +242,9 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 		}
 
 		// Check for existing metadata.db to overwrite or Create
-		files, err := client.ListFiles(auxID)
-		if err != nil {
+		existingFileID, err := getMetadataFileID(client, user, auxID)
+		if err != nil && !strings.Contains(err.Error(), "not found in aux folder") {
 			return err
-		}
-
-		var existingFileID string
-		for _, f := range files {
-			match := false
-			if user.Provider == model.ProviderTelegram {
-				// For Telegram, check if the file's path matches the aux folder structure
-				if f.Name == MetadataFileName && strings.Contains(f.Path, auxID) {
-					match = true
-				}
-			} else {
-				if f.Name == MetadataFileName {
-					match = true
-				}
-			}
-
-			if match {
-				existingFileID = f.ID
-				break
-			}
 		}
 
 		if _, err := file.Seek(0, 0); err != nil {
