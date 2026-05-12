@@ -306,7 +306,8 @@ func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("microsoft download returned status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("microsoft download returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	if _, err := io.Copy(writer, resp.Body); err != nil {
@@ -393,6 +394,9 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 			if jsonErr := json.Unmarshal(body, &item); jsonErr == nil && item.Id != "" {
 				createdItem.SetId(&item.Id)
 			}
+		} else {
+			// Discard the body to allow HTTP keep-alive connection reuse
+			io.Copy(io.Discard, resp.Body)
 		}
 
 		resp.Body.Close()
@@ -491,6 +495,9 @@ func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
 			resp.Body.Close()
 			return fmt.Errorf("chunk upload failed status %s: %s", resp.Status, string(body))
 		}
+		
+		// Discard the body to allow HTTP keep-alive connection reuse
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 
 		offset += int64(n)
