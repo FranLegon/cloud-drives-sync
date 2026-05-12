@@ -100,6 +100,8 @@ $model = 'google-vertex/gemini-3.1-pro-preview'
 
 $maxIterations = 50
 $iteration = 1
+$sessionMessages = 1
+$maxSessionMessages = 4
 while ($iteration -le $maxIterations) {
     # Banner: set terminal tab title (survives TUI apps like opencode) + ANSI row-1 banner (visible between commands)
     $trimmed = $mainPrompt.Trim() -replace '\s+', ' '
@@ -112,10 +114,22 @@ while ($iteration -le $maxIterations) {
         Write-Host "Prompt is missing git clarification. Resetting prompt to include it." -ForegroundColor Yellow
         $prompt = $mainPrompt + $gitClarification
     }
+    # abort if prompt keeps failing
+    if ($sessionMessages -gt $maxSessionMessages) {
+        Write-Host "Too many consecutive failed attempts. Aborting loop to prevent infinite failures." -ForegroundColor Red
+        # Force git checkout main and pop stash to clean up any potential issues before exiting
+        git checkout main --force | Out-Null
+        git clean -fd | Out-Null
+        Remove-Item .commitmsg -ErrorAction SilentlyContinue
+        if (git stash list) { git stash pop | Out-Null }
+        $prompt = ($mainPrompt + $gitClarification)
+    }
     # run OpenCode
     if ($prompt -eq ($mainPrompt + $gitClarification)) {
+        $sessionMessages = 1
         opencode run $prompt --model $model
     } else {
+        $sessionMessages++
         opencode run -c $prompt 
     }
     if (-not $? -or $LASTEXITCODE -ne 0) { 
