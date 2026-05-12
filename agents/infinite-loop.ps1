@@ -156,7 +156,8 @@ while ($iteration -le $maxIterations) {
         if ($mdFiles) {
             git add $mdFiles | Out-Null
             git commit -m "docs: update .md files" | Out-Null
-            Write-Host "Committed updated .md files: $($mdFiles -join ', ')" -ForegroundColor Green
+            git push | Out-Null
+            Write-Host "Committed and pushed updated .md files: $($mdFiles -join ', ')" -ForegroundColor Green
         } else {
             Write-Host "No .md files were modified to commit." -ForegroundColor Yellow
         }
@@ -184,7 +185,8 @@ while ($iteration -le $maxIterations) {
         $testErrorLines | ForEach-Object { Write-Host $_ -ForegroundColor Yellow }
         $prompt = "The tests passed (changes already committed) but the following errors were found in the logs:`n$($testErrorLines -join '; ').`nAnalyze these errors and fix them before proceeding." + $gitClarification
     } else {
-        Write-Host "Build and tests succeeded without errors." -ForegroundColor Green
+        git push | Out-Null
+        Write-Host "Build and tests succeeded without errors. Pushed." -ForegroundColor Green
         $iteration++
         $mainPrompt = Select-WeightedPrompt
         Write-Host "Next iteration focus: $mainPrompt" -ForegroundColor Cyan
