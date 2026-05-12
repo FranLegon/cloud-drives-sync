@@ -49,7 +49,7 @@ type Runner struct {
 
 // NewRunner creates a new task runner
 func NewRunner(config *model.Config, db *database.DB, safeMode bool) *Runner {
-	return &Runner{
+	r := &Runner{
 		config:              config,
 		db:                  db,
 		safeMode:            safeMode,
@@ -57,6 +57,36 @@ func NewRunner(config *model.Config, db *database.DB, safeMode bool) *Runner {
 		msShareFailureCache: make(map[string]bool),
 		accountQuotas:       make(map[string]*accountQuota),
 	}
+	r.PreloadFolderCache()
+	return r
+}
+
+// PreloadFolderCache loads all folders from the database into the memory cache.
+// This significantly speeds up folder resolution by avoiding point queries to the database.
+func (r *Runner) PreloadFolderCache() {
+	if r.db == nil {
+		return
+	}
+	folders, err := r.db.GetAllFolders()
+	if err != nil {
+		logger.Warning("Failed to preload folder cache: %v", err)
+		return
+	}
+
+	count := 0
+	for _, f := range folders {
+		accountID := f.UserEmail
+		if f.Provider == model.ProviderTelegram {
+			accountID = f.UserPhone
+		}
+		cachePrefix := model.GenerateCacheKey(f.Provider, accountID) + ":"
+		
+		trimmedPath := strings.Trim(f.Path, "/\\")
+		
+		r.folderCache.Store(cachePrefix+trimmedPath, f.ID)
+		count++
+	}
+	logger.Info("Preloaded %d folders into memory cache", count)
 }
 
 func (r *Runner) SetStopOnError(stop bool) {
