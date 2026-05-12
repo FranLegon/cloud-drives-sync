@@ -75,7 +75,7 @@ func (r *Runner) getAccountFolderLock(provider model.Provider, accountID string)
 
 // GetOrCreateClient gets or creates a client for a user
 func (r *Runner) GetOrCreateClient(user *model.User) (api.CloudClient, error) {
-	key := string(user.Provider) + ":" + user.Email + user.Phone
+	key := string(user.Provider) + ":" + user.GetAccountID()
 
 	r.clientsMu.RLock()
 	if client, exists := r.clients[key]; exists {
@@ -109,11 +109,11 @@ func (r *Runner) RunPreFlightChecks() error {
 		user := &r.config.Users[i]
 		client, err := r.GetOrCreateClient(user)
 		if err != nil {
-			return fmt.Errorf("failed to create client for %s: %w", user.Email+user.Phone, err)
+			return fmt.Errorf("failed to create client for %s: %w", user.GetAccountID(), err)
 		}
 
 		if err := client.PreFlightCheck(); err != nil {
-			return fmt.Errorf("pre-flight check failed for %s: %w", user.Email+user.Phone, err)
+			return fmt.Errorf("pre-flight check failed for %s: %w", user.GetAccountID(), err)
 		}
 	}
 
@@ -148,25 +148,25 @@ func (r *Runner) GetMetadata() error {
 
 			client, err := r.GetOrCreateClient(user)
 			if err != nil {
-				logger.ErrorTagged([]string{string(user.Provider)}, "Failed to create client: %v", err)
+				logger.ErrorTagged([]string{string(user.Provider), user.GetAccountID()}, "Failed to create client: %v", err)
 				return
 			}
 
 			// Get sync folder ID
 			syncFolderID, err := client.GetSyncFolderID()
 			if err != nil {
-				logger.ErrorTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to get sync folder: %v", err)
+				logger.ErrorTagged([]string{string(user.Provider), user.GetAccountID()}, "Failed to get sync folder: %v", err)
 				return
 			}
 
 			if syncFolderID == "" {
-				logger.InfoTagged([]string{string(user.Provider), user.Email + user.Phone}, "No sync folder, skipping")
+				logger.InfoTagged([]string{string(user.Provider), user.GetAccountID()}, "No sync folder, skipping")
 				return
 			}
 
 			// Scan files
 			if err := r.scanFolder(client, user, syncFolderID, "", fileChan, folderChan, apiSem); err != nil {
-				logger.ErrorTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to scan folder: %v", err)
+				logger.ErrorTagged([]string{string(user.Provider), user.GetAccountID()}, "Failed to scan folder: %v", err)
 			}
 		}(&r.config.Users[i])
 	}
@@ -283,7 +283,7 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 		fileChan <- file
 	}
 
-	logger.InfoTagged([]string{string(user.Provider), user.Email + user.Phone}, "Found %d files in folder %s", len(files), folderID)
+	logger.InfoTagged([]string{string(user.Provider), user.GetAccountID()}, "Found %d files in folder %s", len(files), folderID)
 
 	// Recursively scan subfolders
 	apiSem <- struct{}{}
@@ -379,7 +379,7 @@ func (r *Runner) CheckTokens() error {
 		user := &r.config.Users[i]
 		client, err := r.GetOrCreateClient(user)
 		if err != nil {
-			logger.ErrorTagged([]string{string(user.Provider), user.Email + user.Phone}, "Failed to create client: %v", err)
+			logger.ErrorTagged([]string{string(user.Provider), user.GetAccountID()}, "Failed to create client: %v", err)
 			hasErrors = true
 			continue
 		}
@@ -387,10 +387,10 @@ func (r *Runner) CheckTokens() error {
 		// Try a simple read operation
 		_, err = client.GetQuota()
 		if err != nil {
-			logger.ErrorTagged([]string{string(user.Provider), user.Email + user.Phone}, "Token validation failed: %v", err)
+			logger.ErrorTagged([]string{string(user.Provider), user.GetAccountID()}, "Token validation failed: %v", err)
 			hasErrors = true
 		} else {
-			logger.InfoTagged([]string{string(user.Provider), user.Email + user.Phone}, "Token is valid")
+			logger.InfoTagged([]string{string(user.Provider), user.GetAccountID()}, "Token is valid")
 		}
 	}
 
@@ -1009,11 +1009,7 @@ func (r *Runner) buildMainAccountSet() map[model.Provider]map[string]bool {
 		if _, ok := mainAccounts[u.Provider]; !ok {
 			mainAccounts[u.Provider] = make(map[string]bool)
 		}
-		if u.Provider == model.ProviderTelegram {
-			mainAccounts[u.Provider][u.Phone] = true
-		} else {
-			mainAccounts[u.Provider][u.Email] = true
-		}
+		mainAccounts[u.Provider][u.GetAccountID()] = true
 	}
 	return mainAccounts
 }
@@ -1659,13 +1655,13 @@ func (r *Runner) GetProviderQuotasFromAPI() ([]*model.ProviderQuota, error) {
 			defer wg.Done()
 			client, err := r.GetOrCreateClient(user)
 			if err != nil {
-				errCh <- fmt.Errorf("failed to create client for %s: %w", user.Email+user.Phone, err)
+				errCh <- fmt.Errorf("failed to create client for %s: %w", user.GetAccountID(), err)
 				return
 			}
 
 			q, err := client.GetQuota()
 			if err != nil {
-				errCh <- fmt.Errorf("failed to get quota for %s: %w", user.Email+user.Phone, err)
+				errCh <- fmt.Errorf("failed to get quota for %s: %w", user.GetAccountID(), err)
 				return
 			}
 
@@ -1905,11 +1901,8 @@ func (r *Runner) ProcessHardDeletes() error {
 func (r *Runner) getUser(provider model.Provider, accountID string) *model.User {
 	for i := range r.config.Users {
 		u := &r.config.Users[i]
-		if u.Provider == provider {
-			if (provider == model.ProviderTelegram && u.Phone == accountID) ||
-				(provider != model.ProviderTelegram && u.Email == accountID) {
-				return u
-			}
+		if u.Provider == provider && u.GetAccountID() == accountID {
+			return u
 		}
 	}
 	return nil

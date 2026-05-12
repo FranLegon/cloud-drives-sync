@@ -30,22 +30,23 @@ func IsRetriableError(err error) bool {
 	}
 	
 	// Also check typical string contained in googleapi errors (as fallback)
-	if strings.Contains(err.Error(), "googleapi: Error 429") || 
-		strings.Contains(err.Error(), "googleapi: Error 500") ||
-		strings.Contains(err.Error(), "googleapi: Error 502") ||
-		strings.Contains(err.Error(), "googleapi: Error 503") ||
-		strings.Contains(err.Error(), "googleapi: Error 504") {
-		return true
+	googleErrors := []string{"Error 429", "Error 500", "Error 502", "Error 503", "Error 504"}
+	for _, e := range googleErrors {
+		if strings.Contains(err.Error(), "googleapi: "+e) {
+			return true
+		}
 	}
 	
 	// Microsoft specific errors
-	if strings.Contains(err.Error(), "TooManyRequests") || 
-		strings.Contains(err.Error(), "activityLimitReached") ||
-		strings.Contains(err.Error(), "503 Service Unavailable") ||
-		strings.Contains(err.Error(), "504 Gateway Timeout") ||
-		strings.Contains(err.Error(), "502 Bad Gateway") ||
-		strings.Contains(err.Error(), "500 Internal Server Error") {
-		return true
+	msErrors := []string{
+		"TooManyRequests", "activityLimitReached", 
+		"503 Service Unavailable", "504 Gateway Timeout", 
+		"502 Bad Gateway", "500 Internal Server Error",
+	}
+	for _, e := range msErrors {
+		if strings.Contains(err.Error(), e) {
+			return true
+		}
 	}
 
 	// Network errors
@@ -56,14 +57,15 @@ func IsRetriableError(err error) bool {
 	
 	// Connection reset, EOF, etc.
 	msg := err.Error()
-	if strings.Contains(msg, "connection reset by peer") ||
-		strings.Contains(msg, "EOF") ||
-		strings.Contains(msg, "unexpected EOF") ||
-		strings.Contains(msg, "context deadline exceeded") ||
-		strings.Contains(msg, "read: connection timed out") ||
-		strings.Contains(msg, "client connection lost") ||
-		strings.Contains(msg, "FLOOD_WAIT") {
-		return true
+	connErrors := []string{
+		"connection reset by peer", "EOF", "unexpected EOF",
+		"context deadline exceeded", "read: connection timed out",
+		"client connection lost", "FLOOD_WAIT",
+	}
+	for _, e := range connErrors {
+		if strings.Contains(msg, e) {
+			return true
+		}
 	}
 
 	return false

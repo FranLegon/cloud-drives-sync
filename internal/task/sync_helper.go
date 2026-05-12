@@ -44,18 +44,10 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 			continue
 		}
 
-		key := string(user.Provider) + ":" + user.Email + user.Phone
+		key := string(user.Provider) + ":" + user.GetAccountID()
 		
 		r.accountQuotasMu.Lock()
 		q, ok := r.accountQuotas[key]
-		var free int64
-		if ok {
-			if q.Total <= 0 {
-				free = (1<<63 - 1) - q.Used
-			} else {
-				free = q.Total - q.Used
-			}
-		}
 		r.accountQuotasMu.Unlock()
 
 		if !ok {
@@ -71,12 +63,14 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 				q = &accountQuota{Total: quota.Total, Used: quota.Used}
 				r.accountQuotas[key] = q
 			}
-			if q.Total <= 0 {
-				free = (1<<63 - 1) - q.Used
-			} else {
-				free = q.Total - q.Used
-			}
 			r.accountQuotasMu.Unlock()
+		}
+
+		var free int64
+		if q.Total <= 0 {
+			free = (1<<63 - 1) - q.Used
+		} else {
+			free = q.Total - q.Used
 		}
 
 		if free > size && free > maxFree {
@@ -88,7 +82,7 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 
 	if bestUser != nil {
 		// Reserve the space for this file
-		key := string(bestUser.Provider) + ":" + bestUser.Email + bestUser.Phone
+		key := string(bestUser.Provider) + ":" + bestUser.GetAccountID()
 		r.accountQuotasMu.Lock()
 		r.accountQuotas[key].Used += size
 		r.accountQuotasMu.Unlock()
@@ -283,18 +277,14 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		logger.InfoTagged([]string{string(targetProvider), destUser.Email}, "Copying %s (as %s) from %s (Replica %d/%d)...", masterFile.Path, finalName, sourceReplica.Provider, i+1, len(viableReplicas))
 
 		// Get source client
-		var email, phone string
-		if sourceReplica.Provider == model.ProviderTelegram {
-			phone = sourceReplica.AccountID
-		} else {
-			email = sourceReplica.AccountID
+		sourceUser := r.getUser(sourceReplica.Provider, sourceReplica.AccountID)
+		if sourceUser == nil {
+			lastErr = fmt.Errorf("user not found for replica %s", sourceReplica.AccountID)
+			logger.Warning("%v", lastErr)
+			continue
 		}
 
-		sourceClient, err := r.GetOrCreateClient(&model.User{
-			Provider: sourceReplica.Provider,
-			Email:    email,
-			Phone:    phone,
-		})
+		sourceClient, err := r.GetOrCreateClient(sourceUser)
 		if err != nil {
 			lastErr = fmt.Errorf("failed to get source client for replica %s: %w", sourceReplica.AccountID, err)
 			logger.Warning("%v", lastErr)
@@ -384,10 +374,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		}
 
 		// Success! Update Database with new replica
-		accountID := destUser.Email
-		if targetProvider == model.ProviderTelegram {
-			accountID = destUser.Phone
-		}
+		accountID := destUser.GetAccountID()
 
 		// Determine NativeID from uploaded result
 		nativeID := uploadedFile.ID
@@ -582,10 +569,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 	}
 
 	// 6. Update Database with new replica (Shortcut)
-	accountID := targetUser.Email
-	if targetUser.Provider == model.ProviderTelegram {
-		accountID = targetUser.Phone
-	}
+	accountID := targetUser.GetAccountID()
 	// For shortcuts, we might treat size as 0 or the original size.
 	// Microsoft shortcut usually has size 0 in our model unless we fetched it.
 
