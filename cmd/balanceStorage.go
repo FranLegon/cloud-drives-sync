@@ -7,9 +7,12 @@ import (
 
 var balanceStorageCmd = &cobra.Command{
 	Use:   "balance-storage",
-	Short: "Balance storage usage across accounts",
-	Long: `Checks storage quotas and moves large files from over-quota accounts
-to backup accounts with more free space within the same provider.`,
+	Short: "Balance storage across all accounts",
+	Long: `Re-distributes files across all configured accounts to ensure
+even storage usage across providers. Updates metadata first.`,
+	Annotations: map[string]string{
+		"writesDB": "true",
+	},
 	RunE: runBalanceStorage,
 }
 

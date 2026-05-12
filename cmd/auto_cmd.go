@@ -29,6 +29,10 @@ that runs the sync command every 8 hours.
 
 Use --set with --password to create the schedule.
 Use --disable to remove it.`,
+	Annotations: map[string]string{
+		"skipSetup":        "true",
+		"autoBuildAllowed": "true",
+	},
 	RunE: runAuto,
 }
 

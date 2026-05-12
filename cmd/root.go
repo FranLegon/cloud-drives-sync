@@ -33,20 +33,13 @@ and Telegram.`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		// Gate commands based on build type
 		if AutoBuild {
-			allowed := map[string]bool{
-				"auto": true, "sync": true, "help": true,
-				"__complete": true, "__completeNoDesc": true,
-			}
-			if !allowed[cmd.Name()] {
+			if cmd.Annotations["autoBuildAllowed"] != "true" && cmd.Name() != "help" && cmd.Name() != "__complete" && cmd.Name() != "__completeNoDesc" {
 				return fmt.Errorf("command %q is not available in auto builds (only auto, sync, and help are available)", cmd.Name())
 			}
 		}
 
 		// Skip setup for init, help, and auto commands
-		skipSetup := map[string]bool{
-			"init": true, "help": true, "auto": true, "__complete": true, "__completeNoDesc": true,
-		}
-		if skipSetup[cmd.Name()] {
+		if cmd.Annotations["skipSetup"] == "true" || cmd.Name() == "help" || cmd.Name() == "__complete" || cmd.Name() == "__completeNoDesc" {
 			return nil
 		}
 
@@ -81,10 +74,7 @@ and Telegram.`,
 		}
 
 		// Skip DB/Metadata setup for commands that manage their own lifecycle or don't need it
-		skipDB := map[string]bool{
-			"test": true, "reauth": true,
-		}
-		if skipDB[cmd.Name()] {
+		if cmd.Annotations["skipDB"] == "true" {
 			return nil
 		}
 
@@ -110,10 +100,7 @@ and Telegram.`,
 
 		sharedRunner = task.NewRunner(cfg, db, safeMode)
 
-		skipPreFlight := map[string]bool{
-			"add-account": true, "remove-account": true, "check-tokens": true,
-		}
-		if !skipPreFlight[cmd.Name()] {
+		if cmd.Annotations["skipPreFlight"] != "true" {
 			logger.Info("Running pre-flight checks...")
 			if err := sharedRunner.RunPreFlightChecks(); err != nil {
 				return err
@@ -133,19 +120,7 @@ and Telegram.`,
 		}
 
 		// Upload metadata.db if the command alters it
-		writingCommands := map[string]bool{
-			"get-metadata":             true,
-			"sync-providers":           true,
-			"check-for-duplicates":     false, // Read-only
-			"remove-duplicates":        true,
-			"remove-duplicates-unsafe": true,
-			"balance-storage":          true,
-			"free-main":                true,
-			"delete-unsynced-files":    false, // Typically doesn't alter DB? Check logic.
-			"sync":                     true,
-		}
-
-		if writingCommands[cmd.Name()] && cfg != nil {
+		if cmd.Annotations["writesDB"] == "true" && cfg != nil {
 			if !dbHasChanges {
 				logger.Info("No metadata changes detected, skipping upload.")
 				return nil

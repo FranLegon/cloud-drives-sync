@@ -16,11 +16,12 @@ import (
 
 var addAccountCmd = &cobra.Command{
 	Use:   "add-account",
-	Short: "Add a backup account for an existing provider",
-	Long: `Adds a backup account to a provider that already has a configured main account.
-Google Drive: Shares the main account's sync folder with the backup account.
-Microsoft OneDrive: Creates a new sync folder in the backup account and shares with main.
-Telegram: Adds a Telegram account for backup storage.`,
+	Short: "Add a new cloud storage account",
+	Long: `Add a new Google Drive, Microsoft OneDrive, or Telegram account
+to the configuration for synchronization.`,
+	Annotations: map[string]string{
+		"skipPreFlight": "true",
+	},
 	RunE: runAddAccount,
 }
 

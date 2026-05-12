@@ -6,9 +6,12 @@ import (
 
 var freeMainCmd = &cobra.Command{
 	Use:   "free-main",
-	Short: "Transfer all files from main account to backup accounts",
-	Long: `Moves all files from the main account's sync folder to backup accounts
-with the most available space. Useful for freeing up space in the main account.`,
+	Short: "Free space on the main account",
+	Long: `Moves files from the main account to backup accounts
+to free up space. Only moves files that are not recently modified.`,
+	Annotations: map[string]string{
+		"writesDB": "true",
+	},
 	RunE: runFreeMain,
 }
 

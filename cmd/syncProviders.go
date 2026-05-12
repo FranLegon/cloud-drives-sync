@@ -8,9 +8,12 @@ import (
 
 var syncProvidersCmd = &cobra.Command{
 	Use:   "sync-providers",
-	Short: "Synchronize files across all cloud providers",
-	Long: `Ensures file content is consistent across Google Drive, Microsoft OneDrive, and Telegram.
-Uploads missing files and handles conflicts by renaming.`,
+	Short: "Synchronize files across all providers",
+	Long: `Synchronizes files across all configured cloud providers based on the local metadata database.
+It handles new files, modifications, and deletions. By default, it updates metadata first.`,
+	Annotations: map[string]string{
+		"writesDB": "true",
+	},
 	RunE: runSyncProviders,
 }
 

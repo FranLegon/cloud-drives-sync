@@ -12,10 +12,12 @@ import (
 
 var removeAccountCmd = &cobra.Command{
 	Use:   "remove-account",
-	Short: "Remove a backup account or an entire provider from the configuration",
-	Long: `Removes a backup account or all accounts for a provider from the configuration.
-Main accounts can only be removed if no backup accounts exist for that provider.
-This does NOT delete files from the cloud provider.`,
+	Short: "Remove a cloud storage account",
+	Long: `Remove a specific cloud storage account from the configuration.
+You can specify the account by provider and email/phone, or use the interactive menu.`,
+	Annotations: map[string]string{
+		"skipPreFlight": "true",
+	},
 	RunE: runRemoveAccount,
 }
 

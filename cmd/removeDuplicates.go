@@ -15,6 +15,9 @@ var removeDuplicatesCmd = &cobra.Command{
 	Short: "Interactively remove duplicate files",
 	Long: `Finds duplicate files and prompts the user to select which ones to delete.
 This command runs in interactive mode and requires user confirmation for each deletion.`,
+	Annotations: map[string]string{
+		"writesDB": "true",
+	},
 	RunE: runRemoveDuplicates,
 }
 
@@ -23,6 +26,9 @@ var removeDuplicatesUnsafeCmd = &cobra.Command{
 	Short: "Automatically remove duplicate files (keeps oldest)",
 	Long: `Finds duplicate files and automatically deletes all copies except the one
 with the oldest creation date. Use with caution!`,
+	Annotations: map[string]string{
+		"writesDB": "true",
+	},
 	RunE: runRemoveDuplicatesUnsafe,
 }
 

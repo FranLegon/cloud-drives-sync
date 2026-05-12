@@ -7,9 +7,12 @@ import (
 
 var getMetadataCmd = &cobra.Command{
 	Use:   "get-metadata",
-	Short: "Scan all cloud providers and update local metadata database",
-	Long: `Recursively scans all configured cloud storage accounts and updates
-the local encrypted database with file and folder metadata.`,
+	Short: "Update local metadata from cloud providers",
+	Long: `Fetches the latest file metadata (names, IDs, hashes, sizes)
+from all configured cloud providers and updates the local database.`,
+	Annotations: map[string]string{
+		"writesDB": "true",
+	},
 	RunE: runGetMetadata,
 }
 

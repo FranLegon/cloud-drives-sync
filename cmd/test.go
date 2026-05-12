@@ -35,9 +35,12 @@ var test10Hash string
 
 var testCmd = &cobra.Command{
 	Use:   "test",
-	Short: "Run system integration tests",
-	Long:  `Test command performs a series of integration tests to validate system functionality.`,
-	RunE:  runTest,
+	Short: "Test various provider functions",
+	Long:  `Run test operations for providers (like upload/download) without updating DB.`,
+	Annotations: map[string]string{
+		"skipDB": "true",
+	},
+	RunE: runTest,
 }
 
 func init() {

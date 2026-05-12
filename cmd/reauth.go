@@ -18,10 +18,13 @@ var reauthAll bool
 
 var reauthCmd = &cobra.Command{
 	Use:   "reauth",
-	Short: "Re-authenticate cloud provider accounts",
-	Long: `Re-authenticates accounts whose tokens have expired or become invalid.
-By default only broken connections are re-authenticated.
-Use --all to force re-authentication of every account.`,
+	Short: "Force re-authentication for all accounts",
+	Long: `Clears all saved refresh tokens and forces a new OAuth flow
+for all configured Google and Microsoft accounts.
+Useful if tokens have expired or been revoked.`,
+	Annotations: map[string]string{
+		"skipDB": "true",
+	},
 	RunE: runReauth,
 }
 

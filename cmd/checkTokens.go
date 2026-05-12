@@ -7,9 +7,12 @@ import (
 
 var checkTokensCmd = &cobra.Command{
 	Use:   "check-tokens",
-	Short: "Validate all authentication tokens",
-	Long: `Checks that all stored refresh tokens are valid and can be used
-to access the cloud providers. Reports any expired or revoked tokens.`,
+	Short: "Check validity of all authentication tokens",
+	Long: `Verifies that all refresh tokens and sessions are valid
+without performing any actual synchronization.`,
+	Annotations: map[string]string{
+		"skipPreFlight": "true",
+	},
 	RunE: runCheckTokens,
 }
 

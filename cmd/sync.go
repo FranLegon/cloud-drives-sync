@@ -15,6 +15,10 @@ var syncCmd = &cobra.Command{
 3. remove-duplicates-unsafe (or remove-duplicates if --safe): Clean up duplicates
 4. verbose sync-providers: Synchronize files across providers
 5. balance-storage: Re-distribute files to balance usage across backup accounts`,
+	Annotations: map[string]string{
+		"writesDB":         "true",
+		"autoBuildAllowed": "true",
+	},
 	RunE: runSync,
 }
 

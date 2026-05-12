@@ -26,6 +26,9 @@ var initCmd = &cobra.Command{
 	Long: `Initialize the application for first-time use by setting up encryption,
 creating configuration files, and initializing the database. Can also be used
 to add main accounts for Google Drive and Microsoft OneDrive.`,
+	Annotations: map[string]string{
+		"skipSetup": "true",
+	},
 	RunE: runInit,
 }
 
