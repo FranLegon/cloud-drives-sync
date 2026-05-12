@@ -478,6 +478,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	logger.Info("\nTEST SUITE COMPLETED SUCCESSFULLY")
+	logger.Info("All test cases have passed.")
 	return nil
 }
 

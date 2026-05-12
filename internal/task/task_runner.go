@@ -524,7 +524,7 @@ func (r *Runner) BalanceStorage() error {
 			logger.InfoTagged([]string{string(provider), source.User.Email}, "Account is over quota, looking for files to move...")
 
 			// Filter files owned by user and sort by size (descending)
-			var candidates []*model.File
+			candidates := make([]*model.File, 0, len(files))
 			for _, f := range files {
 				// Check if any replica belongs to the source user's account
 				for _, replica := range f.Replicas {
@@ -647,7 +647,7 @@ func (r *Runner) FreeMain() (bool, error) {
 	}
 
 	// Get backup accounts status
-	var targets []*backupStatus
+	targets := make([]*backupStatus, 0, len(backupUsers))
 
 	for _, user := range backupUsers {
 		client, err := r.GetOrCreateClient(&user)
@@ -687,7 +687,7 @@ func (r *Runner) FreeMain() (bool, error) {
 	}
 
 	// Filter files owned by main user
-	var candidates []*model.File
+	candidates := make([]*model.File, 0, len(files))
 	for _, f := range files {
 		// Check if any replica is OWNED by the main user (not just present in their account)
 		for _, replica := range f.Replicas {
@@ -1443,7 +1443,7 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 
 	for path, pathFiles := range filesByPath {
 		// Check if this path exists in Microsoft
-		var msFiles []*model.File
+		msFiles := make([]*model.File, 0, len(pathFiles))
 		for _, f := range pathFiles {
 			for _, replica := range f.Replicas {
 				if replica.Provider == model.ProviderMicrosoft {
@@ -1528,7 +1528,7 @@ func (r *Runner) syncFolderStructures() error {
 		return fmt.Errorf("failed to get folders from DB: %w", err)
 	}
 
-	paths := make([]string, 0)
+	paths := make([]string, 0, len(allFolders))
 	seen := make(map[string]bool)
 	for _, f := range allFolders {
 		if f.Name == MetadataFileName || f.Name == AuxFolder || f.Name == SoftDeletedFolder || strings.Contains(f.Path, AuxFolder) {
@@ -1762,7 +1762,7 @@ func (r *Runner) ProcessHardDeletes() error {
 	logger.Info("Checking %d soft-deleted files for hard deletion...", len(files))
 
 	// Pre-fetch active Google replica statuses for all calculated_ids to avoid N+1 queries
-	var calcIDs []string
+	calcIDs := make([]string, 0, len(files))
 	for _, file := range files {
 		if file.CalculatedID != "" {
 			calcIDs = append(calcIDs, file.CalculatedID)
