@@ -44,33 +44,17 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 			continue
 		}
 
-		key := user.CacheKey()
-
-		r.accountQuotasMu.Lock()
-		q, ok := r.accountQuotas[key]
-		r.accountQuotasMu.Unlock()
-
-		if !ok {
-			quota, err := client.GetQuota()
-			if err != nil {
-				logger.Warning("Failed to get quota for %s: %v", user.Email, err)
-				continue
-			}
-			r.accountQuotasMu.Lock()
-			if existing, exists := r.accountQuotas[key]; exists {
-				q = existing
-			} else {
-				q = &accountQuota{Total: quota.Total, Used: quota.Used}
-				r.accountQuotas[key] = q
-			}
-			r.accountQuotasMu.Unlock()
+		quota, err := r.getQuota(user, client)
+		if err != nil {
+			logger.Warning("Failed to get quota for %s: %v", user.Email, err)
+			continue
 		}
 
 		var free int64
-		if q.Total <= 0 {
-			free = (1<<63 - 1) - q.Used
+		if quota.Total <= 0 {
+			free = (1<<63 - 1) - quota.Used
 		} else {
-			free = q.Total - q.Used
+			free = quota.Total - quota.Used
 		}
 
 		if free > size && free > maxFree {
@@ -82,10 +66,7 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 
 	if bestUser != nil {
 		// Reserve the space for this file
-		key := bestUser.CacheKey()
-		r.accountQuotasMu.Lock()
-		r.accountQuotas[key].Used += size
-		r.accountQuotasMu.Unlock()
+		r.updateQuotaUsed(bestUser, size)
 		return bestClient, bestUser, nil
 	}
 

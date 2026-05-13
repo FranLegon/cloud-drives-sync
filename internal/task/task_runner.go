@@ -90,6 +90,52 @@ func (r *Runner) PreloadFolderCache() {
 	logger.Info("Preloaded %d folders into memory cache", count)
 }
 
+// getQuota gets the quota for a user, using the cache if available.
+func (r *Runner) getQuota(user *model.User, client api.CloudClient) (*api.QuotaInfo, error) {
+	key := user.CacheKey()
+
+	r.accountQuotasMu.Lock()
+	q, ok := r.accountQuotas[key]
+	r.accountQuotasMu.Unlock()
+
+	if ok {
+		var free int64 = -1
+		if q.Total > 0 {
+			free = q.Total - q.Used
+		}
+		return &api.QuotaInfo{
+			Total: q.Total,
+			Used:  q.Used,
+			Free:  free,
+		}, nil
+	}
+
+	quota, err := client.GetQuota()
+	if err != nil {
+		return nil, err
+	}
+
+	r.accountQuotasMu.Lock()
+	r.accountQuotas[key] = &accountQuota{Total: quota.Total, Used: quota.Used}
+	r.accountQuotasMu.Unlock()
+
+	return &api.QuotaInfo{
+		Total: quota.Total,
+		Used:  quota.Used,
+		Free:  quota.Free,
+	}, nil
+}
+
+// updateQuotaUsed updates the cached used quota for a user
+func (r *Runner) updateQuotaUsed(user *model.User, sizeDelta int64) {
+	key := user.CacheKey()
+	r.accountQuotasMu.Lock()
+	if q, ok := r.accountQuotas[key]; ok {
+		q.Used += sizeDelta
+	}
+	r.accountQuotasMu.Unlock()
+}
+
 func (r *Runner) SetStopOnError(stop bool) {
 	r.stopOnError = stop
 }
@@ -529,7 +575,7 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				continue
 			}
 
-			quota, err := client.GetQuota()
+			quota, err := r.getQuota(&user, client)
 			if err != nil {
 				logger.Error("Failed to get quota for %s: %v", user.Email, err)
 				continue
@@ -666,9 +712,11 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				// Update local quotas
 				source.Quota.Used -= file.Size
 				source.UsagePct = float64(source.Quota.Used) / float64(source.Quota.Total) * 100
+				r.updateQuotaUsed(&source.User, -file.Size)
 
 				target.Quota.Used += file.Size
 				target.UsagePct = float64(target.Quota.Used) / float64(target.Quota.Total) * 100
+				r.updateQuotaUsed(&target.User, file.Size)
 
 				if syncRunID > 0 {
 					r.db.LogSyncCopy(syncRunID, file.ID, "balance")
@@ -730,7 +778,7 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 			continue
 		}
 
-		quota, err := client.GetQuota()
+		quota, err := r.getQuota(&user, client)
 		if err != nil {
 			logger.Error("Failed to get quota for %s: %v", user.Email, err)
 			continue
@@ -890,6 +938,8 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 		if filesMoved {
 			target.Free -= file.Size
 			target.Quota.Used += file.Size
+			r.updateQuotaUsed(&target.User, file.Size)
+			r.updateQuotaUsed(mainUser, -file.Size)
 
 			if syncRunID > 0 {
 				r.db.LogSyncCopy(syncRunID, file.ID, "freemain")
@@ -1808,7 +1858,7 @@ func (r *Runner) GetProviderQuotasFromAPI() ([]*model.ProviderQuota, error) {
 				return
 			}
 
-			q, err := client.GetQuota()
+			q, err := r.getQuota(user, client)
 			if err != nil {
 				errCh <- fmt.Errorf("failed to get quota for %s: %w", user.GetAccountID(), err)
 				return
