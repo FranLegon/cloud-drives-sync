@@ -357,7 +357,6 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 
 	uploadUrl := *uploadSession.GetUploadUrl()
 	chunkSize := int64(10 * 1024 * 1024) // 10MB
-	buf := make([]byte, chunkSize)
 	var offset int64 = 0
 
 	for offset < size {
@@ -367,21 +366,16 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 			toRead = remaining
 		}
 
-		n, err := io.ReadFull(reader, buf[:toRead])
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-			return nil, fmt.Errorf("failed to read from stream: %w", err)
-		}
-		if n == 0 {
-			break
-		}
+		// Avoid buffering the entire chunk in memory
+		chunkReader := io.LimitReader(reader, toRead)
 
-		req, err := http.NewRequest("PUT", uploadUrl, bytes.NewReader(buf[:n]))
+		req, err := http.NewRequestWithContext(ctx, "PUT", uploadUrl, chunkReader)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
-		req.ContentLength = int64(n)
+		req.ContentLength = toRead
 		start := offset
-		end := offset + int64(n) - 1
+		end := offset + toRead - 1
 		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 
 		resp, err := c.httpClient.Do(req)
@@ -412,7 +406,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 
 		resp.Body.Close()
 
-		offset += int64(n)
+		offset += toRead
 	}
 
 	finalItem := createdItem
@@ -469,7 +463,6 @@ func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
 
 	uploadUrl := *uploadSession.GetUploadUrl()
 	chunkSize := int64(10 * 1024 * 1024) // 10MB
-	buf := make([]byte, chunkSize)
 	var offset int64 = 0
 
 	for offset < size {
@@ -479,21 +472,16 @@ func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
 			toRead = remaining
 		}
 
-		n, err := io.ReadFull(reader, buf[:toRead])
-		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
-			return fmt.Errorf("failed to read from stream: %w", err)
-		}
-		if n == 0 {
-			break
-		}
+		// Avoid buffering the entire chunk in memory
+		chunkReader := io.LimitReader(reader, toRead)
 
-		req, err := http.NewRequest("PUT", uploadUrl, bytes.NewReader(buf[:n]))
+		req, err := http.NewRequestWithContext(ctx, "PUT", uploadUrl, chunkReader)
 		if err != nil {
 			return fmt.Errorf("failed to create request: %w", err)
 		}
-		req.ContentLength = int64(n)
+		req.ContentLength = toRead
 		start := offset
-		end := offset + int64(n) - 1
+		end := offset + toRead - 1
 		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 
 		resp, err := c.httpClient.Do(req)
@@ -511,7 +499,7 @@ func (c *Client) UpdateFile(fileID string, reader io.Reader, size int64) error {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 
-		offset += int64(n)
+		offset += toRead
 	}
 
 	return nil

@@ -308,10 +308,13 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		errChan := make(chan error, 1)
 
 		go func() {
+			var dlErr error
 			defer func() {
 				if r := recover(); r != nil {
 					logger.Error("Panic in download goroutine path=%q provider=%s native_id=%s: %v", masterFile.Path, sourceReplica.Provider, sourceReplica.NativeID, r)
 					pw.CloseWithError(fmt.Errorf("panic: %v", r))
+				} else if dlErr != nil {
+					pw.CloseWithError(dlErr)
 				} else {
 					pw.Close()
 				}
@@ -320,17 +323,20 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 			if sourceReplica.Fragmented {
 				// Fragment logic...
 				if len(sourceReplica.Fragments) == 0 {
-					errChan <- fmt.Errorf("replica is fragmented but has no fragments")
+					dlErr = fmt.Errorf("replica is fragmented but has no fragments")
+					errChan <- dlErr
 					return
 				}
 				for _, frag := range sourceReplica.Fragments {
 					if err := sourceClient.DownloadFile(frag.NativeFragmentID, pw); err != nil {
+						dlErr = err
 						handleDownloadError(err, errChan, fmt.Sprintf("(fragment %d)", frag.FragmentNumber))
 						return
 					}
 				}
 			} else {
 				if err := sourceClient.DownloadFile(sourceReplica.NativeID, pw); err != nil {
+					dlErr = err
 					handleDownloadError(err, errChan, "")
 					return // Return early on error
 				}

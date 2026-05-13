@@ -912,9 +912,17 @@ func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupSt
 	downloadErrChan := make(chan error, 1)
 
 	go func() {
-		defer pw.Close()
+		var dlErr error
+		defer func() {
+			if dlErr != nil {
+				pw.CloseWithError(dlErr)
+			} else {
+				pw.Close()
+			}
+		}()
 		logger.Info("Downloading %s for fallback transfer...", file.Name)
 		if err := mainClient.DownloadFile(nativeID, pw); err != nil {
+			dlErr = err
 			downloadErrChan <- err
 		} else {
 			downloadErrChan <- nil
