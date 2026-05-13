@@ -1,10 +1,11 @@
 package task
 
 import (
+	"cmp"
 	"fmt"
 	"io"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -80,9 +81,9 @@ func (r *Runner) PreloadFolderCache() {
 			accountID = f.UserPhone
 		}
 		cachePrefix := model.GenerateCacheKey(f.Provider, accountID) + ":"
-		
+
 		trimmedPath := strings.Trim(f.Path, "/\\")
-		
+
 		r.folderCache.Store(cachePrefix+trimmedPath, f.ID)
 		count++
 	}
@@ -602,10 +603,10 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				}
 
 				// Sort targets by most free space (descending) - re-sort each time as space changes
-				sort.Slice(targets, func(i, j int) bool {
-					freeI := targets[i].Quota.Total - targets[i].Quota.Used
-					freeJ := targets[j].Quota.Total - targets[j].Quota.Used
-					return freeI > freeJ
+				slices.SortFunc(targets, func(a, b *AccountStatus) int {
+					freeA := a.Quota.Total - a.Quota.Used
+					freeB := b.Quota.Total - b.Quota.Used
+					return cmp.Compare(freeB, freeA)
 				})
 
 				// Find a target with enough space
@@ -790,8 +791,8 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 		}
 
 		// Sort targets by free space (descending) - re-sort each time as space changes
-		sort.Slice(targets, func(i, j int) bool {
-			return targets[i].Free > targets[j].Free
+		slices.SortFunc(targets, func(a, b *backupStatus) int {
+			return cmp.Compare(b.Free, a.Free)
 		})
 
 		// Find best target
@@ -1320,8 +1321,8 @@ func getMasterFile(fileMap map[model.Provider]*model.File) *model.File {
 
 // sortFilesBySizeDesc sorts a slice of files by size in descending order
 func sortFilesBySizeDesc(files []*model.File) {
-	sort.Slice(files, func(i, j int) bool {
-		return files[i].Size > files[j].Size
+	slices.SortFunc(files, func(a, b *model.File) int {
+		return cmp.Compare(b.Size, a.Size)
 	})
 }
 
