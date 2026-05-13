@@ -31,6 +31,11 @@ func (u *User) LogTags() []string {
 	return []string{string(u.Provider), u.GetAccountID()}
 }
 
+// LogTags returns tags for logger
+func (r *Replica) LogTags() []string {
+	return []string{string(r.Provider), r.AccountID}
+}
+
 // Provider represents a cloud storage provider
 type Provider string
 

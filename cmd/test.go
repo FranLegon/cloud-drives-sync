@@ -782,7 +782,7 @@ func cleanupCloudFiles(r *task.Runner) error {
 			if err == nil {
 				for _, f := range folders {
 					if f.Name == task.AuxFolder {
-						logger.InfoTagged([]string{string(u.Provider), u.Email}, "Deleting aux folder %s...", f.ID)
+						logger.InfoTagged(u.LogTags(), "Deleting aux folder %s...", f.ID)
 						// Try to empty it first
 						subs, _ := c.ListFolders(f.ID)
 						for _, sub := range subs {

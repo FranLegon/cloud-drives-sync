@@ -46,10 +46,10 @@ func runReauth(cmd *cobra.Command, args []string) error {
 
 		// Check if token is broken
 		if isBroken, reason := isTokenBroken(user); isBroken {
-			logger.WarningTagged([]string{string(user.Provider), userIdentifier(user)}, "Token invalid: %s", reason)
+			logger.WarningTagged(user.LogTags(), "Token invalid: %s", reason)
 			usersToReauth = append(usersToReauth, user)
 		} else {
-			logger.InfoTagged([]string{string(user.Provider), userIdentifier(user)}, "Token is valid, skipping")
+			logger.InfoTagged(user.LogTags(), "Token is valid, skipping")
 		}
 	}
 
@@ -63,11 +63,11 @@ func runReauth(cmd *cobra.Command, args []string) error {
 	var failedAccounts []string
 	for _, user := range usersToReauth {
 		if err := reauthUser(user); err != nil {
-			logger.ErrorTagged([]string{string(user.Provider), userIdentifier(user)}, "Re-authentication failed: %v", err)
-			failedAccounts = append(failedAccounts, userIdentifier(user))
+			logger.ErrorTagged(user.LogTags(), "Re-authentication failed: %v", err)
+			failedAccounts = append(failedAccounts, user.GetAccountID())
 			continue
 		}
-		logger.InfoTagged([]string{string(user.Provider), userIdentifier(user)}, "Re-authenticated successfully")
+		logger.InfoTagged(user.LogTags(), "Re-authenticated successfully")
 	}
 
 	// Save updated config
@@ -133,7 +133,7 @@ func reauthOAuth(user *model.User, oauthConfig *oauth2.Config, getEmail func(con
 	state := auth.GenerateStateToken()
 	authURL := oauthConfig.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 
-	logger.Info("Please visit the following URL to authorize %s:", userIdentifier(user))
+	logger.Info("Please visit the following URL to authorize %s:", user.GetAccountID())
 	fmt.Println(authURL)
 
 	code, err := server.WaitForCode(state, 120*time.Second)
@@ -180,9 +180,3 @@ func reauthTelegram(user *model.User) error {
 	return nil
 }
 
-func userIdentifier(user *model.User) string {
-	if user.Email != "" {
-		return user.Email
-	}
-	return user.Phone
-}

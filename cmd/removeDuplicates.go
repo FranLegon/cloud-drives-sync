@@ -79,17 +79,17 @@ func deleteDuplicateFile(runner *task.Runner, file *model.File, keepPath string)
 	for _, replica := range file.Replicas {
 		client, err := getClientForReplica(runner, replica)
 		if err != nil {
-			logger.ErrorTagged([]string{string(replica.Provider)}, "Failed to get client: %v", err)
+			logger.ErrorTagged(replica.LogTags(), "Failed to get client: %v", err)
 			continue
 		}
 
 		if err := client.DeleteFile(replica.NativeID); err != nil {
-			logger.ErrorTagged([]string{string(replica.Provider)}, "Failed to delete file: %v", err)
+			logger.ErrorTagged(replica.LogTags(), "Failed to delete file: %v", err)
 		} else {
 			if keepPath != "" {
-				logger.InfoTagged([]string{string(replica.Provider)}, "Deleted duplicate replica: %s (kept %s)", file.Path, keepPath)
+				logger.InfoTagged(replica.LogTags(), "Deleted duplicate replica: %s (kept %s)", file.Path, keepPath)
 			} else {
-				logger.InfoTagged([]string{string(replica.Provider)}, "Deleted replica: %s", file.Path)
+				logger.InfoTagged(replica.LogTags(), "Deleted replica: %s", file.Path)
 			}
 		}
 	}

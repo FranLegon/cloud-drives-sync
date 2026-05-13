@@ -462,14 +462,14 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 		cacheKey := fmt.Sprintf("%s:%s", sourceReplica.AccountID, targetUser.Email)
 		r.msShareFailureCacheMu.RLock()
 		if r.msShareFailureCache[cacheKey] {
-			logger.InfoTagged([]string{string(sourceReplica.Provider), sourceReplica.AccountID}, "Skipping share for %s with %s (cached failure)", sourceFile.Name, targetUser.Email)
+			logger.InfoTagged(sourceReplica.LogTags(), "Skipping share for %s with %s (cached failure)", sourceFile.Name, targetUser.Email)
 			shareSkipped = true
 		}
 		r.msShareFailureCacheMu.RUnlock()
 	}
 
 	if !shareSkipped {
-		logger.InfoTagged([]string{string(sourceReplica.Provider), sourceReplica.AccountID}, "Sharing %s with %s...", sourceFile.Name, targetUser.Email)
+		logger.InfoTagged(sourceReplica.LogTags(), "Sharing %s with %s...", sourceFile.Name, targetUser.Email)
 		if err := sourceClient.ShareFolder(sourceReplica.NativeID, targetUser.Email, "reader"); err != nil {
 			logger.Warning("Share failed (attempting shortcut anyway): %v", err)
 			// Cache the failure for Microsoft accounts to avoid retrying
@@ -478,7 +478,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 				r.msShareFailureCacheMu.Lock()
 				r.msShareFailureCache[cacheKey] = true
 				r.msShareFailureCacheMu.Unlock()
-				logger.InfoTagged([]string{string(sourceReplica.Provider), sourceReplica.AccountID}, "Cached sharing failure for %s -> %s", sourceReplica.AccountID, targetUser.Email)
+				logger.InfoTagged(sourceReplica.LogTags(), "Cached sharing failure for %s -> %s", sourceReplica.AccountID, targetUser.Email)
 			}
 		}
 	}

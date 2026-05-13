@@ -47,6 +47,13 @@ func SetOutput(w io.Writer) {
 	mu.Unlock()
 }
 
+func formatTags(tags []string) string {
+	if len(tags) > 0 {
+		return fmt.Sprintf("[%s] ", strings.Join(tags, "]["))
+	}
+	return ""
+}
+
 // Info logs an informational message
 func Info(format string, v ...interface{}) {
 	mu.RLock()
@@ -61,11 +68,7 @@ func InfoTagged(tags []string, format string, v ...interface{}) {
 	mu.RLock()
 	defer mu.RUnlock()
 	if currentLevel <= LogLevelInfo {
-		prefix := ""
-		if len(tags) > 0 {
-			prefix = fmt.Sprintf("[%s] ", strings.Join(tags, "]["))
-		}
-		infoLogger.Printf(prefix+format, v...)
+		infoLogger.Printf(formatTags(tags)+format, v...)
 	}
 }
 
@@ -83,11 +86,7 @@ func WarningTagged(tags []string, format string, v ...interface{}) {
 	mu.RLock()
 	defer mu.RUnlock()
 	if currentLevel <= LogLevelWarning {
-		prefix := "WARNING: "
-		if len(tags) > 0 {
-			prefix = fmt.Sprintf("WARNING: [%s] ", strings.Join(tags, "]["))
-		}
-		warningLogger.Printf(prefix+format, v...)
+		warningLogger.Printf("WARNING: "+formatTags(tags)+format, v...)
 	}
 }
 
@@ -105,11 +104,7 @@ func ErrorTagged(tags []string, format string, v ...interface{}) {
 	mu.RLock()
 	defer mu.RUnlock()
 	if currentLevel <= LogLevelError {
-		prefix := "ERROR: "
-		if len(tags) > 0 {
-			prefix = fmt.Sprintf("ERROR: [%s] ", strings.Join(tags, "]["))
-		}
-		errorLogger.Printf(prefix+format, v...)
+		errorLogger.Printf("ERROR: "+formatTags(tags)+format, v...)
 	}
 }
 
@@ -124,9 +119,5 @@ func DryRun(format string, v ...interface{}) {
 func DryRunTagged(tags []string, format string, v ...interface{}) {
 	mu.RLock()
 	defer mu.RUnlock()
-	prefix := "[DRY RUN] "
-	if len(tags) > 0 {
-		prefix = fmt.Sprintf("[DRY RUN] [%s] ", strings.Join(tags, "]["))
-	}
-	infoLogger.Printf(prefix+format, v...)
+	infoLogger.Printf("[DRY RUN] "+formatTags(tags)+format, v...)
 }

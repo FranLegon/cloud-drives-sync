@@ -417,7 +417,7 @@ func (r *Runner) CheckTokens() error {
 		user := &r.config.Users[i]
 		client, err := r.GetOrCreateClient(user)
 		if err != nil {
-			logger.ErrorTagged([]string{string(user.Provider), user.GetAccountID()}, "Failed to create client: %v", err)
+			logger.ErrorTagged(user.LogTags(), "Failed to create client: %v", err)
 			hasErrors = true
 			continue
 		}
@@ -542,7 +542,7 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				UsagePct: usagePct,
 			}
 
-			logger.InfoTagged([]string{string(provider), user.Email}, "Usage: %.2f%% (%d/%d bytes)", usagePct, quota.Used, quota.Total)
+			logger.InfoTagged(user.LogTags(), "Usage: %.2f%% (%d/%d bytes)", usagePct, quota.Used, quota.Total)
 
 			if usagePct > 95.0 {
 				sources = append(sources, status)
@@ -570,7 +570,7 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 
 		// Process sources
 		for _, source := range sources {
-			logger.InfoTagged([]string{string(provider), source.User.Email}, "Account is over quota, looking for files to move...")
+			logger.InfoTagged(source.User.LogTags(), "Account is over quota, looking for files to move...")
 
 			// Filter files owned by user and sort by size (descending)
 			candidates := make([]*model.File, 0, len(files))
@@ -597,7 +597,7 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 
 				// Stop if source is safe
 				if source.UsagePct < 90.0 {
-					logger.InfoTagged([]string{string(provider), source.User.Email}, "Account is now under safe threshold")
+					logger.InfoTagged(source.User.LogTags(), "Account is now under safe threshold")
 					break
 				}
 
@@ -639,11 +639,11 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 
 				// Move file (Transfer Ownership)
 				if !r.safeMode {
-					logger.InfoTagged([]string{string(provider), source.User.Email}, "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+					logger.InfoTagged(source.User.LogTags(), "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
 					err := source.Client.TransferOwnership(sourceReplica.NativeID, target.User.Email)
 					if err != nil {
 						if err == api.ErrOwnershipTransferPending {
-							logger.InfoTagged([]string{string(provider), source.User.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
+							logger.InfoTagged(source.User.LogTags(), "Ownership transfer pending, accepting as %s...", target.User.Email)
 							if err := target.Client.AcceptOwnership(sourceReplica.NativeID); err != nil {
 								logger.Error("Failed to accept ownership: %v", err)
 								continue
@@ -659,7 +659,7 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 						logger.Warning("Failed to update local DB for %s: %v", file.Name, err)
 					}
 				} else {
-					logger.DryRunTagged([]string{string(provider), source.User.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+					logger.DryRunTagged(source.User.LogTags(), "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
 				}
 
 				// Update local quotas

@@ -56,7 +56,7 @@ func (t *RetryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		}
 
 		// Check for rate limit or server errors
-		if resp.StatusCode == http.StatusTooManyRequests || (resp.StatusCode >= 500 && resp.StatusCode < 600) {
+		if isRetriableStatusCode(resp.StatusCode) {
 			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
 			// Read body to prevent leak, then close
 			io.Copy(io.Discard, resp.Body)

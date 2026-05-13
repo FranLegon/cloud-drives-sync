@@ -14,6 +14,10 @@ import (
 	"google.golang.org/api/googleapi"
 )
 
+func isRetriableStatusCode(code int) bool {
+	return code == http.StatusTooManyRequests || (code >= 500 && code < 600)
+}
+
 // IsRetriableError determines if an error is transient and should be retried.
 func IsRetriableError(err error) bool {
 	if err == nil {
@@ -32,22 +36,21 @@ func IsRetriableError(err error) bool {
 	}
 	var httpErr statusCodeError
 	if errors.As(err, &httpErr) {
-		code := httpErr.StatusCode()
-		if code == http.StatusTooManyRequests || (code >= 500 && code < 600) {
+		if isRetriableStatusCode(httpErr.StatusCode()) {
 			return true
 		}
 	}
 
 	var gErr *googleapi.Error
 	if errors.As(err, &gErr) {
-		if gErr.Code == http.StatusTooManyRequests || (gErr.Code >= 500 && gErr.Code < 600) {
+		if isRetriableStatusCode(gErr.Code) {
 			return true
 		}
 	}
 
 	var odataErr *odataerrors.ODataError
 	if errors.As(err, &odataErr) {
-		if odataErr.ResponseStatusCode == http.StatusTooManyRequests || (odataErr.ResponseStatusCode >= 500 && odataErr.ResponseStatusCode < 600) {
+		if isRetriableStatusCode(odataErr.ResponseStatusCode) {
 			return true
 		}
 	}
