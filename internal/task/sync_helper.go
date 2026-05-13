@@ -304,6 +304,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		}
 
 		pr, pw := io.Pipe()
+		defer pr.Close() // Ensure reader is closed to prevent goroutine leaks if upload fails early
 		errChan := make(chan error, 1)
 
 		go func() {

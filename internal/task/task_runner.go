@@ -908,6 +908,7 @@ func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupSt
 
 	// 1. Download
 	pr, pw := io.Pipe()
+	defer pr.Close() // Ensure reader is closed to prevent goroutine leaks if upload fails early
 	downloadErrChan := make(chan error, 1)
 
 	go func() {
@@ -931,12 +932,12 @@ func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupSt
 	logger.Info("Ensuring folder structure for %s on target...", dir)
 	targetFolderID, folderErr := r.ensureFolderStructure(target.Client, dir, target.User.Provider)
 	if folderErr != nil {
-		pr.Close()
 		return fmt.Errorf("failed to ensure destination folder: %w", folderErr)
 	}
 
 	logger.Info("Uploading %s to target...", file.Name)
 	uploadedFile, uploadErr := target.Client.UploadFile(targetFolderID, file.Name, pr, file.Size)
+	_ = pr.Close() // Ensure writer stops blocking if upload failed or finished early
 
 	if dlErr := <-downloadErrChan; dlErr != nil {
 		return fmt.Errorf("download failed: %w", dlErr)
