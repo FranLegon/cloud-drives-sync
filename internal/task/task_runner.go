@@ -484,6 +484,15 @@ func (r *Runner) ShareWithMain() error {
 func (r *Runner) BalanceStorage(syncRunID int64) error {
 	logger.Info("Balancing storage across accounts...")
 
+	var doneCopies map[string]bool
+	if syncRunID > 0 {
+		var err error
+		doneCopies, err = r.db.BatchCheckSyncCopyDone(syncRunID)
+		if err != nil {
+			logger.Warning("Failed to load sync copy log for run %d: %v", syncRunID, err)
+		}
+	}
+
 	// Group users by provider
 	usersByProvider := make(map[model.Provider][]model.User)
 	for _, user := range r.config.Users {
@@ -579,8 +588,8 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 
 			for _, file := range candidates {
 				// Skip if already processed in this sync run
-				if syncRunID > 0 {
-					if done, _ := r.db.IsSyncCopyDone(syncRunID, file.ID, "balance"); done {
+				if syncRunID > 0 && doneCopies != nil {
+					if doneCopies[file.ID+"\x00"+"balance"] {
 						logger.Info("Skipping already-balanced file %s (crash recovery)", file.Name)
 						continue
 					}
@@ -662,6 +671,9 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 
 				if syncRunID > 0 {
 					r.db.LogSyncCopy(syncRunID, file.ID, "balance")
+					if doneCopies != nil {
+						doneCopies[file.ID+"\x00"+"balance"] = true
+					}
 				}
 			}
 		}
@@ -674,6 +686,15 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 	logger.Info("Freeing up main account storage...")
 
 	filesMoved := false
+
+	var doneCopies map[string]bool
+	if syncRunID > 0 {
+		var err error
+		doneCopies, err = r.db.BatchCheckSyncCopyDone(syncRunID)
+		if err != nil {
+			logger.Warning("Failed to load sync copy log for run %d: %v", syncRunID, err)
+		}
+	}
 
 	// Find main account (Google)
 	mainUser := config.GetMainAccount(r.config, model.ProviderGoogle)
@@ -761,8 +782,8 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 	// Move files
 	for _, file := range candidates {
 		// Skip if already processed in this sync run
-		if syncRunID > 0 {
-			if done, _ := r.db.IsSyncCopyDone(syncRunID, file.ID, "freemain"); done {
+		if syncRunID > 0 && doneCopies != nil {
+			if doneCopies[file.ID+"\x00"+"freemain"] {
 				logger.Info("Skipping already-transferred file %s (crash recovery)", file.Name)
 				continue
 			}
@@ -871,6 +892,9 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 
 			if syncRunID > 0 {
 				r.db.LogSyncCopy(syncRunID, file.ID, "freemain")
+				if doneCopies != nil {
+					doneCopies[file.ID+"\x00"+"freemain"] = true
+				}
 			}
 		}
 	}
@@ -1530,6 +1554,15 @@ type shortcutJob struct {
 func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, filesByPath map[string][]*model.File, syncRunID int64) {
 	var jobs []shortcutJob
 
+	var doneCopies map[string]bool
+	if syncRunID > 0 {
+		var err error
+		doneCopies, err = r.db.BatchCheckSyncCopyDone(syncRunID)
+		if err != nil {
+			logger.Warning("Failed to load sync copy log for run %d: %v", syncRunID, err)
+		}
+	}
+
 	for path, pathFiles := range filesByPath {
 		// Check if this path exists in Microsoft
 		msFiles := make([]*model.File, 0, len(pathFiles))
@@ -1563,9 +1596,9 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 			}
 
 			if !hasIt {
-				if syncRunID > 0 {
+				if syncRunID > 0 && doneCopies != nil {
 					targetProviderKey := fmt.Sprintf("shortcut:%s", user.Email)
-					if done, _ := r.db.IsSyncCopyDone(syncRunID, sourceFile.ID, targetProviderKey); done {
+					if doneCopies[sourceFile.ID+"\x00"+targetProviderKey] {
 						logger.Info("Skipping already-created shortcut for %s in %s (crash recovery)", path, user.Email)
 						continue
 					}
