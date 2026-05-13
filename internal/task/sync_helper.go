@@ -205,10 +205,10 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		} else {
 			// Create folder
 			if r.safeMode {
-				logger.DryRun("Would create folder '%s'", part)
+				logger.DryRun("Would create folder %q in path %q", part, currentPath)
 				return "", fmt.Errorf("safe mode: skipped folder creation for %s", part)
 			}
-			logger.Info("Creating folder '%s'...", part)
+			logger.Info("Creating folder %q in path %q...", part, currentPath)
 			folder, err := client.CreateFolder(currentID, part)
 			if err != nil {
 				return "", err
@@ -286,20 +286,20 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 	// 4. Transfer file (Try all viable replicas)
 	var lastErr error
 	for i, sourceReplica := range viableReplicas {
-		logger.InfoTagged(destUser.LogTags(), "Copying %s (as %s) from %s (Replica %d/%d)...", masterFile.Path, finalName, sourceReplica.Provider, i+1, len(viableReplicas))
+		logger.InfoTagged(destUser.LogTags(), "Copying path=%q (as %s) from_provider=%s native_id=%s (Replica %d/%d)...", masterFile.Path, finalName, sourceReplica.Provider, sourceReplica.NativeID, i+1, len(viableReplicas))
 
 		// Get source client
 		sourceUser := r.getUser(sourceReplica.Provider, sourceReplica.AccountID)
 		if sourceUser == nil {
 			lastErr = fmt.Errorf("user not found for replica %s", sourceReplica.AccountID)
-			logger.Warning("%v", lastErr)
+			logger.Warning("Copy failed (user not found) path=%q provider=%s account=%s: %v", masterFile.Path, sourceReplica.Provider, sourceReplica.AccountID, lastErr)
 			continue
 		}
 
 		sourceClient, err := r.GetOrCreateClient(sourceUser)
 		if err != nil {
 			lastErr = fmt.Errorf("failed to get source client for replica %s: %w", sourceReplica.AccountID, err)
-			logger.Warning("%v", lastErr)
+			logger.Warning("Copy failed (client init) path=%q provider=%s account=%s: %v", masterFile.Path, sourceReplica.Provider, sourceReplica.AccountID, lastErr)
 			continue
 		}
 
@@ -310,7 +310,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					logger.Error("Panic in download goroutine: %v", r)
+					logger.Error("Panic in download goroutine path=%q provider=%s native_id=%s: %v", masterFile.Path, sourceReplica.Provider, sourceReplica.NativeID, r)
 					pw.CloseWithError(fmt.Errorf("panic: %v", r))
 				} else {
 					pw.Close()
@@ -356,13 +356,13 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 
 		if uploadErr != nil {
 			lastErr = fmt.Errorf("upload failed: %w", uploadErr)
-			logger.Warning("Copy attempt failed (Upload): %v", lastErr)
+			logger.Warning("Copy upload failed path=%q provider=%s native_id=%s: %v", masterFile.Path, targetProvider, sourceReplica.NativeID, lastErr)
 			continue
 		}
 
 		if downloadErr != nil {
 			lastErr = fmt.Errorf("download failed: %w", downloadErr)
-			logger.Warning("Copy attempt failed (Download): %v", lastErr)
+			logger.Warning("Copy download failed path=%q provider=%s native_id=%s: %v", masterFile.Path, sourceReplica.Provider, sourceReplica.NativeID, lastErr)
 			// Ensure we rollback the upload if possible?
 			// destClient.DeleteFile(uploadedFile.ID) // Optional but good practice
 			continue
@@ -398,7 +398,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		}
 
 		if err := r.db.InsertReplica(newReplica); err != nil {
-			logger.Error("Failed to insert new replica to DB: %v", err)
+			logger.Error("Failed to insert new replica to DB path=%q provider=%s native_id=%s: %v", masterFile.Path, targetProvider, nativeID, err)
 		} else {
 			// Update in-memory masterFile to include new replica
 			masterFile.Replicas = append(masterFile.Replicas, newReplica)
@@ -406,12 +406,11 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 			// Checkpoint successful copy for crash recovery
 			if syncRunID > 0 {
 				if err := r.db.LogSyncCopy(syncRunID, masterFile.ID, string(targetProvider)); err != nil {
-					logger.Warning("Failed to log sync copy checkpoint: %v", err)
+					logger.Warning("Failed to log sync copy checkpoint path=%q provider=%s native_id=%s: %v", masterFile.Path, targetProvider, nativeID, err)
 				}
 			}
 		}
 
-		logger.Info("File copied successfully")
 		return nil
 	}
 
@@ -463,23 +462,23 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 		cacheKey := fmt.Sprintf("%s:%s", sourceReplica.AccountID, targetUser.Email)
 		r.msShareFailureCacheMu.RLock()
 		if r.msShareFailureCache[cacheKey] {
-			logger.InfoTagged(sourceReplica.LogTags(), "Skipping share for %s with %s (cached failure)", sourceFile.Name, targetUser.Email)
+			logger.InfoTagged(sourceReplica.LogTags(), "Skipping share path=%q with target=%s (cached failure)", sourceFile.Path, targetUser.Email)
 			shareSkipped = true
 		}
 		r.msShareFailureCacheMu.RUnlock()
 	}
 
 	if !shareSkipped {
-		logger.InfoTagged(sourceReplica.LogTags(), "Sharing %s with %s...", sourceFile.Name, targetUser.Email)
+		logger.InfoTagged(sourceReplica.LogTags(), "Sharing path=%q with target=%s native_id=%s...", sourceFile.Path, targetUser.Email, sourceReplica.NativeID)
 		if err := sourceClient.ShareFolder(sourceReplica.NativeID, targetUser.Email, "reader"); err != nil {
-			logger.Warning("Share failed (attempting shortcut anyway): %v", err)
+			logger.Warning("Share failed (attempting shortcut anyway) path=%q target=%s native_id=%s: %v", sourceFile.Path, targetUser.Email, sourceReplica.NativeID, err)
 			// Cache the failure for Microsoft accounts to avoid retrying
 			if targetUser.Provider == model.ProviderMicrosoft && strings.Contains(err.Error(), "There was a problem sharing") {
 				cacheKey := fmt.Sprintf("%s:%s", sourceReplica.AccountID, targetUser.Email)
 				r.msShareFailureCacheMu.Lock()
 				r.msShareFailureCache[cacheKey] = true
 				r.msShareFailureCacheMu.Unlock()
-				logger.InfoTagged(sourceReplica.LogTags(), "Cached sharing failure for %s -> %s", sourceReplica.AccountID, targetUser.Email)
+				logger.InfoTagged(sourceReplica.LogTags(), "Cached sharing failure path=%q account=%s target=%s", sourceFile.Path, sourceReplica.AccountID, targetUser.Email)
 			}
 		}
 	}
@@ -493,13 +492,13 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 	// Fetch source Drive ID (needed for MS OneDrive shortcuts)
 	sourceDriveID, err := sourceClient.GetDriveID()
 	if err != nil {
-		logger.Warning("Failed to get source drive ID: %v", err)
+		logger.Warning("Failed to get source drive ID path=%q provider=%s: %v", sourceFile.Path, sourceReplica.Provider, err)
 	}
 	if sourceDriveID == "" && targetUser.Provider == model.ProviderMicrosoft {
-		logger.Warning("Source Drive ID is empty, but required for Microsoft shortcut creation. Source Provider: %s", sourceReplica.Provider)
+		logger.Warning("Source Drive ID is empty, but required for Microsoft shortcut creation path=%q provider=%s", sourceFile.Path, sourceReplica.Provider)
 	}
 
-	logger.InfoTagged(targetUser.LogTags(), "Creating shortcut for %s (TargetID: %s, DriveID: %s)...", sourceFile.Name, sourceReplica.NativeID, sourceDriveID)
+	logger.InfoTagged(targetUser.LogTags(), "Creating shortcut path=%q native_id=%s source_drive_id=%s...", sourceFile.Path, sourceReplica.NativeID, sourceDriveID)
 
 	// 4. Ensure Folder Structure in Target
 	dir := filepath.Dir(sourceFile.Path)
@@ -511,7 +510,6 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 	}
 
 	// 5. Create Shortcut
-	logger.InfoTagged(targetUser.LogTags(), "Creating shortcut for %s...", sourceFile.Name)
 	shortcut, err := targetClient.CreateShortcut(parentID, sourceFile.Name, sourceReplica.NativeID, sourceDriveID)
 	if err != nil {
 		// Attempt to resolve cross-tenant/shared item reference issues for Microsoft
@@ -545,7 +543,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 
 		if !resolved {
 			if targetUser.Provider == model.ProviderMicrosoft && (strings.Contains(err.Error(), "Invalid request") || strings.Contains(err.Error(), "invalidRequest")) {
-				logger.Warning("Shortcut creation failed for %s (likely unsupported cross-account operation): %v. Falling back to placeholder creation.", sourceFile.Name, err)
+				logger.Warning("Shortcut creation failed path=%q native_id=%s (likely unsupported cross-account operation): %v. Falling back to placeholder creation.", sourceFile.Path, sourceReplica.NativeID, err)
 				if msClient, ok := targetClient.(*microsoft.Client); ok {
 					shortcut, err = msClient.CreateFakeShortcut(parentID, sourceFile.Name, sourceFile.Size)
 					if err != nil {
@@ -580,14 +578,12 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 	}
 
 	if err := r.db.InsertReplica(newReplica); err != nil {
-		logger.Error("Failed to insert shortcut replica into DB: %v", err)
+		logger.Error("DB insert shortcut replica failed path=%q provider=%s account=%s: %v", sourceFile.Path, targetUser.Provider, accountID, err)
 	} else {
-		logger.Info("Shortcut replica recorded in DB for %s on %s", sourceFile.Path, targetUser.Provider)
-
 		if syncRunID > 0 {
 			targetProviderKey := fmt.Sprintf("shortcut:%s", targetUser.Email)
 			if err := r.db.LogSyncCopy(syncRunID, sourceFile.ID, targetProviderKey); err != nil {
-				logger.Warning("Failed to log shortcut creation checkpoint: %v", err)
+				logger.Warning("Failed to log shortcut creation checkpoint path=%q provider=%s account=%s: %v", sourceFile.Path, targetUser.Provider, accountID, err)
 			}
 		}
 	}

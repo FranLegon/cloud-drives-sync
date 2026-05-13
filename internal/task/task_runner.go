@@ -633,13 +633,13 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				}
 
 				if sourceReplica == nil {
-					logger.Warning("Could not find replica for file %s in account %s", file.Name, source.User.Email)
+					logger.Warning("Replica not found path=%q provider=%s account=%s", file.Path, provider, source.User.Email)
 					continue
 				}
 
 				// Move file (Transfer Ownership)
 				if !r.safeMode {
-					logger.InfoTagged(source.User.LogTags(), "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+					logger.InfoTagged(source.User.LogTags(), "Transferring path=%q (%d bytes) to target=%s", file.Path, file.Size, target.User.Email)
 					err := source.Client.TransferOwnership(sourceReplica.NativeID, target.User.Email)
 					if err != nil {
 						if err == api.ErrOwnershipTransferPending {
@@ -656,10 +656,10 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 
 					// Update database to reflect ownership change
 					if err := r.db.UpdateReplicaOwner(string(provider), source.User.Email, sourceReplica.NativeID, target.User.Email); err != nil {
-						logger.Warning("Failed to update local DB for %s: %v", file.Name, err)
+						logger.Warning("DB update owner failed path=%q provider=%s account=%s native_id=%s: %v", file.Path, provider, source.User.Email, sourceReplica.NativeID, err)
 					}
 				} else {
-					logger.DryRunTagged(source.User.LogTags(), "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+					logger.DryRunTagged(source.User.LogTags(), "Would transfer path=%q (%d bytes) to target=%s", file.Path, file.Size, target.User.Email)
 				}
 
 				// Update local quotas
@@ -819,12 +819,12 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 		}
 
 		if mainReplica == nil {
-			logger.Warning("Could not find main replica for file %s", file.Name)
+			logger.Warning("Main replica not found path=%q", file.Path)
 			continue
 		}
 
 		if !r.safeMode {
-			logger.InfoTagged([]string{"Google", mainUser.Email}, "Transferring %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+			logger.InfoTagged([]string{"Google", mainUser.Email}, "Transferring path=%q (%d bytes) to target=%s", file.Path, file.Size, target.User.Email)
 			err := mainClient.TransferOwnership(mainReplica.NativeID, target.User.Email)
 
 			// Handle pending transfer flow
@@ -876,12 +876,12 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 			if err == nil && !fallbackUsed {
 				// Update database to reflect ownership change for standard transfer
 				if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainUser.Email, mainReplica.NativeID, target.User.Email); dbErr != nil {
-					logger.Warning("Failed to update local DB for %s: %v", file.Name, dbErr)
+					logger.Warning("DB update owner failed path=%q provider=Google account=%s native_id=%s target=%s: %v", file.Path, mainUser.Email, mainReplica.NativeID, target.User.Email, dbErr)
 				}
 				filesMoved = true
 			}
 		} else {
-			logger.DryRunTagged([]string{"Google", mainUser.Email}, "Would transfer %s (%d bytes) to %s", file.Name, file.Size, target.User.Email)
+			logger.DryRunTagged([]string{"Google", mainUser.Email}, "Would transfer path=%q (%d bytes) to target=%s", file.Path, file.Size, target.User.Email)
 			filesMoved = true // simulate move in dry run
 		}
 
@@ -1279,7 +1279,7 @@ func (r *Runner) moveReplicaToPath(replica *model.Replica, fileName, targetPath 
 	}
 
 	if err := client.MoveFile(replica.NativeID, destID); err != nil {
-		logger.Error("Failed to move %s on %s to %s: %v", fileName, replica.Provider, targetPath, err)
+		logger.Error("Move failed path=%q provider=%s target_path=%q native_id=%s: %v", fileName, replica.Provider, targetPath, replica.NativeID, err)
 		return
 	}
 
@@ -1437,7 +1437,7 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 					return r.copyFile(job.masterFile, job.provider, job.targetName, job.syncRunID)
 				})
 				if err != nil {
-					logger.Error("Failed to copy file %s to %s: %v", job.path, job.provider, err)
+					logger.Error("Copy failed path=%q provider=%s: %v", job.path, job.provider, err)
 					if r.stopOnError {
 						errChan <- fmt.Errorf("failed to copy file %s to %s: %w", job.path, job.provider, err)
 						return
@@ -1646,7 +1646,7 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 					return r.createShortcut(job.sourceFile, &job.user, job.syncRunID)
 				})
 				if err != nil {
-					logger.Error("Failed to create shortcut for %s in %s: %v", job.path, job.user.Email, err)
+					logger.Error("Shortcut creation failed path=%q account=%s: %v", job.path, job.user.Email, err)
 				}
 			}
 		}()
