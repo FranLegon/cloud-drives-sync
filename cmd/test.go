@@ -168,6 +168,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}()
 	logger.Info("Starting Test Command...")
+	logger.Info("Additional logs added for debugging test command execution.")
 
 	// --with-commit: git setup
 	if testWithCommit != "" {

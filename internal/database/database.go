@@ -792,11 +792,10 @@ func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error)
 	}
 
 	queryReplicas := `
-	SELECT r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
-	FROM replicas r
-	JOIN files f ON r.file_id = f.id
-	WHERE f.calculated_id = ?
-	ORDER BY r.id ASC
+	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+	FROM replicas
+	WHERE calculated_id = ?
+	ORDER BY id ASC
 	`
 
 	repRows, err := db.query(queryReplicas, calculatedID)
@@ -1063,57 +1062,78 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 		return files, nil
 	}
 
-	queryReplicas := `
-	SELECT r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
-	FROM replicas r
-	JOIN files f ON r.file_id = f.id
-	WHERE f.status = ?
-	`
-
-	repRows, err := db.query(queryReplicas, status)
-	if err != nil {
-		return nil, err
-	}
-	defer repRows.Close()
-
 	var allReplicas []*model.Replica
-	for repRows.Next() {
-		r := &model.Replica{}
-		var rFileID, rCalcID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus string
-		var rSize, rModTime int64
-		var rFragmented bool
-		var rOwner sql.NullString
+	
+	fileIDs := make([]interface{}, 0, len(files))
+	for _, f := range files {
+		fileIDs = append(fileIDs, f.ID)
+	}
 
-		if err := repRows.Scan(
-			&r.ID, &rFileID, &rCalcID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner,
-		); err != nil {
+	batchSize := 900
+	for i := 0; i < len(fileIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(fileIDs) {
+			end = len(fileIDs)
+		}
+		batch := fileIDs[i:end]
+
+		placeholders := make([]string, len(batch))
+		for j := range batch {
+			placeholders[j] = "?"
+		}
+
+		queryReplicas := fmt.Sprintf(`
+		SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+		FROM replicas
+		WHERE file_id IN (%s)
+		`, strings.Join(placeholders, ","))
+
+		repRows, err := db.query(queryReplicas, batch...)
+		if err != nil {
 			return nil, err
 		}
 
-		r.FileID = rFileID
-		r.CalculatedID = rCalcID
-		r.Path = rPath
-		r.Name = rName
-		r.Size = rSize
-		r.Provider = model.Provider(rProvider)
-		r.AccountID = rAccountID
-		r.NativeID = rNativeID
-		r.NativeHash = rNativeHash
-		r.ModTime = time.Unix(rModTime, 0)
-		r.Status = rStatus
-		r.Fragmented = rFragmented
-		if rOwner.Valid {
-			r.Owner = rOwner.String
+		for repRows.Next() {
+			r := &model.Replica{}
+			var rFileID, rCalcID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus string
+			var rSize, rModTime int64
+			var rFragmented bool
+			var rOwner sql.NullString
+
+			if err := repRows.Scan(
+				&r.ID, &rFileID, &rCalcID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner,
+			); err != nil {
+				repRows.Close()
+				return nil, err
+			}
+
+			r.FileID = rFileID
+			r.CalculatedID = rCalcID
+			r.Path = rPath
+			r.Name = rName
+			r.Size = rSize
+			r.Provider = model.Provider(rProvider)
+			r.AccountID = rAccountID
+			r.NativeID = rNativeID
+			r.NativeHash = rNativeHash
+			r.ModTime = time.Unix(rModTime, 0)
+			r.Status = rStatus
+			r.Fragmented = rFragmented
+			if rOwner.Valid {
+				r.Owner = rOwner.String
+			}
+
+			if file, ok := fileMap[r.FileID]; ok {
+				file.Replicas = append(file.Replicas, r)
+				allReplicas = append(allReplicas, r)
+			}
 		}
 
-		if file, ok := fileMap[r.FileID]; ok {
-			file.Replicas = append(file.Replicas, r)
-			allReplicas = append(allReplicas, r)
+		if err := repRows.Err(); err != nil {
+			repRows.Close()
+			return nil, err
 		}
-	}
-
-	if err := repRows.Err(); err != nil {
-		return nil, err
+		repRows.Close()
 	}
 
 	// Load fragments for fragmented replicas in batch
