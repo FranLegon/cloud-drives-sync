@@ -1403,7 +1403,7 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 	}
 
 	// Phase 1 and 2: Handle soft-deleted placements and collect copy jobs
-	var jobs []copyJob
+	jobs := make([]copyJob, 0, len(filesByPath))
 
 	for path, fileMap := range filesByPath {
 		if strings.Contains(path, softDeletedPath) {
@@ -1478,14 +1478,16 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 	const maxWorkers = 4
 	logger.Info("Executing %d file copy operations with %d workers...", len(jobs), maxWorkers)
 
-	jobChan := make(chan copyJob, len(jobs))
-	for _, j := range jobs {
-		jobChan <- j
-	}
-	close(jobChan)
+	jobChan := make(chan copyJob, maxWorkers*2)
+	go func() {
+		for _, j := range jobs {
+			jobChan <- j
+		}
+		close(jobChan)
+	}()
 
 	var copyWg sync.WaitGroup
-	errChan := make(chan error, len(jobs))
+	errChan := make(chan error, maxWorkers)
 
 	for w := 0; w < maxWorkers; w++ {
 		copyWg.Add(1)
@@ -1612,7 +1614,7 @@ type shortcutJob struct {
 }
 
 func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, filesByPath map[string][]*model.File, syncRunID int64) {
-	var jobs []shortcutJob
+	jobs := make([]shortcutJob, 0, len(filesByPath))
 
 	var doneCopies map[string]bool
 	if syncRunID > 0 {
@@ -1689,11 +1691,13 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 	const maxWorkers = 4
 	logger.Info("Creating %d shortcuts with %d workers...", len(jobs), maxWorkers)
 
-	jobChan := make(chan shortcutJob, len(jobs))
-	for _, j := range jobs {
-		jobChan <- j
-	}
-	close(jobChan)
+	jobChan := make(chan shortcutJob, maxWorkers*2)
+	go func() {
+		for _, j := range jobs {
+			jobChan <- j
+		}
+		close(jobChan)
+	}()
 
 	var wg sync.WaitGroup
 	for w := 0; w < maxWorkers; w++ {
