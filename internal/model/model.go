@@ -1,14 +1,14 @@
 package model
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // GenerateCalculatedID creates a standard deduplication ID
 func GenerateCalculatedID(name string, size int64) string {
-	return fmt.Sprintf("%s-%d", name, size)
+	return name + "-" + strconv.FormatInt(size, 10)
 }
 
 // NormalizePath ensures standard forward-slash separators
