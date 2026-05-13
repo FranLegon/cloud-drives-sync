@@ -18,12 +18,13 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/telegram"
 )
 
-// backupStatus tracks the state of a backup account during FreeMain
-type backupStatus struct {
-	User   model.User
-	Client api.CloudClient
-	Quota  *api.QuotaInfo
-	Free   int64
+// AccountStatus tracks the state of an account during storage operations
+type AccountStatus struct {
+	User     model.User
+	Client   api.CloudClient
+	Quota    *api.QuotaInfo
+	Free     int64
+	UsagePct float64
 }
 
 // accountQuota caches the quota for an account to avoid repeated API calls
@@ -558,13 +559,6 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 
 		logger.Info("Checking quotas for %s...", provider)
 
-		type AccountStatus struct {
-			User     model.User
-			Client   api.CloudClient
-			Quota    *api.QuotaInfo
-			UsagePct float64
-		}
-
 		var sources []*AccountStatus
 		var targets []*AccountStatus
 
@@ -587,6 +581,7 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				Client:   client,
 				Quota:    quota,
 				UsagePct: usagePct,
+				Free:     quota.Total - quota.Used,
 			}
 
 			logger.InfoTagged(user.LogTags(), "Usage: %.2f%% (%d/%d bytes)", usagePct, quota.Used, quota.Total)
@@ -653,19 +648,13 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 
 				// Sort targets by most free space (descending) - re-sort each time as space changes
 				slices.SortFunc(targets, func(a, b *AccountStatus) int {
-					freeA := a.Quota.Total - a.Quota.Used
-					freeB := b.Quota.Total - b.Quota.Used
-					return cmp.Compare(freeB, freeA)
+					return cmp.Compare(b.Free, a.Free)
 				})
 
 				// Find a target with enough space
 				var target *AccountStatus
-				for _, t := range targets {
-					freeSpace := t.Quota.Total - t.Quota.Used
-					if freeSpace > file.Size {
-						target = t
-						break
-					}
+				if len(targets) > 0 && targets[0].Free > file.Size {
+					target = targets[0]
 				}
 
 				if target == nil {
@@ -690,18 +679,10 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				// Move file (Transfer Ownership)
 				if !r.safeMode {
 					logger.InfoTagged(source.User.LogTags(), "Transferring path=%q (%d bytes) to target=%s", file.Path, file.Size, target.User.Email)
-					err := source.Client.TransferOwnership(sourceReplica.NativeID, target.User.Email)
+					err := r.transferOwnershipWithFallback(source.Client, target.Client, target, file, sourceReplica.NativeID, source.User.LogTags())
 					if err != nil {
-						if err == api.ErrOwnershipTransferPending {
-							logger.InfoTagged(source.User.LogTags(), "Ownership transfer pending, accepting as %s...", target.User.Email)
-							if err := target.Client.AcceptOwnership(sourceReplica.NativeID); err != nil {
-								logger.Error("Failed to accept ownership: %v", err)
-								continue
-							}
-						} else {
-							logger.Error("Failed to transfer ownership: %v", err)
-							continue
-						}
+						logger.Error("Failed to transfer ownership: %v", err)
+						continue
 					}
 
 					// Update database to reflect ownership change
@@ -714,10 +695,12 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 
 				// Update local quotas
 				source.Quota.Used -= file.Size
+				source.Free += file.Size
 				source.UsagePct = float64(source.Quota.Used) / float64(source.Quota.Total) * 100
 				r.updateQuotaUsed(&source.User, -file.Size)
 
 				target.Quota.Used += file.Size
+				target.Free -= file.Size
 				target.UsagePct = float64(target.Quota.Used) / float64(target.Quota.Total) * 100
 				r.updateQuotaUsed(&target.User, file.Size)
 
@@ -772,7 +755,7 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 	}
 
 	// Get backup accounts status
-	targets := make([]*backupStatus, 0, len(backupUsers))
+	targets := make([]*AccountStatus, 0, len(backupUsers))
 
 	for _, user := range backupUsers {
 		client, err := r.GetOrCreateClient(&user)
@@ -790,7 +773,7 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 		free := quota.Total - quota.Used
 		// Only consider accounts with some free space
 		if free > 0 {
-			targets = append(targets, &backupStatus{
+			targets = append(targets, &AccountStatus{
 				User:   user,
 				Client: client,
 				Quota:  quota,
@@ -845,17 +828,14 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 		}
 
 		// Sort targets by free space (descending) - re-sort each time as space changes
-		slices.SortFunc(targets, func(a, b *backupStatus) int {
+		slices.SortFunc(targets, func(a, b *AccountStatus) int {
 			return cmp.Compare(b.Free, a.Free)
 		})
 
 		// Find best target
-		var target *backupStatus
-		for _, t := range targets {
-			if t.Free > file.Size {
-				target = t
-				break
-			}
+		var target *AccountStatus
+		if len(targets) > 0 && targets[0].Free > file.Size {
+			target = targets[0]
 		}
 
 		if target == nil {
@@ -880,35 +860,7 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 
 		if !r.safeMode {
 			logger.InfoTagged([]string{"Google", mainUser.Email}, "Transferring path=%q (%d bytes) to target=%s", file.Path, file.Size, target.User.Email)
-			err := mainClient.TransferOwnership(mainReplica.NativeID, target.User.Email)
-
-			// Handle pending transfer flow
-			if err == api.ErrOwnershipTransferPending {
-				logger.InfoTagged([]string{"Google", mainUser.Email}, "Ownership transfer pending, accepting as %s...", target.User.Email)
-				if acceptErr := target.Client.AcceptOwnership(mainReplica.NativeID); acceptErr != nil {
-					logger.Error("Failed to accept ownership: %v", acceptErr)
-					err = fmt.Errorf("acceptance failed: %w", acceptErr)
-				} else {
-					err = nil // Clear error as acceptance succeeded
-
-					// Move file to target's sync folder (it's currently in root after pending owner flow)
-					dir := filepath.Dir(file.Path)
-					dir = model.NormalizePath(dir)
-					if dir == "." || dir == "" {
-						dir = "/"
-					}
-					targetFolderID, folderErr := r.ensureFolderStructure(target.Client, dir, target.User.Provider)
-					if folderErr != nil {
-						logger.Warning("Failed to resolve target sync folder for %s: %v", file.Name, folderErr)
-					} else {
-						if mvErr := target.Client.MoveFile(mainReplica.NativeID, targetFolderID); mvErr != nil {
-							logger.Warning("Failed to move transferred file %s to sync folder: %v", file.Name, mvErr)
-						} else {
-							logger.InfoTagged([]string{"Google", target.User.Email}, "Moved %s to sync folder", file.Name)
-						}
-					}
-				}
-			}
+			err := r.transferOwnershipWithFallback(mainClient, target.Client, target, file, mainReplica.NativeID, []string{"Google", mainUser.Email})
 
 			fallbackUsed := false
 
@@ -960,7 +912,7 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 }
 
 // fallbackCopyDelete performs a download+upload+delete transfer when ownership transfer is not supported
-func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupStatus, file *model.File, nativeID string, mainEmail string, oldReplicaDB *model.Replica) error {
+func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *AccountStatus, file *model.File, nativeID string, mainEmail string, oldReplicaDB *model.Replica) error {
 	logger.InfoTagged([]string{"Google", mainEmail}, "Transfer via ownership not supported (consent required). Falling back to Copy+Delete...")
 
 	// 1. Download
@@ -988,11 +940,7 @@ func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupSt
 	}()
 
 	// 2. Upload - ensure destination folder exists
-	dir := filepath.Dir(file.Path)
-	dir = model.NormalizePath(dir)
-	if dir == "." || dir == "" {
-		dir = "/"
-	}
+	dir := model.NormalizePath(filepath.Dir(file.Path))
 
 	logger.Info("Ensuring folder structure for %s on target...", dir)
 	targetFolderID, folderErr := r.ensureFolderStructure(target.Client, dir, target.User.Provider)
@@ -1027,7 +975,7 @@ func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *backupSt
 }
 
 // reconcileFallbackDB updates the database after a fallback copy+delete transfer
-func (r *Runner) reconcileFallbackDB(uploadedFile *model.File, oldReplicaDB *model.Replica, target *backupStatus, file *model.File, mainEmail string, deleteSucceeded bool) {
+func (r *Runner) reconcileFallbackDB(uploadedFile *model.File, oldReplicaDB *model.Replica, target *AccountStatus, file *model.File, mainEmail string, deleteSucceeded bool) {
 	if uploadedFile == nil || len(uploadedFile.Replicas) == 0 {
 		return
 	}
@@ -1326,11 +1274,7 @@ func (r *Runner) moveReplicaToPath(replica *model.Replica, fileName, targetPath 
 		return
 	}
 
-	targetDir := filepath.Dir(targetPath)
-	targetDir = model.NormalizePath(targetDir)
-	if targetDir == "." || targetDir == "" {
-		targetDir = "/"
-	}
+	targetDir := model.NormalizePath(filepath.Dir(targetPath))
 
 	destID, err := r.ensureFolderStructure(client, targetDir, replica.Provider)
 	if err != nil {
@@ -2150,7 +2094,7 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 				// Ideally we move it to the path defined by the file in soft-deleted.
 
 				targetSoftPath := target.Path
-				targetFolder := filepath.Dir(targetSoftPath)
+				targetFolder := model.NormalizePath(filepath.Dir(targetSoftPath))
 
 				if !r.safeMode {
 					// Find correct user/client using replicas

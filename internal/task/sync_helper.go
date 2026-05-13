@@ -73,15 +73,40 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 	return nil, nil, fmt.Errorf("no account found for %s with enough space", provider)
 }
 
-// ensureFolderStructure ensures that the folder structure exists in the destination.
+// transferOwnershipWithFallback transfers ownership and handles the pending state, moving the file to the sync folder if necessary.
+func (r *Runner) transferOwnershipWithFallback(sourceClient api.CloudClient, targetClient api.CloudClient, target *AccountStatus, file *model.File, nativeID string, sourceLogTags []string) error {
+	err := sourceClient.TransferOwnership(nativeID, target.User.Email)
+	if err == api.ErrOwnershipTransferPending {
+		logger.InfoTagged(sourceLogTags, "Ownership transfer pending, accepting as %s...", target.User.Email)
+		if acceptErr := targetClient.AcceptOwnership(nativeID); acceptErr != nil {
+			logger.Error("Failed to accept ownership: %v", acceptErr)
+			return fmt.Errorf("acceptance failed: %w", acceptErr)
+		}
+		err = nil // Clear error as acceptance succeeded
+
+		// Move file to target's sync folder (it's currently in root after pending owner flow)
+		dir := model.NormalizePath(filepath.Dir(file.Path))
+		targetFolderID, folderErr := r.ensureFolderStructure(targetClient, dir, target.User.Provider)
+		if folderErr != nil {
+			logger.Warning("Failed to resolve target sync folder for %s: %v", file.Name, folderErr)
+		} else {
+			if mvErr := targetClient.MoveFile(nativeID, targetFolderID); mvErr != nil {
+				logger.Warning("Failed to move transferred file %s to sync folder: %v", file.Name, mvErr)
+			} else {
+				logger.InfoTagged([]string{string(target.User.Provider), target.User.Email}, "Moved %s to sync folder", file.Name)
+			}
+		}
+	}
+	return err
+}
 // It is safe to call concurrently; a mutex prevents duplicate folder creation.
 func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, provider model.Provider) (string, error) {
 	// Telegram doesn't support folders, so just return the path
 	if provider == model.ProviderTelegram {
+		path = model.NormalizePath(path)
 		if !strings.HasPrefix(path, "/") {
 			path = "/" + path
 		}
-		path = model.NormalizePath(path)
 		return path, nil
 	}
 
@@ -245,9 +270,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 	}
 
 	// 3. Ensure folder structure
-	dir := filepath.Dir(masterFile.Path)
-	// Normalize path separators
-	dir = model.NormalizePath(dir)
+	dir := model.NormalizePath(filepath.Dir(masterFile.Path))
 
 	parentID, err := r.ensureFolderStructure(destClient, dir, targetProvider)
 	if err != nil {
@@ -478,8 +501,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 	logger.InfoTagged(targetUser.LogTags(), "Creating shortcut path=%q native_id=%s source_drive_id=%s...", sourceFile.Path, sourceReplica.NativeID, sourceDriveID)
 
 	// 4. Ensure Folder Structure in Target
-	dir := filepath.Dir(sourceFile.Path)
-	dir = model.NormalizePath(dir)
+	dir := model.NormalizePath(filepath.Dir(sourceFile.Path))
 
 	parentID, err := r.ensureFolderStructure(targetClient, dir, targetUser.Provider)
 	if err != nil {
