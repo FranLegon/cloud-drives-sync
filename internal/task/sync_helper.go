@@ -97,14 +97,9 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		return cachedID.(string), nil
 	}
 
-	// Quick fast-path lookup in DB without any locks
-	if path != "" && path != "." {
-		dbFolder, err := r.db.GetFolderByPathAndAccount("/"+path, provider, accountID)
-		if err == nil && dbFolder != nil && dbFolder.ID != "" {
-			r.folderCache.Store(cacheKey, dbFolder.ID)
-			return dbFolder.ID, nil
-		}
-	}
+	// Quick fast-path lookup in DB is redundant since PreloadFolderCache 
+	// loads all DB folders into memory, and any new folders are added 
+	// to the cache. We only need the memory cache check.
 
 	mu := r.getAccountFolderLock(provider, accountID)
 	mu.Lock()
@@ -142,13 +137,8 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 			continue
 		}
 
-		// First check local DB for the folder
-		dbFolder, err := r.db.GetFolderByPathAndAccount("/"+currentPath, provider, accountID)
-		if err == nil && dbFolder != nil && dbFolder.ID != "" {
-			currentID = dbFolder.ID
-			r.folderCache.Store(partCacheKey, currentID)
-			continue
-		}
+		// DB fallback is redundant because PreloadFolderCache already loaded all folders
+		// and newly created folders are also added to the cache.
 
 		// Fallback to API if not in DB (or if it was just created by another thread/process and not synced yet)
 		folders, err := client.ListFolders(currentID)

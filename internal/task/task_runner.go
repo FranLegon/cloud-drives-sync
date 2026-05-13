@@ -608,8 +608,8 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 			continue
 		}
 
-		// Pre-fetch files once for all sources
-		files, err := r.db.GetAllFiles()
+		// Pre-fetch active files once for all sources
+		files, err := r.db.GetAllFilesAcrossProviders()
 		if err != nil {
 			logger.Error("Failed to get files from DB for balancing: %v", err)
 			continue
@@ -622,9 +622,12 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 			// Filter files owned by user and sort by size (descending)
 			candidates := make([]*model.File, 0, len(files))
 			for _, f := range files {
-				// Check if any replica belongs to the source user's account
+				if f.Status != "active" {
+					continue
+				}
+				// Check if any active replica belongs to the source user's account
 				for _, replica := range f.Replicas {
-					if replica.AccountID == source.User.Email || replica.AccountID == source.User.Phone {
+					if replica.Status == "active" && (replica.AccountID == source.User.Email || replica.AccountID == source.User.Phone) {
 						candidates = append(candidates, f)
 						break
 					}
@@ -670,10 +673,10 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 					continue
 				}
 
-				// Find the replica for this source account
+				// Find the active replica for this source account
 				var sourceReplica *model.Replica
 				for _, replica := range file.Replicas {
-					if replica.AccountID == source.User.Email || replica.AccountID == source.User.Phone {
+					if replica.Status == "active" && (replica.AccountID == source.User.Email || replica.AccountID == source.User.Phone) {
 						sourceReplica = replica
 						break
 					}
@@ -801,8 +804,8 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 		return filesMoved, nil
 	}
 
-	// List files in main account using DB
-	files, err := r.db.GetAllFiles()
+	// List active files in main account using DB
+	files, err := r.db.GetAllFilesAcrossProviders()
 	if err != nil {
 		logger.Error("Failed to get files from DB: %v", err)
 		return filesMoved, err
@@ -811,9 +814,12 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 	// Filter files owned by main user
 	candidates := make([]*model.File, 0, len(files))
 	for _, f := range files {
-		// Check if any replica is OWNED by the main user (not just present in their account)
+		if f.Status != "active" {
+			continue
+		}
+		// Check if any active replica is OWNED by the main user (not just present in their account)
 		for _, replica := range f.Replicas {
-			if replica.AccountID == mainUser.Email && replica.Owner == mainUser.Email {
+			if replica.Status == "active" && replica.AccountID == mainUser.Email && replica.Owner == mainUser.Email {
 				candidates = append(candidates, f)
 				break
 			}
@@ -858,10 +864,10 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 		}
 
 		// Move file
-		// Find the main replica for this file to get the NativeID
+		// Find the active main replica for this file to get the NativeID
 		var mainReplica *model.Replica
 		for _, replica := range file.Replicas {
-			if replica.AccountID == mainUser.Email && replica.Owner == mainUser.Email {
+			if replica.Status == "active" && replica.AccountID == mainUser.Email && replica.Owner == mainUser.Email {
 				mainReplica = replica
 				break
 			}
@@ -1630,7 +1636,7 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 		msFiles := make([]*model.File, 0, len(pathFiles))
 		for _, f := range pathFiles {
 			for _, replica := range f.Replicas {
-				if replica.Provider == model.ProviderMicrosoft {
+				if replica.Status == "active" && replica.Provider == model.ProviderMicrosoft {
 					msFiles = append(msFiles, f)
 					break
 				}
@@ -1647,7 +1653,7 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 			hasIt := false
 			for _, f := range msFiles {
 				for _, replica := range f.Replicas {
-					if replica.Provider == model.ProviderMicrosoft && replica.AccountID == user.Email {
+					if replica.Status == "active" && replica.Provider == model.ProviderMicrosoft && replica.AccountID == user.Email {
 						hasIt = true
 						break
 					}
