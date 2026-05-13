@@ -244,9 +244,7 @@ func (r *Runner) GetMetadata() error {
 			}
 
 			// Scan files
-			err = api.WithRetry(func() error {
-				return r.scanFolder(client, user, syncFolderID, "", fileChan, folderChan, apiSem)
-			})
+			err = r.scanFolder(client, user, syncFolderID, "", fileChan, folderChan, apiSem)
 			if err != nil {
 				logger.ErrorTagged(user.LogTags(), "Failed to scan folder: %v", err)
 			}
@@ -347,9 +345,11 @@ func (r *Runner) dbWriter(fileChan <-chan *model.File, folderChan <-chan *model.
 
 func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, pathPrefix string, fileChan chan<- *model.File, folderChan chan<- *model.Folder, apiSem chan struct{}) error {
 	// List and store files
-	apiSem <- struct{}{}
-	files, err := client.ListFiles(folderID)
-	<-apiSem
+	files, err := api.WithRetryT(func() ([]*model.File, error) {
+		apiSem <- struct{}{}
+		defer func() { <-apiSem }()
+		return client.ListFiles(folderID)
+	})
 	if err != nil {
 		return err
 	}
@@ -368,9 +368,11 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 	logger.InfoTagged(user.LogTags(), "Found %d files in folder %s", len(files), folderID)
 
 	// Recursively scan subfolders
-	apiSem <- struct{}{}
-	folders, err := client.ListFolders(folderID)
-	<-apiSem
+	folders, err := api.WithRetryT(func() ([]*model.Folder, error) {
+		apiSem <- struct{}{}
+		defer func() { <-apiSem }()
+		return client.ListFolders(folderID)
+	})
 	if err != nil {
 		return err
 	}
@@ -385,9 +387,7 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 		wg.Add(1)
 		go func(f *model.Folder) {
 			defer wg.Done()
-			err := api.WithRetry(func() error {
-				return r.scanFolder(client, user, f.ID, f.Path, fileChan, folderChan, apiSem)
-			})
+			err := r.scanFolder(client, user, f.ID, f.Path, fileChan, folderChan, apiSem)
 			if err != nil {
 				errCh <- err
 			}
