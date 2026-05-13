@@ -117,6 +117,11 @@ func SyncAction(runner *task.Runner, isSafeMode bool) error {
 		if err := runner.BalanceStorage(syncRunID); err != nil {
 			return err
 		}
+		if err := db.MarkStepCompleted(syncRunID, 5); err != nil {
+			logger.Warning("Failed to checkpoint step 5: %v", err)
+		}
+	} else {
+		logger.Info("[Step 5/5] Skipping Balance Storage (already completed)")
 	}
 
 	// Mark run fully completed

@@ -1034,7 +1034,7 @@ func (r *Runner) SyncProviders(syncRunID int64) error {
 	}
 
 	// Phase 3: Distribute Shortcuts for Microsoft OneDrive
-	if err := r.distributeShortcuts(files); err != nil {
+	if err := r.distributeShortcuts(files, syncRunID); err != nil {
 		logger.Error("Failed to distribute shortcuts: %v", err)
 		if r.stopOnError {
 			return fmt.Errorf("distribute shortcuts failed: %w", err)
@@ -1490,7 +1490,7 @@ func (r *Runner) enforceSoftDeletedPlacement(masterFile *model.File, softDeleted
 
 // distributeShortcuts ensures that for every file in Microsoft OneDrive,
 // all other OneDrive accounts have a shortcut to it.
-func (r *Runner) distributeShortcuts(files []*model.File) error {
+func (r *Runner) distributeShortcuts(files []*model.File, syncRunID int64) error {
 	logger.Info("Distributing OneDrive shortcuts...")
 
 	// Group files by Path
@@ -1508,7 +1508,7 @@ func (r *Runner) distributeShortcuts(files []*model.File) error {
 	}
 
 	if len(msUsers) >= 2 {
-		r.distributeShortcutsAcrossMSAccounts(msUsers, filesByPath)
+		r.distributeShortcutsAcrossMSAccounts(msUsers, filesByPath, syncRunID)
 	}
 
 	// Distribute Folders (for empty folders)
@@ -1524,9 +1524,10 @@ type shortcutJob struct {
 	sourceFile *model.File
 	user       model.User
 	path       string
+	syncRunID  int64
 }
 
-func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, filesByPath map[string][]*model.File) {
+func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, filesByPath map[string][]*model.File, syncRunID int64) {
 	var jobs []shortcutJob
 
 	for path, pathFiles := range filesByPath {
@@ -1562,6 +1563,14 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 			}
 
 			if !hasIt {
+				if syncRunID > 0 {
+					targetProviderKey := fmt.Sprintf("shortcut:%s", user.Email)
+					if done, _ := r.db.IsSyncCopyDone(syncRunID, sourceFile.ID, targetProviderKey); done {
+						logger.Info("Skipping already-created shortcut for %s in %s (crash recovery)", path, user.Email)
+						continue
+					}
+				}
+
 				if r.safeMode {
 					sourceAccount := ""
 					if len(sourceFile.Replicas) > 0 {
@@ -1573,6 +1582,7 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 						sourceFile: sourceFile,
 						user:       user,
 						path:       path,
+						syncRunID:  syncRunID,
 					})
 				}
 			}
@@ -1599,7 +1609,7 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 			defer wg.Done()
 			for job := range jobChan {
 				err := api.WithRetry(func() error {
-					return r.createShortcut(job.sourceFile, &job.user)
+					return r.createShortcut(job.sourceFile, &job.user, job.syncRunID)
 				})
 				if err != nil {
 					logger.Error("Failed to create shortcut for %s in %s: %v", job.path, job.user.Email, err)

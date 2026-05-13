@@ -418,7 +418,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 }
 
 // createShortcut shares the source file and creates a shortcut in the target account
-func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) error {
+func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, syncRunID int64) error {
 	// 1. Find a compatible source replica
 	if len(sourceFile.Replicas) == 0 {
 		return fmt.Errorf("file has no replicas")
@@ -582,6 +582,13 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User) 
 		logger.Error("Failed to insert shortcut replica into DB: %v", err)
 	} else {
 		logger.Info("Shortcut replica recorded in DB for %s on %s", sourceFile.Path, targetUser.Provider)
+
+		if syncRunID > 0 {
+			targetProviderKey := fmt.Sprintf("shortcut:%s", targetUser.Email)
+			if err := r.db.LogSyncCopy(syncRunID, sourceFile.ID, targetProviderKey); err != nil {
+				logger.Warning("Failed to log shortcut creation checkpoint: %v", err)
+			}
+		}
 	}
 
 	return nil
