@@ -20,6 +20,6 @@ func init() {
 }
 
 func runFreeMain(cmd *cobra.Command, args []string) error {
-	_, err := sharedRunner.FreeMain()
+	_, err := sharedRunner.FreeMain(0)
 	return err
 }

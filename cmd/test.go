@@ -974,7 +974,7 @@ func runCLISync(runner *task.Runner) error {
 
 func runCLIFreeMain(runner *task.Runner) error {
 	logger.Info("[CLI COMMAND] Running: FreeMain")
-	_, err := runner.FreeMain()
+	_, err := runner.FreeMain(0)
 	return err
 }
 

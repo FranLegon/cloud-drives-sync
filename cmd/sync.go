@@ -68,7 +68,7 @@ func SyncAction(runner *task.Runner, isSafeMode bool) error {
 	// 2. Free Main
 	if startStep <= 2 {
 		logger.Info("[Step 2/5] Freeing Main Account...")
-		_, err := runner.FreeMain()
+		_, err := runner.FreeMain(syncRunID)
 		if err != nil {
 			return err
 		}
@@ -114,7 +114,7 @@ func SyncAction(runner *task.Runner, isSafeMode bool) error {
 	// 5. Balance Storage
 	if startStep <= 5 {
 		logger.Info("[Step 5/5] Balancing Storage...")
-		if err := runner.BalanceStorage(); err != nil {
+		if err := runner.BalanceStorage(syncRunID); err != nil {
 			return err
 		}
 	}

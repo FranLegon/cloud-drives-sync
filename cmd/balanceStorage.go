@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/spf13/cobra"
 )
 
@@ -21,7 +20,5 @@ func init() {
 }
 
 func runBalanceStorage(cmd *cobra.Command, args []string) error {
-	// Check quotas
-	logger.Info("Checking storage quotas...")
-	return sharedRunner.BalanceStorage()
+	return sharedRunner.BalanceStorage(0)
 }

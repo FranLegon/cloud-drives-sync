@@ -165,25 +165,17 @@ func (db *DB) queryRow(query string, args ...interface{}) *sql.Row {
 
 // Reset clears all data from the database
 func (db *DB) Reset() error {
-	tx, err := db.conn.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	tables := []string{"replica_fragments", "replicas", "files", "folders"}
-	for _, table := range tables {
-		_, err := tx.Exec(fmt.Sprintf("DELETE FROM %s", table))
-		if err != nil {
-			// Ignore if table doesn't exist
-			continue
+	return db.WithTx(func(tx *sql.Tx) error {
+		tables := []string{"replica_fragments", "replicas", "files", "folders"}
+		for _, table := range tables {
+			_, err := tx.Exec(fmt.Sprintf("DELETE FROM %s", table))
+			if err != nil {
+				// Ignore if table doesn't exist
+				continue
+			}
 		}
-	}
-	
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
 
 // GetMetadataHash computes a fast hash of the current logical state of the database,
@@ -197,7 +189,7 @@ func (db *DB) GetMetadataHash() (string, error) {
 		(SELECT COALESCE(SUM((LENGTH(id)*3) + (LENGTH(name)*7) + (LENGTH(path)*11) + (LENGTH(provider)*13) + (LENGTH(COALESCE(user_email,''))*17) + (LENGTH(COALESCE(user_phone,''))*19) + (LENGTH(COALESCE(parent_folder_id,''))*23) + (LENGTH(COALESCE(owner_email,''))*29)), 0) FROM folders)
 	`
 	var hash1, hash2, hash3 int64
-	err := db.conn.QueryRow(query).Scan(&hash1, &hash2, &hash3)
+	err := db.queryRow(query).Scan(&hash1, &hash2, &hash3)
 	if err != nil {
 		return "", err
 	}
@@ -220,116 +212,109 @@ func (db *DB) Close() error {
 
 // Initialize creates the database schema
 func (db *DB) Initialize() error {
-	tx, err := db.conn.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
+	return db.WithTx(func(tx *sql.Tx) error {
+		schema := `
+		CREATE TABLE IF NOT EXISTS files (
+			id TEXT PRIMARY KEY,
+			path TEXT NOT NULL,
+			name TEXT NOT NULL,
+			size INTEGER NOT NULL,
+			calculated_id TEXT,
+			mod_time INTEGER NOT NULL,
+			status TEXT NOT NULL
+		);
 
-	schema := `
-	CREATE TABLE IF NOT EXISTS files (
-		id TEXT PRIMARY KEY,
-		path TEXT NOT NULL,
-		name TEXT NOT NULL,
-		size INTEGER NOT NULL,
-		calculated_id TEXT,
-		mod_time INTEGER NOT NULL,
-		status TEXT NOT NULL
-	);
+		CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
+		CREATE INDEX IF NOT EXISTS idx_files_calculated_id ON files(calculated_id);
+		CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
 
-	CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
-	CREATE INDEX IF NOT EXISTS idx_files_calculated_id ON files(calculated_id);
-	CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
+		CREATE TABLE IF NOT EXISTS replicas (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			file_id TEXT,
+			calculated_id TEXT,
+			path TEXT NOT NULL,
+			name TEXT NOT NULL,
+			size INTEGER NOT NULL,
+			provider TEXT NOT NULL,
+			account_id TEXT NOT NULL,
+			native_id TEXT NOT NULL,
+			native_hash TEXT,
+			mod_time INTEGER NOT NULL,
+			status TEXT NOT NULL,
+			fragmented BOOLEAN NOT NULL DEFAULT 0,
+			last_seen_at INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+		);
 
-	CREATE TABLE IF NOT EXISTS replicas (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		file_id TEXT,
-		calculated_id TEXT,
-		path TEXT NOT NULL,
-		name TEXT NOT NULL,
-		size INTEGER NOT NULL,
-		provider TEXT NOT NULL,
-		account_id TEXT NOT NULL,
-		native_id TEXT NOT NULL,
-		native_hash TEXT,
-		mod_time INTEGER NOT NULL,
-		status TEXT NOT NULL,
-		fragmented BOOLEAN NOT NULL DEFAULT 0,
-		last_seen_at INTEGER NOT NULL DEFAULT 0,
-		FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
-	);
+		CREATE INDEX IF NOT EXISTS idx_replicas_file_id ON replicas(file_id);
+		CREATE INDEX IF NOT EXISTS idx_replicas_calculated_id ON replicas(calculated_id);
+		CREATE INDEX IF NOT EXISTS idx_replicas_provider ON replicas(provider);
+		CREATE INDEX IF NOT EXISTS idx_replicas_account_id ON replicas(account_id);
+		CREATE INDEX IF NOT EXISTS idx_replicas_native_id_old ON replicas(native_id);
+		CREATE INDEX IF NOT EXISTS idx_replicas_status ON replicas(status);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_replicas_unique ON replicas(provider, account_id, native_id);
 
-	CREATE INDEX IF NOT EXISTS idx_replicas_file_id ON replicas(file_id);
-	CREATE INDEX IF NOT EXISTS idx_replicas_calculated_id ON replicas(calculated_id);
-	CREATE INDEX IF NOT EXISTS idx_replicas_provider ON replicas(provider);
-	CREATE INDEX IF NOT EXISTS idx_replicas_account_id ON replicas(account_id);
-	CREATE INDEX IF NOT EXISTS idx_replicas_native_id_old ON replicas(native_id);
-	CREATE INDEX IF NOT EXISTS idx_replicas_status ON replicas(status);
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_replicas_unique ON replicas(provider, account_id, native_id);
+		CREATE INDEX IF NOT EXISTS idx_replicas_native_id ON replicas(provider, native_id);
+		CREATE INDEX IF NOT EXISTS idx_replicas_provider_status ON replicas(provider, status);
+		CREATE INDEX IF NOT EXISTS idx_replicas_last_seen ON replicas(last_seen_at);
 
-	CREATE INDEX IF NOT EXISTS idx_replicas_native_id ON replicas(provider, native_id);
-	CREATE INDEX IF NOT EXISTS idx_replicas_provider_status ON replicas(provider, status);
-	CREATE INDEX IF NOT EXISTS idx_replicas_last_seen ON replicas(last_seen_at);
+		CREATE TABLE IF NOT EXISTS replica_fragments (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			replica_id INTEGER NOT NULL,
+			fragment_number INTEGER NOT NULL,
+			fragments_total INTEGER NOT NULL,
+			size INTEGER NOT NULL,
+			native_fragment_id TEXT NOT NULL,
+			FOREIGN KEY(replica_id) REFERENCES replicas(id) ON DELETE CASCADE
+		);
 
-	CREATE TABLE IF NOT EXISTS replica_fragments (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		replica_id INTEGER NOT NULL,
-		fragment_number INTEGER NOT NULL,
-		fragments_total INTEGER NOT NULL,
-		size INTEGER NOT NULL,
-		native_fragment_id TEXT NOT NULL,
-		FOREIGN KEY(replica_id) REFERENCES replicas(id) ON DELETE CASCADE
-	);
+		CREATE INDEX IF NOT EXISTS idx_replica_fragments_replica_id ON replica_fragments(replica_id);
+		CREATE INDEX IF NOT EXISTS idx_replica_fragments_native_id ON replica_fragments(native_fragment_id);
 
-	CREATE INDEX IF NOT EXISTS idx_replica_fragments_replica_id ON replica_fragments(replica_id);
-	CREATE INDEX IF NOT EXISTS idx_replica_fragments_native_id ON replica_fragments(native_fragment_id);
+		CREATE TABLE IF NOT EXISTS folders (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			path TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			user_email TEXT,
+			user_phone TEXT,
+			parent_folder_id TEXT,
+			owner_email TEXT
+		);
 
-	CREATE TABLE IF NOT EXISTS folders (
-		id TEXT PRIMARY KEY,
-		name TEXT NOT NULL,
-		path TEXT NOT NULL,
-		provider TEXT NOT NULL,
-		user_email TEXT,
-		user_phone TEXT,
-		parent_folder_id TEXT,
-		owner_email TEXT
-	);
+		CREATE INDEX IF NOT EXISTS idx_folders_provider ON folders(provider);
+		CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 
-	CREATE INDEX IF NOT EXISTS idx_folders_provider ON folders(provider);
-	CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
+		CREATE TABLE IF NOT EXISTS sync_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			started_at INTEGER NOT NULL,
+			completed_at INTEGER,
+			last_completed_step INTEGER NOT NULL DEFAULT 0,
+			safe_mode BOOLEAN NOT NULL DEFAULT 0
+		);
 
-	CREATE TABLE IF NOT EXISTS sync_runs (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		started_at INTEGER NOT NULL,
-		completed_at INTEGER,
-		last_completed_step INTEGER NOT NULL DEFAULT 0,
-		safe_mode BOOLEAN NOT NULL DEFAULT 0
-	);
+		CREATE TABLE IF NOT EXISTS sync_copy_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			sync_run_id INTEGER NOT NULL,
+			file_id TEXT NOT NULL,
+			target_provider TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			FOREIGN KEY(sync_run_id) REFERENCES sync_runs(id) ON DELETE CASCADE
+		);
 
-	CREATE TABLE IF NOT EXISTS sync_copy_log (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		sync_run_id INTEGER NOT NULL,
-		file_id TEXT NOT NULL,
-		target_provider TEXT NOT NULL,
-		created_at INTEGER NOT NULL,
-		FOREIGN KEY(sync_run_id) REFERENCES sync_runs(id) ON DELETE CASCADE
-	);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_copy_log_unique ON sync_copy_log(sync_run_id, file_id, target_provider);
+		`
 
-	CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_copy_log_unique ON sync_copy_log(sync_run_id, file_id, target_provider);
-	`
+		if _, err := tx.Exec(schema); err != nil {
+			return fmt.Errorf("failed to create schema: %w", err)
+		}
 
-	if _, err := tx.Exec(schema); err != nil {
-		return fmt.Errorf("failed to create schema: %w", err)
-	}
+		// Migrations
+		_, _ = tx.Exec("ALTER TABLE replicas ADD COLUMN last_seen_at INTEGER DEFAULT 0")
+		_, _ = tx.Exec("ALTER TABLE replicas ADD COLUMN owner TEXT DEFAULT ''")
 
-	// Migrations
-	_, _ = tx.Exec("ALTER TABLE replicas ADD COLUMN last_seen_at INTEGER DEFAULT 0")
-	_, _ = tx.Exec("ALTER TABLE replicas ADD COLUMN owner TEXT DEFAULT ''")
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
 
 // InsertFile inserts a file record into the database
@@ -370,155 +355,141 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 		return nil
 	}
 
-	tx, err := db.conn.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+	return db.WithTx(func(tx *sql.Tx) error {
+		// Upsert replicas using ON CONFLICT logic to preserve file_id if it exists.
+		// We rely on the unique index (provider, account_id, native_id).
+		// usage of RETURNING id requires SQLite 3.35+
+		// IMPORTANT: Don't resurrect 'deleted' replicas with stale native_id after file transfers
+		now := time.Now().Unix()
+		replicaQuery := `
+			INSERT INTO replicas (
+				calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, file_id, last_seen_at, owner
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+			ON CONFLICT(provider, account_id, native_id) DO UPDATE SET
+				calculated_id=excluded.calculated_id,
+				path=excluded.path,
+				name=excluded.name,
+				size=excluded.size,
+				native_hash=excluded.native_hash,
+				mod_time=excluded.mod_time,
+				status=CASE 
+					WHEN replicas.status = 'deleted' AND (replicas.native_hash = excluded.native_hash OR excluded.native_hash = '' OR replicas.native_hash = '') THEN 'deleted'
+					ELSE excluded.status 
+				END,
+				fragmented=excluded.fragmented,
+				last_seen_at=excluded.last_seen_at,
+				owner=excluded.owner
+		`
+		replicaStmt, err := tx.Prepare(replicaQuery)
+		if err != nil {
+			return err
+		}
+		defer replicaStmt.Close()
 
-	// Upsert replicas using ON CONFLICT logic to preserve file_id if it exists.
-	// We rely on the unique index (provider, account_id, native_id).
-	// usage of RETURNING id requires SQLite 3.35+
-	// IMPORTANT: Don't resurrect 'deleted' replicas with stale native_id after file transfers
-	now := time.Now().Unix()
-	replicaQuery := `
-		INSERT INTO replicas (
-			calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, file_id, last_seen_at, owner
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
-		ON CONFLICT(provider, account_id, native_id) DO UPDATE SET
-			calculated_id=excluded.calculated_id,
-			path=excluded.path,
-			name=excluded.name,
-			size=excluded.size,
-			native_hash=excluded.native_hash,
-			mod_time=excluded.mod_time,
-			status=CASE 
-				WHEN replicas.status = 'deleted' AND (replicas.native_hash = excluded.native_hash OR excluded.native_hash = '' OR replicas.native_hash = '') THEN 'deleted'
-				ELSE excluded.status 
-			END,
-			fragmented=excluded.fragmented,
-			last_seen_at=excluded.last_seen_at,
-			owner=excluded.owner
-	`
-	replicaStmt, err := tx.Prepare(replicaQuery)
-	if err != nil {
-		return err
-	}
-	defer replicaStmt.Close()
+		// Prepare ID lookup statement
+		idStmt, err := tx.Prepare(`SELECT id FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`)
+		if err != nil {
+			return err
+		}
+		defer idStmt.Close()
 
-	// Prepare ID lookup statement
-	idStmt, err := tx.Prepare(`SELECT id FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`)
-	if err != nil {
-		return err
-	}
-	defer idStmt.Close()
+		// Prepare fragment statements
+		deleteFragmentsStmt, err := tx.Prepare(`DELETE FROM replica_fragments WHERE replica_id = ?`)
+		if err != nil {
+			return err
+		}
+		defer deleteFragmentsStmt.Close()
 
-	// Prepare fragment statements
-	deleteFragmentsStmt, err := tx.Prepare(`DELETE FROM replica_fragments WHERE replica_id = ?`)
-	if err != nil {
-		return err
-	}
-	defer deleteFragmentsStmt.Close()
+		fragmentStmt, err := tx.Prepare(`
+			INSERT INTO replica_fragments (
+				replica_id, fragment_number, fragments_total, size, native_fragment_id
+			) VALUES (?, ?, ?, ?, ?)
+		`)
+		if err != nil {
+			return err
+		}
+		defer fragmentStmt.Close()
 
-	fragmentStmt, err := tx.Prepare(`
-		INSERT INTO replica_fragments (
-			replica_id, fragment_number, fragments_total, size, native_fragment_id
-		) VALUES (?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return err
-	}
-	defer fragmentStmt.Close()
+		for _, file := range files {
+			for _, replica := range file.Replicas {
+				_, err := replicaStmt.Exec(
+					replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+					string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+					replica.ModTime.Unix(), replica.Status, replica.Fragmented, now, replica.Owner)
 
-	for _, file := range files {
-		for _, replica := range file.Replicas {
-			_, err := replicaStmt.Exec(
-				replica.CalculatedID, replica.Path, replica.Name, replica.Size,
-				string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-				replica.ModTime.Unix(), replica.Status, replica.Fragmented, now, replica.Owner)
-
-			if err != nil {
-				return fmt.Errorf("failed to upsert replica: %w", err)
-			}
-
-			if len(replica.Fragments) > 0 {
-				var replicaID int64
-				err = idStmt.QueryRow(string(replica.Provider), replica.AccountID, replica.NativeID).Scan(&replicaID)
 				if err != nil {
-					return fmt.Errorf("failed to get replica ID: %w", err)
+					return fmt.Errorf("failed to upsert replica: %w", err)
 				}
 
-				// Clear old fragments
-				if _, err := deleteFragmentsStmt.Exec(replicaID); err != nil {
-					return fmt.Errorf("failed to clear fragments: %w", err)
-				}
-
-				// Insert new fragments
-				for _, frag := range replica.Fragments {
-					_, err = fragmentStmt.Exec(
-						replicaID, frag.FragmentNumber, frag.FragmentsTotal, frag.Size, frag.NativeFragmentID)
+				if len(replica.Fragments) > 0 {
+					var replicaID int64
+					err = idStmt.QueryRow(string(replica.Provider), replica.AccountID, replica.NativeID).Scan(&replicaID)
 					if err != nil {
-						return fmt.Errorf("failed to insert fragment: %w", err)
+						return fmt.Errorf("failed to get replica ID: %w", err)
+					}
+
+					// Clear old fragments
+					if _, err := deleteFragmentsStmt.Exec(replicaID); err != nil {
+						return fmt.Errorf("failed to clear fragments: %w", err)
+					}
+
+					// Insert new fragments
+					for _, frag := range replica.Fragments {
+						_, err = fragmentStmt.Exec(
+							replicaID, frag.FragmentNumber, frag.FragmentsTotal, frag.Size, frag.NativeFragmentID)
+						if err != nil {
+							return fmt.Errorf("failed to insert fragment: %w", err)
+						}
 					}
 				}
 			}
 		}
-	}
 
-	return tx.Commit()
+		return nil
+	})
 }
 
 // UpdateReplicaOwner updates the owner (account_id) of a replica.
 // This is used during FreeMain when ownership is transferred.
 func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAccountID string) error {
-	tx, err := db.conn.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	// Check if target replica already exists to avoid UNIQUE constraint violation
-	var exists int
-	checkQuery := `SELECT 1 FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`
-	err = tx.QueryRow(checkQuery, provider, newAccountID, nativeID).Scan(&exists)
-	if err != nil && err != sql.ErrNoRows {
-		return fmt.Errorf("failed to check existing replica: %w", err)
-	}
-
-	if exists == 1 {
-		// Target already exists, so we just remove the old one to reflect the move/change
-		// (The new owner is already tracked, so we don't need to update the old record to it)
-		delQuery := `DELETE FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`
-		if _, err := tx.Exec(delQuery, provider, oldAccountID, nativeID); err != nil {
-			return fmt.Errorf("failed to delete old replica: %w", err)
+	return db.WithTx(func(tx *sql.Tx) error {
+		// Check if target replica already exists to avoid UNIQUE constraint violation
+		var exists int
+		checkQuery := `SELECT 1 FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`
+		err := tx.QueryRow(checkQuery, provider, newAccountID, nativeID).Scan(&exists)
+		if err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("failed to check existing replica: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("failed to commit transaction: %w", err)
+
+		if exists == 1 {
+			// Target already exists, so we just remove the old one to reflect the move/change
+			// (The new owner is already tracked, so we don't need to update the old record to it)
+			delQuery := `DELETE FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`
+			if _, err := db.execTx(tx, delQuery, provider, oldAccountID, nativeID); err != nil {
+				return fmt.Errorf("failed to delete old replica: %w", err)
+			}
+			return nil
+		}
+
+		query := `
+			UPDATE replicas
+			SET account_id = ?
+			WHERE provider = ? AND account_id = ? AND native_id = ?
+		`
+		res, err := db.execTx(tx, query, newAccountID, provider, oldAccountID, nativeID)
+		if err != nil {
+			return fmt.Errorf("failed to update replica owner: %w", err)
+		}
+
+		rows, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected: %w", err)
+		}
+		if rows == 0 {
+			return fmt.Errorf("no replica found to update (prov=%s, acc=%s, id=%s)", provider, oldAccountID, nativeID)
 		}
 		return nil
-	}
-
-	query := `
-		UPDATE replicas
-		SET account_id = ?
-		WHERE provider = ? AND account_id = ? AND native_id = ?
-	`
-	res, err := tx.Exec(query, newAccountID, provider, oldAccountID, nativeID)
-	if err != nil {
-		return fmt.Errorf("failed to update replica owner: %w", err)
-	}
-
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-	if rows == 0 {
-		return fmt.Errorf("no replica found to update (prov=%s, acc=%s, id=%s)", provider, oldAccountID, nativeID)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	return nil
+	})
 }
 
 // InsertReplica inserts a replica record and its fragments into the database within a transaction
@@ -639,53 +610,49 @@ func (db *DB) InsertFolder(folder *model.Folder) error {
 
 // BatchInsertFolders inserts multiple folders in a single transaction
 func (db *DB) BatchInsertFolders(folders []*model.Folder) error {
-	tx, err := db.conn.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	stmt, err := tx.Prepare(`
-	INSERT INTO folders (
-		id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(id) DO UPDATE SET
-		name=excluded.name,
-		path=excluded.path,
-		provider=excluded.provider,
-		user_email=excluded.user_email,
-		user_phone=excluded.user_phone,
-		parent_folder_id=excluded.parent_folder_id,
-		owner_email=excluded.owner_email
-	WHERE folders.name != excluded.name
-	   OR folders.path != excluded.path
-	   OR folders.provider != excluded.provider
-	   OR COALESCE(folders.user_email, '') != COALESCE(excluded.user_email, '')
-	   OR COALESCE(folders.user_phone, '') != COALESCE(excluded.user_phone, '')
-	   OR COALESCE(folders.parent_folder_id, '') != COALESCE(excluded.parent_folder_id, '')
-	   OR COALESCE(folders.owner_email, '') != COALESCE(excluded.owner_email, '')
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	for _, folder := range folders {
-		_, err := stmt.Exec(
-			folder.ID, folder.Name, folder.Path, string(folder.Provider),
-			folder.UserEmail, folder.UserPhone, folder.ParentFolderID, folder.OwnerEmail,
-		)
+	return db.WithTx(func(tx *sql.Tx) error {
+		stmt, err := tx.Prepare(`
+		INSERT INTO folders (
+			id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name,
+			path=excluded.path,
+			provider=excluded.provider,
+			user_email=excluded.user_email,
+			user_phone=excluded.user_phone,
+			parent_folder_id=excluded.parent_folder_id,
+			owner_email=excluded.owner_email
+		WHERE folders.name != excluded.name
+		   OR folders.path != excluded.path
+		   OR folders.provider != excluded.provider
+		   OR COALESCE(folders.user_email, '') != COALESCE(excluded.user_email, '')
+		   OR COALESCE(folders.user_phone, '') != COALESCE(excluded.user_phone, '')
+		   OR COALESCE(folders.parent_folder_id, '') != COALESCE(excluded.parent_folder_id, '')
+		   OR COALESCE(folders.owner_email, '') != COALESCE(excluded.owner_email, '')
+		`)
 		if err != nil {
 			return err
 		}
-	}
+		defer stmt.Close()
 
-	return tx.Commit()
+		for _, folder := range folders {
+			_, err := stmt.Exec(
+				folder.ID, folder.Name, folder.Path, string(folder.Provider),
+				folder.UserEmail, folder.UserPhone, folder.ParentFolderID, folder.OwnerEmail,
+			)
+			if err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 }
 
 // GetAllFolders returns all folders from DB
 func (db *DB) GetAllFolders() ([]*model.Folder, error) {
-	rows, err := db.conn.Query("SELECT id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email FROM folders")
+	rows, err := db.query("SELECT id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email FROM folders")
 	if err != nil {
 		return nil, err
 	}
@@ -711,7 +678,7 @@ func (db *DB) GetFolderByPathAndAccount(path string, provider model.Provider, ac
 	FROM folders
 	WHERE path = ? AND provider = ? AND (user_email = ? OR user_phone = ?)
 	`
-	row := db.conn.QueryRow(query, path, string(provider), accountID, accountID)
+	row := db.queryRow(query, path, string(provider), accountID, accountID)
 
 	var f model.Folder
 	var prov string
@@ -737,7 +704,7 @@ func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error)
 	ORDER BY f.mod_time ASC, r.id ASC
 	`
 
-	rows, err := db.conn.Query(query, calculatedID)
+	rows, err := db.query(query, calculatedID)
 	if err != nil {
 		return nil, err
 	}
@@ -829,7 +796,7 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 	FROM files
 	`
 
-	rows, err := db.conn.Query(query)
+	rows, err := db.query(query)
 	if err != nil {
 		return nil, err
 	}
@@ -894,7 +861,7 @@ func (db *DB) getAllReplicas() ([]*model.Replica, error) {
 	FROM replicas
 	WHERE file_id IS NOT NULL
 	`
-	rows, err := db.conn.Query(query)
+	rows, err := db.query(query)
 	if err != nil {
 		return nil, err
 	}
@@ -961,7 +928,7 @@ func (db *DB) batchLoadFragments(replicas []*model.Replica) error {
 		ORDER BY replica_id, fragment_number ASC
 		`, strings.Join(placeholders, ","))
 
-		rows, err := db.conn.Query(query, args...)
+		rows, err := db.query(query, args...)
 		if err != nil {
 			return err
 		}
@@ -996,7 +963,7 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	WHERE status = ?
 	`
 
-	rows, err := db.conn.Query(queryFiles, status)
+	rows, err := db.query(queryFiles, status)
 	if err != nil {
 		return nil, err
 	}
@@ -1031,7 +998,7 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	WHERE f.status = ?
 	`
 
-	repRows, err := db.conn.Query(queryReplicas, status)
+	repRows, err := db.query(queryReplicas, status)
 	if err != nil {
 		return nil, err
 	}
@@ -1105,7 +1072,7 @@ func (db *DB) GetReplicas(fileID string) ([]*model.Replica, error) {
 	FROM replicas
 	WHERE file_id = ?
 	`
-	rows, err := db.conn.Query(query, fileID)
+	rows, err := db.query(query, fileID)
 	if err != nil {
 		return nil, err
 	}
@@ -1154,7 +1121,7 @@ func (db *DB) GetReplicaFragments(replicaID int64) ([]*model.ReplicaFragment, er
 	WHERE replica_id = ?
 	ORDER BY fragment_number ASC
 	`
-	rows, err := db.conn.Query(query, replicaID)
+	rows, err := db.query(query, replicaID)
 	if err != nil {
 		return nil, err
 	}
@@ -1179,7 +1146,7 @@ func (db *DB) GetReplicasByAccount(provider model.Provider, accountID string) ([
 	FROM replicas
 	WHERE provider = ? AND account_id = ?
 	`
-	rows, err := db.conn.Query(query, string(provider), accountID)
+	rows, err := db.query(query, string(provider), accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -1217,7 +1184,7 @@ func (db *DB) GetReplicaByNativeID(provider model.Provider, nativeID string) (*m
 	var providerStr string
 	var modTime int64
 	var owner sql.NullString
-	err := db.conn.QueryRow(query, string(provider), nativeID).Scan(
+	err := db.queryRow(query, string(provider), nativeID).Scan(
 		&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
 		&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner,
 	)
@@ -1240,7 +1207,7 @@ func (db *DB) GetReplicaByNativeID(provider model.Provider, nativeID string) (*m
 func (db *DB) HasActiveReplicaByNativeID(provider model.Provider, nativeID string) (bool, error) {
 	query := `SELECT COUNT(*) FROM replicas WHERE provider = ? AND native_id = ? AND status = 'active'`
 	var count int
-	err := db.conn.QueryRow(query, string(provider), nativeID).Scan(&count)
+	err := db.queryRow(query, string(provider), nativeID).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -1260,7 +1227,7 @@ func (db *DB) GetReplicaByNativeFragmentID(nativeFragmentID string) (*model.Repl
 	var providerStr string
 	var modTime int64
 	var owner sql.NullString
-	err := db.conn.QueryRow(query, nativeFragmentID).Scan(
+	err := db.queryRow(query, nativeFragmentID).Scan(
 		&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
 		&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner,
 	)
@@ -1281,7 +1248,7 @@ func (db *DB) GetReplicaByNativeFragmentID(nativeFragmentID string) (*model.Repl
 // DeleteFile deletes a file from the database
 func (db *DB) DeleteFile(id string) error {
 	query := "DELETE FROM files WHERE id = ?"
-	_, err := db.conn.Exec(query, id)
+	_, err := db.exec(query, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete file: %w", err)
 	}
@@ -1291,7 +1258,7 @@ func (db *DB) DeleteFile(id string) error {
 // DeleteFolder deletes a folder from the database
 func (db *DB) DeleteFolder(id string) error {
 	query := "DELETE FROM folders WHERE id = ?"
-	_, err := db.conn.Exec(query, id)
+	_, err := db.exec(query, id)
 	if err != nil {
 		return fmt.Errorf("failed to delete folder: %w", err)
 	}
@@ -1307,7 +1274,7 @@ func (db *DB) GetDuplicateCalculatedIDs() ([]string, error) {
 	GROUP BY calculated_id
 	HAVING COUNT(*) > 1
 	`
-	rows, err := db.conn.Query(query)
+	rows, err := db.query(query)
 	if err != nil {
 		return nil, err
 	}
@@ -1332,7 +1299,7 @@ func (db *DB) GetDuplicateCalculatedIDs() ([]string, error) {
 
 // DeleteReplicasForProvider removes all replicas for a specific provider
 func (db *DB) DeleteReplicasForProvider(provider model.Provider) error {
-	_, err := db.conn.Exec("DELETE FROM replicas WHERE provider = ?", string(provider))
+	_, err := db.exec("DELETE FROM replicas WHERE provider = ?", string(provider))
 	if err != nil {
 		return fmt.Errorf("failed to delete replicas for provider: %w", err)
 	}
@@ -1341,7 +1308,7 @@ func (db *DB) DeleteReplicasForProvider(provider model.Provider) error {
 
 // DeleteReplica removes a specific replica by ID
 func (db *DB) DeleteReplica(id int64) error {
-	_, err := db.conn.Exec("DELETE FROM replicas WHERE id = ?", id)
+	_, err := db.exec("DELETE FROM replicas WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("failed to delete replica: %w", err)
 	}
@@ -1357,7 +1324,7 @@ func (db *DB) DeleteStaleReplicasByNativeID(provider model.Provider, oldNativeID
 	SET status = 'deleted'
 	WHERE provider = ? AND native_id = ? AND id != ? AND status = 'active'
 	`
-	_, err := db.conn.Exec(query, string(provider), oldNativeID, excludeReplicaID)
+	_, err := db.exec(query, string(provider), oldNativeID, excludeReplicaID)
 	if err != nil {
 		return fmt.Errorf("failed to delete stale replicas: %w", err)
 	}
@@ -1379,7 +1346,7 @@ func (db *DB) HasActiveGoogleReplicaOutsideSoftDeleted(calculatedID string) (boo
 	)
 	`, auxFolderName, auxFolderName)
 	var exists bool
-	err := db.conn.QueryRow(query, calculatedID).Scan(&exists)
+	err := db.queryRow(query, calculatedID).Scan(&exists)
 	return exists, err
 }
 
@@ -1419,7 +1386,7 @@ func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs [
 		AND path NOT LIKE '%%%s\soft-deleted%%'
 		`, strings.Join(placeholders, ","), auxFolderName, auxFolderName)
 
-		rows, err := db.conn.Query(query, args...)
+		rows, err := db.query(query, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -1440,82 +1407,75 @@ func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs [
 // Priority: Google provider state takes precedence when replicas disagree
 // Only considers recently scanned replicas (last_seen_at >= query start time)
 func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
-	tx, err := db.conn.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
+	return db.WithTx(func(tx *sql.Tx) error {
+		minTimestamp := scanStartTime.Unix()
 
-	minTimestamp := scanStartTime.Unix()
+		softDeletedPattern := auxFolderName + "/soft-deleted"
+		softDeletedPatternWin := auxFolderName + `\soft-deleted`
 
-	softDeletedPattern := auxFolderName + "/soft-deleted"
-	softDeletedPatternWin := auxFolderName + `\soft-deleted`
+		// Single-pass update: Determine the correct status based on current replica locations
+		updateQuery := fmt.Sprintf(`
+		WITH ReplicaAgg AS (
+			SELECT file_id,
+				SUM(CASE WHEN provider = 'google' AND path NOT LIKE '%%%s%%' AND path NOT LIKE '%%%s%%' THEN 1 ELSE 0 END) as active_google,
+				SUM(CASE WHEN provider = 'google' THEN 1 ELSE 0 END) as total_google,
+				SUM(CASE WHEN path NOT LIKE '%%%s%%' AND path NOT LIKE '%%%s%%' THEN 1 ELSE 0 END) as active_any,
+				COUNT(*) as total_any
+			FROM replicas
+			WHERE status = 'active' AND last_seen_at >= ?
+			GROUP BY file_id
+		)
+		UPDATE files
+		SET status = CASE
+			WHEN r.active_google > 0 THEN 'active'
+			WHEN r.total_google > 0 AND r.active_google = 0 THEN 'softdeleted'
+			WHEN r.total_google = 0 AND r.active_any > 0 THEN 'active'
+			WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'softdeleted'
+			ELSE files.status
+		END
+		FROM ReplicaAgg r
+		WHERE files.id = r.file_id
+		AND files.status != CASE
+			WHEN r.active_google > 0 THEN 'active'
+			WHEN r.total_google > 0 AND r.active_google = 0 THEN 'softdeleted'
+			WHEN r.total_google = 0 AND r.active_any > 0 THEN 'active'
+			WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'softdeleted'
+			ELSE files.status
+		END
+		`, softDeletedPattern, softDeletedPatternWin, softDeletedPattern, softDeletedPatternWin)
 
-	// Single-pass update: Determine the correct status based on current replica locations
-	updateQuery := fmt.Sprintf(`
-	WITH ReplicaAgg AS (
-		SELECT file_id,
-			SUM(CASE WHEN provider = 'google' AND path NOT LIKE '%%%s%%' AND path NOT LIKE '%%%s%%' THEN 1 ELSE 0 END) as active_google,
-			SUM(CASE WHEN provider = 'google' THEN 1 ELSE 0 END) as total_google,
-			SUM(CASE WHEN path NOT LIKE '%%%s%%' AND path NOT LIKE '%%%s%%' THEN 1 ELSE 0 END) as active_any,
-			COUNT(*) as total_any
-		FROM replicas
-		WHERE status = 'active' AND last_seen_at >= ?
-		GROUP BY file_id
-	)
-	UPDATE files
-	SET status = CASE
-		WHEN r.active_google > 0 THEN 'active'
-		WHEN r.total_google > 0 AND r.active_google = 0 THEN 'softdeleted'
-		WHEN r.total_google = 0 AND r.active_any > 0 THEN 'active'
-		WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'softdeleted'
-		ELSE files.status
-	END
-	FROM ReplicaAgg r
-	WHERE files.id = r.file_id
-	AND files.status != CASE
-		WHEN r.active_google > 0 THEN 'active'
-		WHEN r.total_google > 0 AND r.active_google = 0 THEN 'softdeleted'
-		WHEN r.total_google = 0 AND r.active_any > 0 THEN 'active'
-		WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'softdeleted'
-		ELSE files.status
-	END
-	`, softDeletedPattern, softDeletedPatternWin, softDeletedPattern, softDeletedPatternWin)
+		if _, err := db.execTx(tx, updateQuery, minTimestamp); err != nil {
+			return fmt.Errorf("failed to update soft-deleted status: %w", err)
+		}
 
-	if _, err := tx.Exec(updateQuery, minTimestamp); err != nil {
-		return fmt.Errorf("failed to update soft-deleted status: %w", err)
-	}
+		// Second pass: catch files that remain 'softdeleted' due to file_id linkage issues
+		// by checking replicas via calculated_id (content-based match)
+		fallbackQuery := fmt.Sprintf(`
+		WITH LatestActive AS (
+			SELECT calculated_id, path,
+				ROW_NUMBER() OVER(PARTITION BY calculated_id ORDER BY mod_time DESC) as rn
+			FROM replicas
+			WHERE status = 'active'
+			AND provider = 'google'
+			AND last_seen_at >= ?
+			AND path NOT LIKE '%%%s%%'
+			AND path NOT LIKE '%%%s%%'
+		)
+		UPDATE files
+		SET status = 'active',
+			path = COALESCE(la.path, files.path)
+		FROM LatestActive la
+		WHERE files.calculated_id = la.calculated_id
+		AND la.rn = 1
+		AND files.status = 'softdeleted'
+		AND (files.calculated_id != '' AND files.calculated_id IS NOT NULL)
+		`, softDeletedPattern, softDeletedPatternWin)
+		if _, err := tx.Exec(fallbackQuery, minTimestamp); err != nil {
+			return fmt.Errorf("failed to update soft-deleted status (fallback): %w", err)
+		}
 
-	// Second pass: catch files that remain 'softdeleted' due to file_id linkage issues
-	// by checking replicas via calculated_id (content-based match)
-	fallbackQuery := fmt.Sprintf(`
-	WITH LatestActive AS (
-		SELECT calculated_id, path,
-			ROW_NUMBER() OVER(PARTITION BY calculated_id ORDER BY mod_time DESC) as rn
-		FROM replicas
-		WHERE status = 'active'
-		AND provider = 'google'
-		AND last_seen_at >= ?
-		AND path NOT LIKE '%%%s%%'
-		AND path NOT LIKE '%%%s%%'
-	)
-	UPDATE files
-	SET status = 'active',
-		path = COALESCE(la.path, files.path)
-	FROM LatestActive la
-	WHERE files.calculated_id = la.calculated_id
-	AND la.rn = 1
-	AND files.status = 'softdeleted'
-	AND (files.calculated_id != '' AND files.calculated_id IS NOT NULL)
-	`, softDeletedPattern, softDeletedPatternWin)
-	if _, err := tx.Exec(fallbackQuery, minTimestamp); err != nil {
-		return fmt.Errorf("failed to update soft-deleted status (fallback): %w", err)
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	return nil
+		return nil
+	})
 }
 
 // DBExists checks if the database file exists
@@ -1560,7 +1520,7 @@ func (db *DB) GetFileByPath(path string) (*model.File, error) {
 	FROM files
 	WHERE path = ?
 	`
-	row := db.conn.QueryRow(query, path)
+	row := db.queryRow(query, path)
 
 	file := &model.File{}
 	var modTime int64
@@ -1596,7 +1556,7 @@ func (db *DB) GetFileByID(id string) (*model.File, error) {
 
 	file := &model.File{}
 	var modTime int64
-	err := db.conn.QueryRow(query, id).Scan(
+	err := db.queryRow(query, id).Scan(
 		&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status,
 	)
 	if err != nil {
@@ -1621,7 +1581,7 @@ func (db *DB) UpdateFile(file *model.File) error {
 	SET path = ?, name = ?, size = ?, calculated_id = ?, mod_time = ?, status = ?
 	WHERE id = ?
 	`
-	_, err := db.conn.Exec(query,
+	_, err := db.exec(query,
 		file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status, file.ID)
 	if err != nil {
 		return fmt.Errorf("failed to update file: %w", err)
@@ -1638,7 +1598,7 @@ func (db *DB) UpdateReplica(replica *model.Replica) error {
 		mod_time = ?, status = ?, fragmented = ?, owner = ?
 	WHERE id = ?
 	`
-	_, err := db.conn.Exec(query,
+	_, err := db.exec(query,
 		replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner, replica.ID)
@@ -1651,7 +1611,7 @@ func (db *DB) UpdateReplica(replica *model.Replica) error {
 // UpdateFileStatus updates the status of a file
 func (db *DB) UpdateFileStatus(id string, status string) error {
 	query := "UPDATE files SET status = ? WHERE id = ?"
-	_, err := db.conn.Exec(query, status, id)
+	_, err := db.exec(query, status, id)
 	if err != nil {
 		return fmt.Errorf("failed to update file status: %w", err)
 	}
@@ -1661,7 +1621,7 @@ func (db *DB) UpdateFileStatus(id string, status string) error {
 // UpdateFileModTime updates the modification time of a file
 func (db *DB) UpdateFileModTime(id string, modTime time.Time) error {
 	query := "UPDATE files SET mod_time = ? WHERE id = ?"
-	_, err := db.conn.Exec(query, modTime.Unix(), id)
+	_, err := db.exec(query, modTime.Unix(), id)
 	if err != nil {
 		return fmt.Errorf("failed to update file mod time: %w", err)
 	}
@@ -1671,7 +1631,7 @@ func (db *DB) UpdateFileModTime(id string, modTime time.Time) error {
 // UpdateReplicaFileID updates the file_id of a replica
 func (db *DB) UpdateReplicaFileID(replicaID int64, fileID string) error {
 	query := "UPDATE replicas SET file_id = ? WHERE id = ?"
-	_, err := db.conn.Exec(query, fileID, replicaID)
+	_, err := db.exec(query, fileID, replicaID)
 	if err != nil {
 		return fmt.Errorf("failed to update replica file ID: %w", err)
 	}
@@ -1685,7 +1645,7 @@ func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
 	FROM replicas
 	WHERE file_id IS NULL
 	`
-	rows, err := db.conn.Query(query)
+	rows, err := db.query(query)
 	if err != nil {
 		return nil, err
 	}
@@ -1731,7 +1691,7 @@ func (db *DB) LinkOrphanedReplicas() error {
 	WHERE (replicas.file_id IS NULL OR replicas.file_id = '')
 	AND replicas.calculated_id = fm.calculated_id
 	`
-	_, err := db.conn.Exec(query)
+	_, err := db.exec(query)
 	if err != nil {
 		return fmt.Errorf("failed to link orphaned replicas: %w", err)
 	}
@@ -1746,7 +1706,7 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 	FROM replicas
 	WHERE file_id IS NULL OR file_id = ''
 	`
-	rows, err := db.conn.Query(query)
+	rows, err := db.query(query)
 	if err != nil {
 		return err
 	}
@@ -1783,50 +1743,46 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 		orphanGroups[o.CalculatedID] = append(orphanGroups[o.CalculatedID], o)
 	}
 
-	tx, err := db.conn.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-
-	insertFileStmt, err := tx.Prepare(`
-		INSERT OR IGNORE INTO files (id, path, name, size, calculated_id, mod_time, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return err
-	}
-	defer insertFileStmt.Close()
-
-	updateReplicaStmt, err := tx.Prepare(`
-		UPDATE replicas SET file_id = ? WHERE id = ?
-	`)
-	if err != nil {
-		return err
-	}
-	defer updateReplicaStmt.Close()
-
-	for _, group := range orphanGroups {
-		// Use the first orphan's metadata for the new logical file
-		first := group[0]
-		newFileID := uuid.New().String()
-
-		// Insert File
-		_, err := insertFileStmt.Exec(newFileID, first.Path, first.Name, first.Size, first.CalculatedID, first.ModTime, first.Status)
+	return db.WithTx(func(tx *sql.Tx) error {
+		insertFileStmt, err := tx.Prepare(`
+			INSERT OR IGNORE INTO files (id, path, name, size, calculated_id, mod_time, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+		`)
 		if err != nil {
-			return fmt.Errorf("failed to promote replica group %s: %w", first.CalculatedID, err)
+			return err
 		}
+		defer insertFileStmt.Close()
 
-		// Update all replicas in the group
-		for _, o := range group {
-			_, err = updateReplicaStmt.Exec(newFileID, o.ReplicaID)
+		updateReplicaStmt, err := tx.Prepare(`
+			UPDATE replicas SET file_id = ? WHERE id = ?
+		`)
+		if err != nil {
+			return err
+		}
+		defer updateReplicaStmt.Close()
+
+		for _, group := range orphanGroups {
+			// Use the first orphan's metadata for the new logical file
+			first := group[0]
+			newFileID := uuid.New().String()
+
+			// Insert File
+			_, err := insertFileStmt.Exec(newFileID, first.Path, first.Name, first.Size, first.CalculatedID, first.ModTime, first.Status)
 			if err != nil {
-				return fmt.Errorf("failed to update replica %d: %w", o.ReplicaID, err)
+				return fmt.Errorf("failed to promote replica group %s: %w", first.CalculatedID, err)
+			}
+
+			// Update all replicas in the group
+			for _, o := range group {
+				_, err = updateReplicaStmt.Exec(newFileID, o.ReplicaID)
+				if err != nil {
+					return fmt.Errorf("failed to update replica %d: %w", o.ReplicaID, err)
+				}
 			}
 		}
-	}
 
-	return tx.Commit()
+		return nil
+	})
 }
 
 // UpdateLogicalFilesFromReplicas updates file metadata from the latest active replica
@@ -1871,7 +1827,7 @@ func (db *DB) UpdateLogicalFilesFromReplicas() error {
 		files.path IS NOT rr.path
 	)
 	`
-	_, err := db.conn.Exec(query)
+	_, err := db.exec(query)
 	if err != nil {
 		return fmt.Errorf("failed to update logical files from replicas: %w", err)
 	}
@@ -1885,7 +1841,7 @@ func (db *DB) MarkDeletedReplicas(startTime time.Time) error {
 	SET status = 'deleted'
 	WHERE last_seen_at < ? AND status != 'deleted'
 	`
-	_, err := db.conn.Exec(query, startTime.Unix())
+	_, err := db.exec(query, startTime.Unix())
 	if err != nil {
 		return fmt.Errorf("failed to mark deleted replicas: %w", err)
 	}
@@ -1903,7 +1859,7 @@ func (db *DB) GetProviderUsage(provider model.Provider) (int64, error) {
 	AND (owner = '' OR owner IS NULL OR LOWER(owner) = LOWER(account_id))
 	`
 	var size int64
-	err := db.conn.QueryRow(query, provider).Scan(&size)
+	err := db.queryRow(query, provider).Scan(&size)
 	if err != nil {
 		return 0, err
 	}
@@ -1913,7 +1869,7 @@ func (db *DB) GetProviderUsage(provider model.Provider) (int64, error) {
 // CreateSyncRun inserts a new sync run and returns its ID
 func (db *DB) CreateSyncRun(safeMode bool) (int64, error) {
 	query := `INSERT INTO sync_runs (started_at, safe_mode) VALUES (?, ?)`
-	res, err := db.conn.Exec(query, time.Now().Unix(), safeMode)
+	res, err := db.exec(query, time.Now().Unix(), safeMode)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create sync run: %w", err)
 	}
@@ -1923,7 +1879,7 @@ func (db *DB) CreateSyncRun(safeMode bool) (int64, error) {
 // GetIncompleteSyncRun returns the most recent sync run that has not completed, or nil
 func (db *DB) GetIncompleteSyncRun() (*model.SyncRun, error) {
 	query := `SELECT id, started_at, last_completed_step, safe_mode FROM sync_runs WHERE completed_at IS NULL ORDER BY id DESC LIMIT 1`
-	row := db.conn.QueryRow(query)
+	row := db.queryRow(query)
 
 	var run model.SyncRun
 	var startedAt int64
@@ -1941,7 +1897,7 @@ func (db *DB) GetIncompleteSyncRun() (*model.SyncRun, error) {
 // MarkStepCompleted updates the last completed step for a sync run
 func (db *DB) MarkStepCompleted(runID int64, step int) error {
 	query := `UPDATE sync_runs SET last_completed_step = ? WHERE id = ?`
-	_, err := db.conn.Exec(query, step, runID)
+	_, err := db.exec(query, step, runID)
 	if err != nil {
 		return fmt.Errorf("failed to mark step completed: %w", err)
 	}
@@ -1951,7 +1907,7 @@ func (db *DB) MarkStepCompleted(runID int64, step int) error {
 // CompleteSyncRun marks a sync run as fully completed
 func (db *DB) CompleteSyncRun(runID int64) error {
 	query := `UPDATE sync_runs SET completed_at = ?, last_completed_step = 5 WHERE id = ?`
-	_, err := db.conn.Exec(query, time.Now().Unix(), runID)
+	_, err := db.exec(query, time.Now().Unix(), runID)
 	if err != nil {
 		return fmt.Errorf("failed to complete sync run: %w", err)
 	}
@@ -1961,7 +1917,7 @@ func (db *DB) CompleteSyncRun(runID int64) error {
 // LogSyncCopy records a successful file copy within a sync run
 func (db *DB) LogSyncCopy(runID int64, fileID string, targetProvider string) error {
 	query := `INSERT OR IGNORE INTO sync_copy_log (sync_run_id, file_id, target_provider, created_at) VALUES (?, ?, ?, ?)`
-	_, err := db.conn.Exec(query, runID, fileID, targetProvider, time.Now().Unix())
+	_, err := db.exec(query, runID, fileID, targetProvider, time.Now().Unix())
 	if err != nil {
 		return fmt.Errorf("failed to log sync copy: %w", err)
 	}
@@ -1972,7 +1928,7 @@ func (db *DB) LogSyncCopy(runID int64, fileID string, targetProvider string) err
 func (db *DB) IsSyncCopyDone(runID int64, fileID string, targetProvider string) (bool, error) {
 	query := `SELECT 1 FROM sync_copy_log WHERE sync_run_id = ? AND file_id = ? AND target_provider = ? LIMIT 1`
 	var exists int
-	err := db.conn.QueryRow(query, runID, fileID, targetProvider).Scan(&exists)
+	err := db.queryRow(query, runID, fileID, targetProvider).Scan(&exists)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return false, nil
@@ -1986,7 +1942,7 @@ func (db *DB) IsSyncCopyDone(runID int64, fileID string, targetProvider string) 
 // Returns a set of "fileID\x00provider" keys for O(1) lookup.
 func (db *DB) BatchCheckSyncCopyDone(runID int64) (map[string]bool, error) {
 	query := `SELECT file_id, target_provider FROM sync_copy_log WHERE sync_run_id = ?`
-	rows, err := db.conn.Query(query, runID)
+	rows, err := db.query(query, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -2005,33 +1961,26 @@ func (db *DB) BatchCheckSyncCopyDone(runID int64) (map[string]bool, error) {
 
 // CleanupOldSyncRuns deletes completed sync runs beyond the most recent keepLast
 func (db *DB) CleanupOldSyncRuns(keepLast int) error {
-	tx, err := db.conn.Begin()
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
-	delCopyLog := `
-	DELETE FROM sync_copy_log WHERE sync_run_id IN (
-		SELECT id FROM sync_runs WHERE completed_at IS NOT NULL
-		ORDER BY id DESC LIMIT -1 OFFSET ?
-	)`
-	if _, err := tx.Exec(delCopyLog, keepLast); err != nil {
-		return fmt.Errorf("failed to delete old sync copy logs: %w", err)
-	}
-
-	delRuns := `
-	DELETE FROM sync_runs WHERE completed_at IS NOT NULL
-		AND id NOT IN (
+	return db.WithTx(func(tx *sql.Tx) error {
+		delCopyLog := `
+		DELETE FROM sync_copy_log WHERE sync_run_id IN (
 			SELECT id FROM sync_runs WHERE completed_at IS NOT NULL
-			ORDER BY id DESC LIMIT ?
+			ORDER BY id DESC LIMIT -1 OFFSET ?
 		)`
-	if _, err := tx.Exec(delRuns, keepLast); err != nil {
-		return fmt.Errorf("failed to delete old sync runs: %w", err)
-	}
+		if _, err := tx.Exec(delCopyLog, keepLast); err != nil {
+			return fmt.Errorf("failed to delete old sync copy logs: %w", err)
+		}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
-	return nil
+		delRuns := `
+		DELETE FROM sync_runs WHERE completed_at IS NOT NULL
+			AND id NOT IN (
+				SELECT id FROM sync_runs WHERE completed_at IS NOT NULL
+				ORDER BY id DESC LIMIT ?
+			)`
+		if _, err := tx.Exec(delRuns, keepLast); err != nil {
+			return fmt.Errorf("failed to delete old sync runs: %w", err)
+		}
+
+		return nil
+	})
 }

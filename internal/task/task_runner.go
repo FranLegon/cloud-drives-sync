@@ -481,7 +481,7 @@ func (r *Runner) ShareWithMain() error {
 }
 
 // BalanceStorage checks quotas and moves files to balance storage
-func (r *Runner) BalanceStorage() error {
+func (r *Runner) BalanceStorage(syncRunID int64) error {
 	logger.Info("Balancing storage across accounts...")
 
 	// Group users by provider
@@ -578,6 +578,14 @@ func (r *Runner) BalanceStorage() error {
 			sortFilesBySizeDesc(candidates)
 
 			for _, file := range candidates {
+				// Skip if already processed in this sync run
+				if syncRunID > 0 {
+					if done, _ := r.db.IsSyncCopyDone(syncRunID, file.ID, "balance"); done {
+						logger.Info("Skipping already-balanced file %s (crash recovery)", file.Name)
+						continue
+					}
+				}
+
 				// Stop if source is safe
 				if source.UsagePct < 90.0 {
 					logger.InfoTagged([]string{string(provider), source.User.Email}, "Account is now under safe threshold")
@@ -651,6 +659,10 @@ func (r *Runner) BalanceStorage() error {
 
 				target.Quota.Used += file.Size
 				target.UsagePct = float64(target.Quota.Used) / float64(target.Quota.Total) * 100
+
+				if syncRunID > 0 {
+					r.db.LogSyncCopy(syncRunID, file.ID, "balance")
+				}
 			}
 		}
 	}
@@ -658,7 +670,7 @@ func (r *Runner) BalanceStorage() error {
 }
 
 // FreeMain transfers all files from main account to backup accounts
-func (r *Runner) FreeMain() (bool, error) {
+func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 	logger.Info("Freeing up main account storage...")
 
 	filesMoved := false
@@ -748,6 +760,14 @@ func (r *Runner) FreeMain() (bool, error) {
 
 	// Move files
 	for _, file := range candidates {
+		// Skip if already processed in this sync run
+		if syncRunID > 0 {
+			if done, _ := r.db.IsSyncCopyDone(syncRunID, file.ID, "freemain"); done {
+				logger.Info("Skipping already-transferred file %s (crash recovery)", file.Name)
+				continue
+			}
+		}
+
 		// Sort targets by free space (descending) - re-sort each time as space changes
 		sort.Slice(targets, func(i, j int) bool {
 			return targets[i].Free > targets[j].Free
@@ -848,6 +868,10 @@ func (r *Runner) FreeMain() (bool, error) {
 		if filesMoved {
 			target.Free -= file.Size
 			target.Quota.Used += file.Size
+
+			if syncRunID > 0 {
+				r.db.LogSyncCopy(syncRunID, file.ID, "freemain")
+			}
 		}
 	}
 
@@ -1311,13 +1335,13 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 		}
 
 		for _, provider := range providers {
-			if _, exists := fileMap[provider]; !exists {
-				// Skip if already copied in a previous attempt of this sync run
-				if doneCopies != nil && doneCopies[masterFile.ID+"\x00"+string(provider)] {
-					logger.Info("Skipping already-synced file %s to %s", path, provider)
-					continue
-				}
+			// Skip if already processed in a previous attempt of this sync run
+			if doneCopies != nil && doneCopies[masterFile.ID+"\x00"+string(provider)] {
+				logger.Info("Skipping already-synced file %s to %s", path, provider)
+				continue
+			}
 
+			if _, exists := fileMap[provider]; !exists {
 				logger.Info("File %s missing in %s", path, provider)
 
 				if r.safeMode {
