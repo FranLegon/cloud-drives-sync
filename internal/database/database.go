@@ -92,7 +92,9 @@ func (db *DB) WithTx(fn func(*sql.Tx) error) (err error) {
 			_ = tx.Rollback()
 			panic(p)
 		} else if err != nil {
-			_ = tx.Rollback()
+			if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+				err = fmt.Errorf("transaction failed: %w (rollback error: %v)", err, rbErr)
+			}
 		} else {
 			if commitErr := tx.Commit(); commitErr != nil {
 				err = fmt.Errorf("failed to commit transaction: %w", commitErr)
@@ -129,22 +131,6 @@ func (db *DB) getStmt(query string) (*sql.Stmt, error) {
 
 	db.stmtCache[query] = stmt
 	return stmt, nil
-}
-
-func (db *DB) execTx(tx *sql.Tx, query string, args ...interface{}) (sql.Result, error) {
-	stmt, err := db.getStmt(query)
-	if err != nil {
-		return nil, err
-	}
-	return tx.Stmt(stmt).Exec(args...)
-}
-
-func (db *DB) exec(query string, args ...interface{}) (sql.Result, error) {
-	stmt, err := db.getStmt(query)
-	if err != nil {
-		return nil, err
-	}
-	return stmt.Exec(args...)
 }
 
 func (db *DB) query(query string, args ...interface{}) (*sql.Rows, error) {
@@ -325,7 +311,7 @@ func (db *DB) InsertFile(file *model.File) error {
 			id, path, name, size, calculated_id, mod_time, status
 		) VALUES (?, ?, ?, ?, ?, ?, ?)
 		`
-		if _, err := db.execTx(tx, fileQuery,
+		if _, err := tx.Exec(fileQuery,
 			file.ID, file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status); err != nil {
 			return fmt.Errorf("failed to insert file: %w", err)
 		}
@@ -336,8 +322,14 @@ func (db *DB) InsertFile(file *model.File) error {
 				file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`
+			replicaStmt, err := tx.Prepare(replicaQuery)
+			if err != nil {
+				return fmt.Errorf("failed to prepare replica statement: %w", err)
+			}
+			defer replicaStmt.Close()
+
 			for _, replica := range file.Replicas {
-				if _, err := db.execTx(tx, replicaQuery,
+				if _, err := replicaStmt.Exec(
 					file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 					string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 					replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner); err != nil {
@@ -465,7 +457,7 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 			// Target already exists, so we just remove the old one to reflect the move/change
 			// (The new owner is already tracked, so we don't need to update the old record to it)
 			delQuery := `DELETE FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`
-			if _, err := db.execTx(tx, delQuery, provider, oldAccountID, nativeID); err != nil {
+			if _, err := tx.Exec(delQuery, provider, oldAccountID, nativeID); err != nil {
 				return fmt.Errorf("failed to delete old replica: %w", err)
 			}
 			return nil
@@ -476,7 +468,7 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 			SET account_id = ?
 			WHERE provider = ? AND account_id = ? AND native_id = ?
 		`
-		res, err := db.execTx(tx, query, newAccountID, provider, oldAccountID, nativeID)
+		res, err := tx.Exec(query, newAccountID, provider, oldAccountID, nativeID)
 		if err != nil {
 			return fmt.Errorf("failed to update replica owner: %w", err)
 		}
@@ -500,7 +492,7 @@ func (db *DB) InsertReplica(replica *model.Replica) error {
 			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
-		res, err := db.execTx(tx, query,
+		res, err := tx.Exec(query,
 			replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
@@ -520,8 +512,14 @@ func (db *DB) InsertReplica(replica *model.Replica) error {
 				replica_id, fragment_number, fragments_total, size, native_fragment_id
 			) VALUES (?, ?, ?, ?, ?)
 			`
+			fragStmt, err := tx.Prepare(fragQuery)
+			if err != nil {
+				return fmt.Errorf("failed to prepare fragment statement: %w", err)
+			}
+			defer fragStmt.Close()
+
 			for _, frag := range replica.Fragments {
-				resFrag, err := db.execTx(tx, fragQuery,
+				resFrag, err := fragStmt.Exec(
 					replica.ID, frag.FragmentNumber, frag.FragmentsTotal, frag.Size, frag.NativeFragmentID)
 				if err != nil {
 					return fmt.Errorf("failed to insert fragment: %w", err)
@@ -539,73 +537,79 @@ func (db *DB) InsertReplica(replica *model.Replica) error {
 
 // UpsertReplica inserts or updates a replica record
 func (db *DB) UpsertReplica(replica *model.Replica) error {
-	query := `
-	INSERT OR REPLACE INTO replicas (
-		id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
-	_, err := db.exec(query,
-		replica.ID, replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
-		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
-	if err != nil {
-		return fmt.Errorf("failed to upsert replica: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `
+		INSERT OR REPLACE INTO replicas (
+			id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`
+		_, err := tx.Exec(query,
+			replica.ID, replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
+		if err != nil {
+			return fmt.Errorf("failed to upsert replica: %w", err)
+		}
+		return nil
+	})
 }
 
 // InsertReplicaFragment inserts a fragment record into the database
 func (db *DB) InsertReplicaFragment(fragment *model.ReplicaFragment) error {
-	query := `
-	INSERT INTO replica_fragments (
-		replica_id, fragment_number, fragments_total, size, native_fragment_id
-	) VALUES (?, ?, ?, ?, ?)
-	`
-	res, err := db.exec(query,
-		fragment.ReplicaID, fragment.FragmentNumber, fragment.FragmentsTotal, fragment.Size, fragment.NativeFragmentID)
-	if err != nil {
-		return fmt.Errorf("failed to insert fragment: %w", err)
-	}
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `
+		INSERT INTO replica_fragments (
+			replica_id, fragment_number, fragments_total, size, native_fragment_id
+		) VALUES (?, ?, ?, ?, ?)
+		`
+		res, err := tx.Exec(query,
+			fragment.ReplicaID, fragment.FragmentNumber, fragment.FragmentsTotal, fragment.Size, fragment.NativeFragmentID)
+		if err != nil {
+			return fmt.Errorf("failed to insert fragment: %w", err)
+		}
 
-	id, err := res.LastInsertId()
-	if err != nil {
-		return fmt.Errorf("failed to get fragment ID: %w", err)
-	}
-	fragment.ID = id
-	return nil
+		id, err := res.LastInsertId()
+		if err != nil {
+			return fmt.Errorf("failed to get fragment ID: %w", err)
+		}
+		fragment.ID = id
+		return nil
+	})
 }
 
 // InsertFolder inserts a folder record into the database
 func (db *DB) InsertFolder(folder *model.Folder) error {
-	query := `
-	INSERT INTO folders (
-		id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(id) DO UPDATE SET
-		name=excluded.name,
-		path=excluded.path,
-		provider=excluded.provider,
-		user_email=excluded.user_email,
-		user_phone=excluded.user_phone,
-		parent_folder_id=excluded.parent_folder_id,
-		owner_email=excluded.owner_email
-	WHERE folders.name != excluded.name
-	   OR folders.path != excluded.path
-	   OR folders.provider != excluded.provider
-	   OR COALESCE(folders.user_email, '') != COALESCE(excluded.user_email, '')
-	   OR COALESCE(folders.user_phone, '') != COALESCE(excluded.user_phone, '')
-	   OR COALESCE(folders.parent_folder_id, '') != COALESCE(excluded.parent_folder_id, '')
-	   OR COALESCE(folders.owner_email, '') != COALESCE(excluded.owner_email, '')
-	`
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `
+		INSERT INTO folders (
+			id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name,
+			path=excluded.path,
+			provider=excluded.provider,
+			user_email=excluded.user_email,
+			user_phone=excluded.user_phone,
+			parent_folder_id=excluded.parent_folder_id,
+			owner_email=excluded.owner_email
+		WHERE folders.name != excluded.name
+		   OR folders.path != excluded.path
+		   OR folders.provider != excluded.provider
+		   OR COALESCE(folders.user_email, '') != COALESCE(excluded.user_email, '')
+		   OR COALESCE(folders.user_phone, '') != COALESCE(excluded.user_phone, '')
+		   OR COALESCE(folders.parent_folder_id, '') != COALESCE(excluded.parent_folder_id, '')
+		   OR COALESCE(folders.owner_email, '') != COALESCE(excluded.owner_email, '')
+		`
 
-	_, err := db.exec(query,
-		folder.ID, folder.Name, folder.Path, string(folder.Provider),
-		folder.UserEmail, folder.UserPhone, folder.ParentFolderID, folder.OwnerEmail,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to insert folder: %w", err)
-	}
-	return nil
+		_, err := tx.Exec(query,
+			folder.ID, folder.Name, folder.Path, string(folder.Provider),
+			folder.UserEmail, folder.UserPhone, folder.ParentFolderID, folder.OwnerEmail,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to insert folder: %w", err)
+		}
+		return nil
+	})
 }
 
 // BatchInsertFolders inserts multiple folders in a single transaction
@@ -1258,22 +1262,26 @@ func (db *DB) GetReplicaByNativeFragmentID(nativeFragmentID string) (*model.Repl
 
 // DeleteFile deletes a file from the database
 func (db *DB) DeleteFile(id string) error {
-	query := "DELETE FROM files WHERE id = ?"
-	_, err := db.exec(query, id)
-	if err != nil {
-		return fmt.Errorf("failed to delete file: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := "DELETE FROM files WHERE id = ?"
+		_, err := tx.Exec(query, id)
+		if err != nil {
+			return fmt.Errorf("failed to delete file: %w", err)
+		}
+		return nil
+	})
 }
 
 // DeleteFolder deletes a folder from the database
 func (db *DB) DeleteFolder(id string) error {
-	query := "DELETE FROM folders WHERE id = ?"
-	_, err := db.exec(query, id)
-	if err != nil {
-		return fmt.Errorf("failed to delete folder: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := "DELETE FROM folders WHERE id = ?"
+		_, err := tx.Exec(query, id)
+		if err != nil {
+			return fmt.Errorf("failed to delete folder: %w", err)
+		}
+		return nil
+	})
 }
 
 // GetDuplicateCalculatedIDs returns calculated_ids that appear more than once
@@ -1310,36 +1318,42 @@ func (db *DB) GetDuplicateCalculatedIDs() ([]string, error) {
 
 // DeleteReplicasForProvider removes all replicas for a specific provider
 func (db *DB) DeleteReplicasForProvider(provider model.Provider) error {
-	_, err := db.exec("DELETE FROM replicas WHERE provider = ?", string(provider))
-	if err != nil {
-		return fmt.Errorf("failed to delete replicas for provider: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec("DELETE FROM replicas WHERE provider = ?", string(provider))
+		if err != nil {
+			return fmt.Errorf("failed to delete replicas for provider: %w", err)
+		}
+		return nil
+	})
 }
 
 // DeleteReplica removes a specific replica by ID
 func (db *DB) DeleteReplica(id int64) error {
-	_, err := db.exec("DELETE FROM replicas WHERE id = ?", id)
-	if err != nil {
-		return fmt.Errorf("failed to delete replica: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec("DELETE FROM replicas WHERE id = ?", id)
+		if err != nil {
+			return fmt.Errorf("failed to delete replica: %w", err)
+		}
+		return nil
+	})
 }
 
 // DeleteStaleReplicasByNativeID marks as deleted all replicas pointing to a stale native_id
 // after a file has been transferred/moved. This prevents 404 errors when trying to download
 // from replicas that reference a file that no longer exists.
 func (db *DB) DeleteStaleReplicasByNativeID(provider model.Provider, oldNativeID string, excludeReplicaID int64) error {
-	query := `
-	UPDATE replicas
-	SET status = 'deleted'
-	WHERE provider = ? AND native_id = ? AND id != ? AND status = 'active'
-	`
-	_, err := db.exec(query, string(provider), oldNativeID, excludeReplicaID)
-	if err != nil {
-		return fmt.Errorf("failed to delete stale replicas: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `
+		UPDATE replicas
+		SET status = 'deleted'
+		WHERE provider = ? AND native_id = ? AND id != ? AND status = 'active'
+		`
+		_, err := tx.Exec(query, string(provider), oldNativeID, excludeReplicaID)
+		if err != nil {
+			return fmt.Errorf("failed to delete stale replicas: %w", err)
+		}
+		return nil
+	})
 }
 
 // HasActiveGoogleReplicaOutsideSoftDeleted checks if there's any active Google replica
@@ -1455,7 +1469,7 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 		END
 		`, softDeletedPattern, softDeletedPatternWin, softDeletedPattern, softDeletedPatternWin)
 
-		if _, err := db.execTx(tx, updateQuery, minTimestamp); err != nil {
+		if _, err := tx.Exec(updateQuery, minTimestamp); err != nil {
 			return fmt.Errorf("failed to update soft-deleted status: %w", err)
 		}
 
@@ -1587,66 +1601,76 @@ func (db *DB) GetFileByID(id string) (*model.File, error) {
 
 // UpdateFile updates a file record in the database
 func (db *DB) UpdateFile(file *model.File) error {
-	query := `
-	UPDATE files 
-	SET path = ?, name = ?, size = ?, calculated_id = ?, mod_time = ?, status = ?
-	WHERE id = ?
-	`
-	_, err := db.exec(query,
-		file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status, file.ID)
-	if err != nil {
-		return fmt.Errorf("failed to update file: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `
+		UPDATE files 
+		SET path = ?, name = ?, size = ?, calculated_id = ?, mod_time = ?, status = ?
+		WHERE id = ?
+		`
+		_, err := tx.Exec(query,
+			file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status, file.ID)
+		if err != nil {
+			return fmt.Errorf("failed to update file: %w", err)
+		}
+		return nil
+	})
 }
 
 // UpdateReplica updates a replica record
 func (db *DB) UpdateReplica(replica *model.Replica) error {
-	query := `
-	UPDATE replicas SET
-		file_id = ?, calculated_id = ?, path = ?, name = ?, size = ?,
-		provider = ?, account_id = ?, native_id = ?, native_hash = ?,
-		mod_time = ?, status = ?, fragmented = ?, owner = ?
-	WHERE id = ?
-	`
-	_, err := db.exec(query,
-		replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
-		string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
-		replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner, replica.ID)
-	if err != nil {
-		return fmt.Errorf("failed to update replica: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `
+		UPDATE replicas SET
+			file_id = ?, calculated_id = ?, path = ?, name = ?, size = ?,
+			provider = ?, account_id = ?, native_id = ?, native_hash = ?,
+			mod_time = ?, status = ?, fragmented = ?, owner = ?
+		WHERE id = ?
+		`
+		_, err := tx.Exec(query,
+			replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner, replica.ID)
+		if err != nil {
+			return fmt.Errorf("failed to update replica: %w", err)
+		}
+		return nil
+	})
 }
 
 // UpdateFileStatus updates the status of a file
 func (db *DB) UpdateFileStatus(id string, status string) error {
-	query := "UPDATE files SET status = ? WHERE id = ?"
-	_, err := db.exec(query, status, id)
-	if err != nil {
-		return fmt.Errorf("failed to update file status: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := "UPDATE files SET status = ? WHERE id = ?"
+		_, err := tx.Exec(query, status, id)
+		if err != nil {
+			return fmt.Errorf("failed to update file status: %w", err)
+		}
+		return nil
+	})
 }
 
 // UpdateFileModTime updates the modification time of a file
 func (db *DB) UpdateFileModTime(id string, modTime time.Time) error {
-	query := "UPDATE files SET mod_time = ? WHERE id = ?"
-	_, err := db.exec(query, modTime.Unix(), id)
-	if err != nil {
-		return fmt.Errorf("failed to update file mod time: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := "UPDATE files SET mod_time = ? WHERE id = ?"
+		_, err := tx.Exec(query, modTime.Unix(), id)
+		if err != nil {
+			return fmt.Errorf("failed to update file mod time: %w", err)
+		}
+		return nil
+	})
 }
 
 // UpdateReplicaFileID updates the file_id of a replica
 func (db *DB) UpdateReplicaFileID(replicaID int64, fileID string) error {
-	query := "UPDATE replicas SET file_id = ? WHERE id = ?"
-	_, err := db.exec(query, fileID, replicaID)
-	if err != nil {
-		return fmt.Errorf("failed to update replica file ID: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := "UPDATE replicas SET file_id = ? WHERE id = ?"
+		_, err := tx.Exec(query, fileID, replicaID)
+		if err != nil {
+			return fmt.Errorf("failed to update replica file ID: %w", err)
+		}
+		return nil
+	})
 }
 
 // GetReplicasWithNullFileID returns all replicas without a file_id
@@ -1689,24 +1713,26 @@ func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
 
 // LinkOrphanedReplicas links orphaned replicas to existing files based on calculated_id
 func (db *DB) LinkOrphanedReplicas() error {
-	// Update replicas that match an existing file by calculated_id using a single join (CTE)
-	query := `
-	WITH FileMap AS (
-		SELECT calculated_id, MIN(id) as id
-		FROM files
-		GROUP BY calculated_id
-	)
-	UPDATE replicas
-	SET file_id = fm.id
-	FROM FileMap fm
-	WHERE (replicas.file_id IS NULL OR replicas.file_id = '')
-	AND replicas.calculated_id = fm.calculated_id
-	`
-	_, err := db.exec(query)
-	if err != nil {
-		return fmt.Errorf("failed to link orphaned replicas: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		// Update replicas that match an existing file by calculated_id using a single join (CTE)
+		query := `
+		WITH FileMap AS (
+			SELECT calculated_id, MIN(id) as id
+			FROM files
+			GROUP BY calculated_id
+		)
+		UPDATE replicas
+		SET file_id = fm.id
+		FROM FileMap fm
+		WHERE (replicas.file_id IS NULL OR replicas.file_id = '')
+		AND replicas.calculated_id = fm.calculated_id
+		`
+		_, err := tx.Exec(query)
+		if err != nil {
+			return fmt.Errorf("failed to link orphaned replicas: %w", err)
+		}
+		return nil
+	})
 }
 
 // PromoteOrphanedReplicasToFiles creates new file records for replicas that don't match any existing file
@@ -1799,64 +1825,68 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 // UpdateLogicalFilesFromReplicas updates file metadata from the latest active replica
 // Improved move detection: prioritize replicas with changed paths and consider calculated_id/hash matching
 func (db *DB) UpdateLogicalFilesFromReplicas() error {
-	// SQLite 3.33+ supported UPDATE FROM.
-	// We want to pick the latest active replica for each file.
-	// We prioritize replicas that indicate a change (path difference) if timestamps are equal.
-	// Enhanced to better detect moves by considering calculated_id and hash matches
-	query := `
-	WITH RankedReplicas AS (
-		SELECT r.file_id, r.size, r.mod_time, r.calculated_id, r.name, r.path,
-			ROW_NUMBER() OVER (
-				PARTITION BY r.file_id 
-				ORDER BY 
-					-- Prioritize replicas where path changed (likely a move)
-					CASE WHEN r.path != f.path THEN 0 ELSE 1 END,
-					-- Then by modification time (most recent first)
-					r.mod_time DESC,
-					-- Then by calculated_id match (same content)
-					CASE WHEN r.calculated_id = f.calculated_id THEN 0 ELSE 1 END
-			) as rn
-		FROM replicas r
-		JOIN files f ON f.id = r.file_id
-		WHERE r.status = 'active'
-	)
-	UPDATE files
-	SET 
-		size = rr.size,
-		mod_time = rr.mod_time,
-		calculated_id = rr.calculated_id,
-		name = rr.name,
-		path = rr.path
-	FROM RankedReplicas rr
-	WHERE files.id = rr.file_id
-	AND rr.rn = 1
-	AND (
-		files.size IS NOT rr.size OR
-		files.mod_time IS NOT rr.mod_time OR
-		files.calculated_id IS NOT rr.calculated_id OR
-		files.name IS NOT rr.name OR
-		files.path IS NOT rr.path
-	)
-	`
-	_, err := db.exec(query)
-	if err != nil {
-		return fmt.Errorf("failed to update logical files from replicas: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		// SQLite 3.33+ supported UPDATE FROM.
+		// We want to pick the latest active replica for each file.
+		// We prioritize replicas that indicate a change (path difference) if timestamps are equal.
+		// Enhanced to better detect moves by considering calculated_id and hash matches
+		query := `
+		WITH RankedReplicas AS (
+			SELECT r.file_id, r.size, r.mod_time, r.calculated_id, r.name, r.path,
+				ROW_NUMBER() OVER (
+					PARTITION BY r.file_id 
+					ORDER BY 
+						-- Prioritize replicas where path changed (likely a move)
+						CASE WHEN r.path != f.path THEN 0 ELSE 1 END,
+						-- Then by modification time (most recent first)
+						r.mod_time DESC,
+						-- Then by calculated_id match (same content)
+						CASE WHEN r.calculated_id = f.calculated_id THEN 0 ELSE 1 END
+				) as rn
+			FROM replicas r
+			JOIN files f ON f.id = r.file_id
+			WHERE r.status = 'active'
+		)
+		UPDATE files
+		SET 
+			size = rr.size,
+			mod_time = rr.mod_time,
+			calculated_id = rr.calculated_id,
+			name = rr.name,
+			path = rr.path
+		FROM RankedReplicas rr
+		WHERE files.id = rr.file_id
+		AND rr.rn = 1
+		AND (
+			files.size IS NOT rr.size OR
+			files.mod_time IS NOT rr.mod_time OR
+			files.calculated_id IS NOT rr.calculated_id OR
+			files.name IS NOT rr.name OR
+			files.path IS NOT rr.path
+		)
+		`
+		_, err := tx.Exec(query)
+		if err != nil {
+			return fmt.Errorf("failed to update logical files from replicas: %w", err)
+		}
+		return nil
+	})
 }
 
 // MarkDeletedReplicas marks replicas as deleted if they weren't seen since the given time
 func (db *DB) MarkDeletedReplicas(startTime time.Time) error {
-	query := `
-	UPDATE replicas
-	SET status = 'deleted'
-	WHERE last_seen_at < ? AND status != 'deleted'
-	`
-	_, err := db.exec(query, startTime.Unix())
-	if err != nil {
-		return fmt.Errorf("failed to mark deleted replicas: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `
+		UPDATE replicas
+		SET status = 'deleted'
+		WHERE last_seen_at < ? AND status != 'deleted'
+		`
+		_, err := tx.Exec(query, startTime.Unix())
+		if err != nil {
+			return fmt.Errorf("failed to mark deleted replicas: %w", err)
+		}
+		return nil
+	})
 }
 
 // GetProviderUsage returns the total size of active files for a provider
@@ -1879,12 +1909,17 @@ func (db *DB) GetProviderUsage(provider model.Provider) (int64, error) {
 
 // CreateSyncRun inserts a new sync run and returns its ID
 func (db *DB) CreateSyncRun(safeMode bool) (int64, error) {
-	query := `INSERT INTO sync_runs (started_at, safe_mode) VALUES (?, ?)`
-	res, err := db.exec(query, time.Now().Unix(), safeMode)
-	if err != nil {
-		return 0, fmt.Errorf("failed to create sync run: %w", err)
-	}
-	return res.LastInsertId()
+	var id int64
+	err := db.WithTx(func(tx *sql.Tx) error {
+		query := `INSERT INTO sync_runs (started_at, safe_mode) VALUES (?, ?)`
+		res, err := tx.Exec(query, time.Now().Unix(), safeMode)
+		if err != nil {
+			return fmt.Errorf("failed to create sync run: %w", err)
+		}
+		id, err = res.LastInsertId()
+		return err
+	})
+	return id, err
 }
 
 // GetIncompleteSyncRun returns the most recent sync run that has not completed, or nil
@@ -1907,32 +1942,38 @@ func (db *DB) GetIncompleteSyncRun() (*model.SyncRun, error) {
 
 // MarkStepCompleted updates the last completed step for a sync run
 func (db *DB) MarkStepCompleted(runID int64, step int) error {
-	query := `UPDATE sync_runs SET last_completed_step = ? WHERE id = ?`
-	_, err := db.exec(query, step, runID)
-	if err != nil {
-		return fmt.Errorf("failed to mark step completed: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `UPDATE sync_runs SET last_completed_step = ? WHERE id = ?`
+		_, err := tx.Exec(query, step, runID)
+		if err != nil {
+			return fmt.Errorf("failed to mark step completed: %w", err)
+		}
+		return nil
+	})
 }
 
 // CompleteSyncRun marks a sync run as fully completed
 func (db *DB) CompleteSyncRun(runID int64) error {
-	query := `UPDATE sync_runs SET completed_at = ?, last_completed_step = 5 WHERE id = ?`
-	_, err := db.exec(query, time.Now().Unix(), runID)
-	if err != nil {
-		return fmt.Errorf("failed to complete sync run: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `UPDATE sync_runs SET completed_at = ?, last_completed_step = 5 WHERE id = ?`
+		_, err := tx.Exec(query, time.Now().Unix(), runID)
+		if err != nil {
+			return fmt.Errorf("failed to complete sync run: %w", err)
+		}
+		return nil
+	})
 }
 
 // LogSyncCopy records a successful file copy within a sync run
 func (db *DB) LogSyncCopy(runID int64, fileID string, targetProvider string) error {
-	query := `INSERT OR IGNORE INTO sync_copy_log (sync_run_id, file_id, target_provider, created_at) VALUES (?, ?, ?, ?)`
-	_, err := db.exec(query, runID, fileID, targetProvider, time.Now().Unix())
-	if err != nil {
-		return fmt.Errorf("failed to log sync copy: %w", err)
-	}
-	return nil
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `INSERT OR IGNORE INTO sync_copy_log (sync_run_id, file_id, target_provider, created_at) VALUES (?, ?, ?, ?)`
+		_, err := tx.Exec(query, runID, fileID, targetProvider, time.Now().Unix())
+		if err != nil {
+			return fmt.Errorf("failed to log sync copy: %w", err)
+		}
+		return nil
+	})
 }
 
 // IsSyncCopyDone checks whether a file has already been copied to a provider in this sync run
