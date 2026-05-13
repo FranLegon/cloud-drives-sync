@@ -98,11 +98,20 @@ func (db *DB) WithTx(fn func(*sql.Tx) error) (err error) {
 		} else {
 			if commitErr := tx.Commit(); commitErr != nil {
 				err = fmt.Errorf("failed to commit transaction: %w", commitErr)
+				_ = tx.Rollback()
 			}
 		}
 	}()
 
 	return fn(tx)
+}
+
+func (db *DB) txStmt(tx *sql.Tx, query string) (*sql.Stmt, error) {
+	stmt, err := db.getStmt(query)
+	if err != nil {
+		return nil, err
+	}
+	return tx.Stmt(stmt), nil
 }
 
 func (db *DB) getStmt(query string) (*sql.Stmt, error) {
@@ -154,11 +163,12 @@ func (db *DB) Reset() error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		tables := []string{"replica_fragments", "replicas", "files", "folders"}
 		for _, table := range tables {
-			_, err := tx.Exec(fmt.Sprintf("DELETE FROM %s", table))
+			stmt, err := db.txStmt(tx, fmt.Sprintf("DELETE FROM %s", table))
 			if err != nil {
-				// Ignore if table doesn't exist
 				continue
 			}
+			_, _ = stmt.Exec()
+			stmt.Close()
 		}
 		return nil
 	})
@@ -311,7 +321,13 @@ func (db *DB) InsertFile(file *model.File) error {
 			id, path, name, size, calculated_id, mod_time, status
 		) VALUES (?, ?, ?, ?, ?, ?, ?)
 		`
-		if _, err := tx.Exec(fileQuery,
+		fileStmt, err := db.txStmt(tx, fileQuery)
+		if err != nil {
+			return fmt.Errorf("failed to prepare file statement: %w", err)
+		}
+		defer fileStmt.Close()
+		
+		if _, err := fileStmt.Exec(
 			file.ID, file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status); err != nil {
 			return fmt.Errorf("failed to insert file: %w", err)
 		}
@@ -322,7 +338,7 @@ func (db *DB) InsertFile(file *model.File) error {
 				file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`
-			replicaStmt, err := tx.Prepare(replicaQuery)
+			replicaStmt, err := db.txStmt(tx, replicaQuery)
 			if err != nil {
 				return fmt.Errorf("failed to prepare replica statement: %w", err)
 			}
@@ -372,27 +388,27 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 				last_seen_at=excluded.last_seen_at,
 				owner=excluded.owner
 		`
-		replicaStmt, err := tx.Prepare(replicaQuery)
+		replicaStmt, err := db.txStmt(tx, replicaQuery)
 		if err != nil {
 			return err
 		}
 		defer replicaStmt.Close()
 
 		// Prepare ID lookup statement
-		idStmt, err := tx.Prepare(`SELECT id FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`)
+		idStmt, err := db.txStmt(tx, `SELECT id FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`)
 		if err != nil {
 			return err
 		}
 		defer idStmt.Close()
 
 		// Prepare fragment statements
-		deleteFragmentsStmt, err := tx.Prepare(`DELETE FROM replica_fragments WHERE replica_id = ?`)
+		deleteFragmentsStmt, err := db.txStmt(tx, `DELETE FROM replica_fragments WHERE replica_id = ?`)
 		if err != nil {
 			return err
 		}
 		defer deleteFragmentsStmt.Close()
 
-		fragmentStmt, err := tx.Prepare(`
+		fragmentStmt, err := db.txStmt(tx, `
 			INSERT INTO replica_fragments (
 				replica_id, fragment_number, fragments_total, size, native_fragment_id
 			) VALUES (?, ?, ?, ?, ?)
@@ -448,7 +464,13 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 		// Check if target replica already exists to avoid UNIQUE constraint violation
 		var exists int
 		checkQuery := `SELECT 1 FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`
-		err := tx.QueryRow(checkQuery, provider, newAccountID, nativeID).Scan(&exists)
+		checkStmt, err := db.txStmt(tx, checkQuery)
+		if err != nil {
+			return fmt.Errorf("failed to prepare check statement: %w", err)
+		}
+		defer checkStmt.Close()
+		
+		err = checkStmt.QueryRow(provider, newAccountID, nativeID).Scan(&exists)
 		if err != nil && err != sql.ErrNoRows {
 			return fmt.Errorf("failed to check existing replica: %w", err)
 		}
@@ -457,7 +479,12 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 			// Target already exists, so we just remove the old one to reflect the move/change
 			// (The new owner is already tracked, so we don't need to update the old record to it)
 			delQuery := `DELETE FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`
-			if _, err := tx.Exec(delQuery, provider, oldAccountID, nativeID); err != nil {
+			delStmt, err := db.txStmt(tx, delQuery)
+			if err != nil {
+				return fmt.Errorf("failed to prepare delete statement: %w", err)
+			}
+			defer delStmt.Close()
+			if _, err := delStmt.Exec(provider, oldAccountID, nativeID); err != nil {
 				return fmt.Errorf("failed to delete old replica: %w", err)
 			}
 			return nil
@@ -468,7 +495,13 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 			SET account_id = ?
 			WHERE provider = ? AND account_id = ? AND native_id = ?
 		`
-		res, err := tx.Exec(query, newAccountID, provider, oldAccountID, nativeID)
+		updateStmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare update statement: %w", err)
+		}
+		defer updateStmt.Close()
+		
+		res, err := updateStmt.Exec(newAccountID, provider, oldAccountID, nativeID)
 		if err != nil {
 			return fmt.Errorf("failed to update replica owner: %w", err)
 		}
@@ -492,7 +525,13 @@ func (db *DB) InsertReplica(replica *model.Replica) error {
 			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
-		res, err := tx.Exec(query,
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+		
+		res, err := stmt.Exec(
 			replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
@@ -512,7 +551,7 @@ func (db *DB) InsertReplica(replica *model.Replica) error {
 				replica_id, fragment_number, fragments_total, size, native_fragment_id
 			) VALUES (?, ?, ?, ?, ?)
 			`
-			fragStmt, err := tx.Prepare(fragQuery)
+			fragStmt, err := db.txStmt(tx, fragQuery)
 			if err != nil {
 				return fmt.Errorf("failed to prepare fragment statement: %w", err)
 			}
@@ -543,7 +582,13 @@ func (db *DB) UpsertReplica(replica *model.Replica) error {
 			id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
-		_, err := tx.Exec(query,
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare upsert replica statement: %w", err)
+		}
+		defer stmt.Close()
+		
+		_, err = stmt.Exec(
 			replica.ID, replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
@@ -562,7 +607,13 @@ func (db *DB) InsertReplicaFragment(fragment *model.ReplicaFragment) error {
 			replica_id, fragment_number, fragments_total, size, native_fragment_id
 		) VALUES (?, ?, ?, ?, ?)
 		`
-		res, err := tx.Exec(query,
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare fragment statement: %w", err)
+		}
+		defer stmt.Close()
+		
+		res, err := stmt.Exec(
 			fragment.ReplicaID, fragment.FragmentNumber, fragment.FragmentsTotal, fragment.Size, fragment.NativeFragmentID)
 		if err != nil {
 			return fmt.Errorf("failed to insert fragment: %w", err)
@@ -601,7 +652,13 @@ func (db *DB) InsertFolder(folder *model.Folder) error {
 		   OR COALESCE(folders.owner_email, '') != COALESCE(excluded.owner_email, '')
 		`
 
-		_, err := tx.Exec(query,
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare folder statement: %w", err)
+		}
+		defer stmt.Close()
+
+		_, err = stmt.Exec(
 			folder.ID, folder.Name, folder.Path, string(folder.Provider),
 			folder.UserEmail, folder.UserPhone, folder.ParentFolderID, folder.OwnerEmail,
 		)
@@ -615,7 +672,7 @@ func (db *DB) InsertFolder(folder *model.Folder) error {
 // BatchInsertFolders inserts multiple folders in a single transaction
 func (db *DB) BatchInsertFolders(folders []*model.Folder) error {
 	return db.WithTx(func(tx *sql.Tx) error {
-		stmt, err := tx.Prepare(`
+		stmt, err := db.txStmt(tx, `
 		INSERT INTO folders (
 			id, name, path, provider, user_email, user_phone, parent_folder_id, owner_email
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1264,7 +1321,12 @@ func (db *DB) GetReplicaByNativeFragmentID(nativeFragmentID string) (*model.Repl
 func (db *DB) DeleteFile(id string) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := "DELETE FROM files WHERE id = ?"
-		_, err := tx.Exec(query, id)
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare delete statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(id)
 		if err != nil {
 			return fmt.Errorf("failed to delete file: %w", err)
 		}
@@ -1276,7 +1338,12 @@ func (db *DB) DeleteFile(id string) error {
 func (db *DB) DeleteFolder(id string) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := "DELETE FROM folders WHERE id = ?"
-		_, err := tx.Exec(query, id)
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare delete statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(id)
 		if err != nil {
 			return fmt.Errorf("failed to delete folder: %w", err)
 		}
@@ -1319,7 +1386,12 @@ func (db *DB) GetDuplicateCalculatedIDs() ([]string, error) {
 // DeleteReplicasForProvider removes all replicas for a specific provider
 func (db *DB) DeleteReplicasForProvider(provider model.Provider) error {
 	return db.WithTx(func(tx *sql.Tx) error {
-		_, err := tx.Exec("DELETE FROM replicas WHERE provider = ?", string(provider))
+		stmt, err := db.txStmt(tx, "DELETE FROM replicas WHERE provider = ?")
+		if err != nil {
+			return fmt.Errorf("failed to prepare delete statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(string(provider))
 		if err != nil {
 			return fmt.Errorf("failed to delete replicas for provider: %w", err)
 		}
@@ -1330,7 +1402,12 @@ func (db *DB) DeleteReplicasForProvider(provider model.Provider) error {
 // DeleteReplica removes a specific replica by ID
 func (db *DB) DeleteReplica(id int64) error {
 	return db.WithTx(func(tx *sql.Tx) error {
-		_, err := tx.Exec("DELETE FROM replicas WHERE id = ?", id)
+		stmt, err := db.txStmt(tx, "DELETE FROM replicas WHERE id = ?")
+		if err != nil {
+			return fmt.Errorf("failed to prepare delete statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(id)
 		if err != nil {
 			return fmt.Errorf("failed to delete replica: %w", err)
 		}
@@ -1348,7 +1425,12 @@ func (db *DB) DeleteStaleReplicasByNativeID(provider model.Provider, oldNativeID
 		SET status = 'deleted'
 		WHERE provider = ? AND native_id = ? AND id != ? AND status = 'active'
 		`
-		_, err := tx.Exec(query, string(provider), oldNativeID, excludeReplicaID)
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(string(provider), oldNativeID, excludeReplicaID)
 		if err != nil {
 			return fmt.Errorf("failed to delete stale replicas: %w", err)
 		}
@@ -1469,7 +1551,12 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 		END
 		`, softDeletedPattern, softDeletedPatternWin, softDeletedPattern, softDeletedPatternWin)
 
-		if _, err := tx.Exec(updateQuery, minTimestamp); err != nil {
+		updateStmt, err := db.txStmt(tx, updateQuery)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer updateStmt.Close()
+		if _, err := updateStmt.Exec(minTimestamp); err != nil {
 			return fmt.Errorf("failed to update soft-deleted status: %w", err)
 		}
 
@@ -1495,7 +1582,13 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 		AND files.status = 'softdeleted'
 		AND (files.calculated_id != '' AND files.calculated_id IS NOT NULL)
 		`, softDeletedPattern, softDeletedPatternWin)
-		if _, err := tx.Exec(fallbackQuery, minTimestamp); err != nil {
+		
+		fallbackStmt, err := db.txStmt(tx, fallbackQuery)
+		if err != nil {
+			return fmt.Errorf("failed to prepare fallback statement: %w", err)
+		}
+		defer fallbackStmt.Close()
+		if _, err := fallbackStmt.Exec(minTimestamp); err != nil {
 			return fmt.Errorf("failed to update soft-deleted status (fallback): %w", err)
 		}
 
@@ -1607,7 +1700,12 @@ func (db *DB) UpdateFile(file *model.File) error {
 		SET path = ?, name = ?, size = ?, calculated_id = ?, mod_time = ?, status = ?
 		WHERE id = ?
 		`
-		_, err := tx.Exec(query,
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare update file statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(
 			file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status, file.ID)
 		if err != nil {
 			return fmt.Errorf("failed to update file: %w", err)
@@ -1626,7 +1724,12 @@ func (db *DB) UpdateReplica(replica *model.Replica) error {
 			mod_time = ?, status = ?, fragmented = ?, owner = ?
 		WHERE id = ?
 		`
-		_, err := tx.Exec(query,
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare update replica statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(
 			replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner, replica.ID)
@@ -1641,7 +1744,12 @@ func (db *DB) UpdateReplica(replica *model.Replica) error {
 func (db *DB) UpdateFileStatus(id string, status string) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := "UPDATE files SET status = ? WHERE id = ?"
-		_, err := tx.Exec(query, status, id)
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(status, id)
 		if err != nil {
 			return fmt.Errorf("failed to update file status: %w", err)
 		}
@@ -1653,7 +1761,12 @@ func (db *DB) UpdateFileStatus(id string, status string) error {
 func (db *DB) UpdateFileModTime(id string, modTime time.Time) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := "UPDATE files SET mod_time = ? WHERE id = ?"
-		_, err := tx.Exec(query, modTime.Unix(), id)
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(modTime.Unix(), id)
 		if err != nil {
 			return fmt.Errorf("failed to update file mod time: %w", err)
 		}
@@ -1665,7 +1778,12 @@ func (db *DB) UpdateFileModTime(id string, modTime time.Time) error {
 func (db *DB) UpdateReplicaFileID(replicaID int64, fileID string) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := "UPDATE replicas SET file_id = ? WHERE id = ?"
-		_, err := tx.Exec(query, fileID, replicaID)
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(fileID, replicaID)
 		if err != nil {
 			return fmt.Errorf("failed to update replica file ID: %w", err)
 		}
@@ -1727,7 +1845,12 @@ func (db *DB) LinkOrphanedReplicas() error {
 		WHERE (replicas.file_id IS NULL OR replicas.file_id = '')
 		AND replicas.calculated_id = fm.calculated_id
 		`
-		_, err := tx.Exec(query)
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec()
 		if err != nil {
 			return fmt.Errorf("failed to link orphaned replicas: %w", err)
 		}
@@ -1781,7 +1904,7 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 	}
 
 	return db.WithTx(func(tx *sql.Tx) error {
-		insertFileStmt, err := tx.Prepare(`
+		insertFileStmt, err := db.txStmt(tx, `
 			INSERT OR IGNORE INTO files (id, path, name, size, calculated_id, mod_time, status)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
 		`)
@@ -1790,7 +1913,7 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 		}
 		defer insertFileStmt.Close()
 
-		updateReplicaStmt, err := tx.Prepare(`
+		updateReplicaStmt, err := db.txStmt(tx, `
 			UPDATE replicas SET file_id = ? WHERE id = ?
 		`)
 		if err != nil {
@@ -1865,7 +1988,12 @@ func (db *DB) UpdateLogicalFilesFromReplicas() error {
 			files.path IS NOT rr.path
 		)
 		`
-		_, err := tx.Exec(query)
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec()
 		if err != nil {
 			return fmt.Errorf("failed to update logical files from replicas: %w", err)
 		}
@@ -1881,7 +2009,12 @@ func (db *DB) MarkDeletedReplicas(startTime time.Time) error {
 		SET status = 'deleted'
 		WHERE last_seen_at < ? AND status != 'deleted'
 		`
-		_, err := tx.Exec(query, startTime.Unix())
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(startTime.Unix())
 		if err != nil {
 			return fmt.Errorf("failed to mark deleted replicas: %w", err)
 		}
@@ -1912,7 +2045,12 @@ func (db *DB) CreateSyncRun(safeMode bool) (int64, error) {
 	var id int64
 	err := db.WithTx(func(tx *sql.Tx) error {
 		query := `INSERT INTO sync_runs (started_at, safe_mode) VALUES (?, ?)`
-		res, err := tx.Exec(query, time.Now().Unix(), safeMode)
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+		res, err := stmt.Exec(time.Now().Unix(), safeMode)
 		if err != nil {
 			return fmt.Errorf("failed to create sync run: %w", err)
 		}
@@ -1944,7 +2082,12 @@ func (db *DB) GetIncompleteSyncRun() (*model.SyncRun, error) {
 func (db *DB) MarkStepCompleted(runID int64, step int) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `UPDATE sync_runs SET last_completed_step = ? WHERE id = ?`
-		_, err := tx.Exec(query, step, runID)
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(step, runID)
 		if err != nil {
 			return fmt.Errorf("failed to mark step completed: %w", err)
 		}
@@ -1956,7 +2099,12 @@ func (db *DB) MarkStepCompleted(runID int64, step int) error {
 func (db *DB) CompleteSyncRun(runID int64) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `UPDATE sync_runs SET completed_at = ?, last_completed_step = 5 WHERE id = ?`
-		_, err := tx.Exec(query, time.Now().Unix(), runID)
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(time.Now().Unix(), runID)
 		if err != nil {
 			return fmt.Errorf("failed to complete sync run: %w", err)
 		}
@@ -1968,7 +2116,12 @@ func (db *DB) CompleteSyncRun(runID int64) error {
 func (db *DB) LogSyncCopy(runID int64, fileID string, targetProvider string) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `INSERT OR IGNORE INTO sync_copy_log (sync_run_id, file_id, target_provider, created_at) VALUES (?, ?, ?, ?)`
-		_, err := tx.Exec(query, runID, fileID, targetProvider, time.Now().Unix())
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt.Close()
+		_, err = stmt.Exec(runID, fileID, targetProvider, time.Now().Unix())
 		if err != nil {
 			return fmt.Errorf("failed to log sync copy: %w", err)
 		}
@@ -2019,7 +2172,12 @@ func (db *DB) CleanupOldSyncRuns(keepLast int) error {
 			SELECT id FROM sync_runs WHERE completed_at IS NOT NULL
 			ORDER BY id DESC LIMIT -1 OFFSET ?
 		)`
-		if _, err := tx.Exec(delCopyLog, keepLast); err != nil {
+		stmt1, err := db.txStmt(tx, delCopyLog)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt1.Close()
+		if _, err := stmt1.Exec(keepLast); err != nil {
 			return fmt.Errorf("failed to delete old sync copy logs: %w", err)
 		}
 
@@ -2029,7 +2187,12 @@ func (db *DB) CleanupOldSyncRuns(keepLast int) error {
 				SELECT id FROM sync_runs WHERE completed_at IS NOT NULL
 				ORDER BY id DESC LIMIT ?
 			)`
-		if _, err := tx.Exec(delRuns, keepLast); err != nil {
+		stmt2, err := db.txStmt(tx, delRuns)
+		if err != nil {
+			return fmt.Errorf("failed to prepare statement: %w", err)
+		}
+		defer stmt2.Close()
+		if _, err := stmt2.Exec(keepLast); err != nil {
 			return fmt.Errorf("failed to delete old sync runs: %w", err)
 		}
 
