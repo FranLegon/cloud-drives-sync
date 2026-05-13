@@ -220,6 +220,14 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 			return err
 		}
 
+		// Check for existing metadata.db to overwrite or Create
+		// We do this BEFORE ListFolders(auxID) so that if getMetadataFileID (which calls ListFiles)
+		// succeeds, it populates the folder cache and saves ListFolders an API call.
+		existingFileID, err := getMetadataFileID(client, user, auxID)
+		if err != nil && !strings.Contains(err.Error(), "not found in aux folder") {
+			return err
+		}
+
 		// Ensure soft-deleted folder exists
 		if user.Provider == model.ProviderTelegram {
 			if _, err := client.CreateFolder(auxID, SoftDeletedFolder); err != nil {
@@ -242,12 +250,6 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 					return fmt.Errorf("failed to create soft-deleted folder: %w", err)
 				}
 			}
-		}
-
-		// Check for existing metadata.db to overwrite or Create
-		existingFileID, err := getMetadataFileID(client, user, auxID)
-		if err != nil && !strings.Contains(err.Error(), "not found in aux folder") {
-			return err
 		}
 
 		if _, err := file.Seek(0, 0); err != nil {
