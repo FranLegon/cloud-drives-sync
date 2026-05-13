@@ -695,16 +695,14 @@ func (db *DB) GetFolderByPathAndAccount(path string, provider model.Provider, ac
 
 // GetFilesByCalculatedID returns all files with a specific calculated_id
 func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error) {
-	query := `
-	SELECT f.id, f.path, f.name, f.size, f.calculated_id, f.mod_time, f.status,
-	       r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
-	FROM files f
-	LEFT JOIN replicas r ON r.file_id = f.id
-	WHERE f.calculated_id = ?
-	ORDER BY f.mod_time ASC, r.id ASC
+	queryFiles := `
+	SELECT id, path, name, size, calculated_id, mod_time, status
+	FROM files
+	WHERE calculated_id = ?
+	ORDER BY mod_time ASC
 	`
 
-	rows, err := db.query(query, calculatedID)
+	rows, err := db.query(queryFiles, calculatedID)
 	if err != nil {
 		return nil, err
 	}
@@ -712,64 +710,77 @@ func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error)
 
 	fileMap := make(map[string]*model.File)
 	var files []*model.File
-	var allReplicas []*model.Replica
 
 	for rows.Next() {
-		var fileID, filePath, fileName, fileCalcID, fileStatus string
-		var fileSize, fileModTime int64
-
-		// Replica fields (nullable due to LEFT JOIN)
-		var rID sql.NullInt64
-		var rFileID, rCalcID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus, rOwner sql.NullString
-		var rSize, rModTime sql.NullInt64
-		var rFragmented sql.NullBool
-
-		err := rows.Scan(
-			&fileID, &filePath, &fileName, &fileSize, &fileCalcID, &fileModTime, &fileStatus,
-			&rID, &rFileID, &rCalcID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner,
-		)
-		if err != nil {
+		file := &model.File{}
+		var modTime int64
+		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status); err != nil {
 			return nil, err
 		}
-
-		file, exists := fileMap[fileID]
-		if !exists {
-			file = &model.File{
-				ID:           fileID,
-				Path:         filePath,
-				Name:         fileName,
-				Size:         fileSize,
-				CalculatedID: fileCalcID,
-				ModTime:      time.Unix(fileModTime, 0),
-				Status:       fileStatus,
-			}
-			fileMap[fileID] = file
-			files = append(files, file)
-		}
-
-		if rID.Valid {
-			replica := &model.Replica{
-				ID:           rID.Int64,
-				FileID:       rFileID.String,
-				CalculatedID: rCalcID.String,
-				Path:         rPath.String,
-				Name:         rName.String,
-				Size:         rSize.Int64,
-				Provider:     model.Provider(rProvider.String),
-				AccountID:    rAccountID.String,
-				NativeID:     rNativeID.String,
-				NativeHash:   rNativeHash.String,
-				ModTime:      time.Unix(rModTime.Int64, 0),
-				Status:       rStatus.String,
-				Fragmented:   rFragmented.Bool,
-				Owner:        rOwner.String,
-			}
-			file.Replicas = append(file.Replicas, replica)
-			allReplicas = append(allReplicas, replica)
-		}
+		file.ModTime = time.Unix(modTime, 0)
+		fileMap[file.ID] = file
+		files = append(files, file)
 	}
 
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(files) == 0 {
+		return files, nil
+	}
+
+	queryReplicas := `
+	SELECT r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
+	FROM replicas r
+	JOIN files f ON r.file_id = f.id
+	WHERE f.calculated_id = ?
+	ORDER BY r.id ASC
+	`
+
+	repRows, err := db.query(queryReplicas, calculatedID)
+	if err != nil {
+		return nil, err
+	}
+	defer repRows.Close()
+
+	var allReplicas []*model.Replica
+	for repRows.Next() {
+		r := &model.Replica{}
+		var rFileID, rCalcID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus string
+		var rSize, rModTime int64
+		var rFragmented bool
+		var rOwner sql.NullString
+
+		if err := repRows.Scan(
+			&r.ID, &rFileID, &rCalcID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner,
+		); err != nil {
+			return nil, err
+		}
+
+		r.FileID = rFileID
+		r.CalculatedID = rCalcID
+		r.Path = rPath
+		r.Name = rName
+		r.Size = rSize
+		r.Provider = model.Provider(rProvider)
+		r.AccountID = rAccountID
+		r.NativeID = rNativeID
+		r.NativeHash = rNativeHash
+		r.ModTime = time.Unix(rModTime, 0)
+		r.Status = rStatus
+		r.Fragmented = rFragmented
+		if rOwner.Valid {
+			r.Owner = rOwner.String
+		}
+
+		if file, ok := fileMap[r.FileID]; ok {
+			file.Replicas = append(file.Replicas, r)
+			allReplicas = append(allReplicas, r)
+		}
+	}
+
+	if err := repRows.Err(); err != nil {
 		return nil, err
 	}
 
