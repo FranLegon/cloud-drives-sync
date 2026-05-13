@@ -999,7 +999,8 @@ func (db *DB) batchLoadFragments(replicas []*model.Replica) error {
 		ORDER BY replica_id, fragment_number ASC
 		`, strings.Join(placeholders, ","))
 
-		rows, err := db.query(query, args...)
+		// Use db.conn.Query directly to avoid caching dynamic queries in db.stmtCache, preventing a prepared statement memory leak.
+		rows, err := db.conn.Query(query, args...)
 		if err != nil {
 			return err
 		}
@@ -1494,7 +1495,8 @@ func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs [
 		AND path NOT LIKE '%%%s\soft-deleted%%'
 		`, strings.Join(placeholders, ","), auxFolderName, auxFolderName)
 
-		rows, err := db.query(query, args...)
+		// Use db.conn.Query directly to avoid caching dynamic queries in db.stmtCache, preventing a prepared statement memory leak.
+		rows, err := db.conn.Query(query, args...)
 		if err != nil {
 			return nil, err
 		}
