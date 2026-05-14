@@ -99,6 +99,14 @@ func IsRetriableError(err error) bool {
 	return false
 }
 
+type retryTrigger struct {
+	err error
+}
+
+func (r retryTrigger) Error() string {
+	return r.err.Error()
+}
+
 // WithRetry executes the given operation with exponential backoff.
 // It only retries on transient network errors and rate limits.
 // When the error carries a Retry-After duration (from an HTTP 429 response),
@@ -109,14 +117,12 @@ func WithRetry(operation func() error) error {
 	b.MaxInterval = 30 * time.Second
 	b.MaxElapsedTime = 5 * time.Minute
 
-	return backoff.Retry(func() error {
+	err := backoff.Retry(func() error {
 		err := operation()
 		if err == nil {
 			return nil
 		}
-		if _, ok := err.(*backoff.PermanentError); ok {
-			return err
-		}
+		
 		if IsRetriableError(err) {
 			// Respect Retry-After header if the server told us how long to wait.
 			var wait time.Duration
@@ -133,10 +139,23 @@ func WithRetry(operation func() error) error {
 				}
 				time.Sleep(wait)
 			}
-			return err // Returning error triggers a retry
+			// Use retryTrigger to hide any wrapped PermanentError from backoff.Retry
+			// so that it doesn't abort the retry loop.
+			return retryTrigger{err: err}
 		}
+		
+		var permErr *backoff.PermanentError
+		if errors.As(err, &permErr) {
+			return err
+		}
+		
 		return backoff.Permanent(err) // Wrap non-retriable errors
 	}, b)
+
+	if trigger, ok := err.(retryTrigger); ok {
+		return trigger.err
+	}
+	return err
 }
 
 // WithRetryT executes the given operation returning T and error with exponential backoff.
