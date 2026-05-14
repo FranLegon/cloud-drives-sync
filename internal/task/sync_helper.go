@@ -235,6 +235,8 @@ func handleDownloadError(err error, errChan chan error, contextStr string) {
 			logger.Warning("Download error in pipe %s: %v", contextStr, err)
 		}
 		errChan <- err
+	} else {
+		errChan <- nil // Signal completion to prevent deadlock
 	}
 }
 
