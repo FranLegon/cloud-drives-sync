@@ -996,11 +996,15 @@ func (db *DB) batchLoadFragments(replicas []*model.Replica) error {
 
 		batch := replicaIDs[i:end]
 
-		placeholders := make([]string, len(batch))
 		args := make([]interface{}, len(batch))
 		for j, id := range batch {
-			placeholders[j] = "?"
 			args[j] = id
+		}
+
+		// Avoid allocating a string slice and joining it for placeholders
+		placeholders := strings.Repeat("?,", len(batch))
+		if len(placeholders) > 0 {
+			placeholders = placeholders[:len(placeholders)-1]
 		}
 
 		query := fmt.Sprintf(`
@@ -1008,7 +1012,7 @@ func (db *DB) batchLoadFragments(replicas []*model.Replica) error {
 		FROM replica_fragments
 		WHERE replica_id IN (%s)
 		ORDER BY replica_id, fragment_number ASC
-		`, strings.Join(placeholders, ","))
+		`, placeholders)
 
 		// Use db.conn.Query directly to avoid caching dynamic queries in db.stmtCache, preventing a prepared statement memory leak.
 		rows, err := db.conn.Query(query, args...)
@@ -1490,11 +1494,15 @@ func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs [
 		}
 		chunk := calculatedIDs[i:end]
 
-		placeholders := make([]string, len(chunk))
 		args := make([]interface{}, len(chunk))
 		for j, id := range chunk {
-			placeholders[j] = "?"
 			args[j] = id
+		}
+
+		// Avoid allocating a string slice and joining it for placeholders
+		placeholders := strings.Repeat("?,", len(chunk))
+		if len(placeholders) > 0 {
+			placeholders = placeholders[:len(placeholders)-1]
 		}
 
 		query := fmt.Sprintf(`
@@ -1504,7 +1512,7 @@ func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs [
 		AND status = 'active'
 		AND path NOT LIKE '%%%s/soft-deleted%%'
 		AND path NOT LIKE '%%%s\soft-deleted%%'
-		`, strings.Join(placeholders, ","), auxFolderName, auxFolderName)
+		`, placeholders, auxFolderName, auxFolderName)
 
 		// Use db.conn.Query directly to avoid caching dynamic queries in db.stmtCache, preventing a prepared statement memory leak.
 		rows, err := db.conn.Query(query, args...)
