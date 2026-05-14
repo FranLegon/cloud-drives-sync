@@ -112,6 +112,10 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 
 	// Clean path and split
 	path = strings.Trim(path, "/\\")
+	if path == "" || path == "." {
+		return client.GetSyncFolderID()
+	}
+
 	accountID := client.GetUserIdentifier()
 
 	cachePrefix := model.GenerateCacheKey(provider, accountID) + ":"
@@ -129,6 +133,11 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 	mu := r.getAccountFolderLock(provider, accountID)
 	mu.Lock()
 	defer mu.Unlock()
+
+	// Double check cache after acquiring lock
+	if cachedID, ok := r.folderCache.Load(cacheKey); ok {
+		return cachedID.(string), nil
+	}
 
 	// Get root sync folder
 	currentID, err := client.GetSyncFolderID()
