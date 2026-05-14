@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -177,19 +178,12 @@ func (db *DB) Reset() error {
 // GetMetadataHash computes a fast hash of the current logical state of the database,
 // ignoring transient fields like last_seen_at.
 func (db *DB) GetMetadataHash() (string, error) {
-	// We hash the files table and replicas table using a simple polynomial sum to minimize collisions
-	query := `
-	SELECT 
-		(SELECT COALESCE(SUM((LENGTH(id)*3) + (LENGTH(path)*7) + (LENGTH(name)*11) + (size*13) + (LENGTH(COALESCE(calculated_id,''))*17) + (mod_time*19) + (LENGTH(status)*23)), 0) FROM files),
-		(SELECT COALESCE(SUM((LENGTH(COALESCE(file_id,''))*3) + (LENGTH(COALESCE(calculated_id,''))*7) + (LENGTH(path)*11) + (LENGTH(name)*13) + (size*17) + (LENGTH(provider)*19) + (LENGTH(account_id)*23) + (LENGTH(native_id)*29) + (LENGTH(COALESCE(native_hash,''))*31) + (mod_time*37) + (LENGTH(status)*41) + (fragmented*43) + (LENGTH(COALESCE(owner,''))*47)), 0) FROM replicas),
-		(SELECT COALESCE(SUM((LENGTH(id)*3) + (LENGTH(name)*7) + (LENGTH(path)*11) + (LENGTH(provider)*13) + (LENGTH(COALESCE(user_email,''))*17) + (LENGTH(COALESCE(user_phone,''))*19) + (LENGTH(COALESCE(parent_folder_id,''))*23) + (LENGTH(COALESCE(owner_email,''))*29)), 0) FROM folders)
-	`
-	var hash1, hash2, hash3 int64
-	err := db.queryRow(query).Scan(&hash1, &hash2, &hash3)
+	var version int64
+	err := db.queryRow("SELECT version FROM _db_version").Scan(&version)
 	if err != nil {
-		return "", err
+		return "0", nil
 	}
-	return fmt.Sprintf("%d-%d-%d", hash1, hash2, hash3), nil
+	return strconv.FormatInt(version, 10), nil
 }
 
 // Close closes the database connection
@@ -299,6 +293,23 @@ func (db *DB) Initialize() error {
 		);
 
 		CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_copy_log_unique ON sync_copy_log(sync_run_id, file_id, target_provider);
+
+		CREATE TABLE IF NOT EXISTS _db_version (version INTEGER);
+		INSERT INTO _db_version (version) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM _db_version);
+
+		CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN UPDATE _db_version SET version = version + 1; END;
+
+		CREATE TRIGGER IF NOT EXISTS replicas_ai AFTER INSERT ON replicas BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS replicas_au AFTER UPDATE ON replicas 
+		WHEN OLD.file_id IS NOT NEW.file_id OR OLD.calculated_id IS NOT NEW.calculated_id OR OLD.path IS NOT NEW.path OR OLD.name IS NOT NEW.name OR OLD.size IS NOT NEW.size OR OLD.provider IS NOT NEW.provider OR OLD.account_id IS NOT NEW.account_id OR OLD.native_id IS NOT NEW.native_id OR OLD.native_hash IS NOT NEW.native_hash OR OLD.mod_time IS NOT NEW.mod_time OR OLD.status IS NOT NEW.status OR OLD.fragmented IS NOT NEW.fragmented OR OLD.owner IS NOT NEW.owner
+		BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS replicas_ad AFTER DELETE ON replicas BEGIN UPDATE _db_version SET version = version + 1; END;
+
+		CREATE TRIGGER IF NOT EXISTS folders_ai AFTER INSERT ON folders BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS folders_au AFTER UPDATE ON folders BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS folders_ad AFTER DELETE ON folders BEGIN UPDATE _db_version SET version = version + 1; END;
 		`
 
 		if _, err := tx.Exec(schema); err != nil {
