@@ -224,6 +224,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 			testCommitHash = hash
 			logger.Info("[GIT] No .go file changes detected. Using current HEAD: %s", testCommitHash)
 		} else {
+			logger.Info("[GIT] Attempting to stash %d non-.go files", len(nonGoFiles))
 			// Stash non-.go files if any
 			if len(nonGoFiles) > 0 {
 				stashArgs := append([]string{"stash", "push", "--include-untracked", "--"}, nonGoFiles...)

@@ -10,6 +10,15 @@ import (
 	"github.com/cenkalti/backoff/v4"
 )
 
+func init() {
+	// Optimize HTTP transport for high concurrency to cloud providers
+	// Default MaxIdleConnsPerHost is 2, causing connection thrashing
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		t.MaxIdleConns = 1000
+		t.MaxIdleConnsPerHost = 100
+	}
+}
+
 // RetryTransport is an http.RoundTripper that retries on transient errors and rate limits.
 type RetryTransport struct {
 	Base http.RoundTripper
