@@ -2,19 +2,19 @@
 $focusPrompts = @(
     @{ Weight = 4;  Prompt = "Tighten command orchestration flow. Simplify repeated pre-check and setup logic between commands, reduce branching complexity, and keep exact user-visible behavior unless fixing a clear bug." }
     @{ Weight = 4;  Prompt = "Harden error handling paths across Go files. Prioritize wrapping errors with context, avoiding swallowed errors, and returning actionable messages. Preserve existing behavior and public interfaces." }
-    @{ Weight = 4;  Prompt = "Reduce unnecessary API calls and repeated cloud lookups. Cache short-lived results within command execution when safe, and remove duplicate fetch patterns. Do not change sync semantics." }
+    @{ Weight = 8;  Prompt = "Reduce unnecessary API calls and repeated cloud lookups. Cache short-lived results within command execution when safe, and remove duplicate fetch patterns. Do not change sync semantics." }
     @{ Weight = 4;  Prompt = "Update all .md files in the repository to reflect the current state of the codebase. Ensure READMEs and documentation match the actual logic and CLI flags." }
-    @{ Weight = 4;  Prompt = "Improve reliability of retry and backoff usage. Ensure transient network and rate-limit errors use consistent retry strategy and avoid retrying non-retriable errors." }
+    @{ Weight = 5;  Prompt = "Improve reliability of retry and backoff usage. Ensure transient network and rate-limit errors use consistent retry strategy and avoid retrying non-retriable errors." }
     @{ Weight = 4;  Prompt = "Look for possible refactors to avoid repeating code, simplify complex logic, improve naming, and remove redundancy.
                Make sure not to alter the behavior of the code unless it's to fix a bug. Focus on improving code quality and maintainability.
                If you think no refactor is necessary, don't do anything." }
     @{ Weight = 4;  Prompt = "Unify duplicate path normalization and file identity logic. Consolidate repeated helpers for path cleaning, calculated_id handling, and provider naming consistency without changing outputs." }
     @{ Weight = 4;  Prompt = "Strengthen database interaction safety. Focus on consistent transaction boundaries, prepared statements reuse, and clearer failure handling while preserving schema and command behavior." }
     @{ Weight = 4;  Prompt = "Improve logging signal-to-noise. Keep current log style, but make critical actions and failures more diagnosable with concise context (provider, account, path, native_id) and fewer redundant lines." }
-    @{ Weight = 4;  Prompt = "Optimize memory and stream handling in upload/download paths. Remove avoidable buffering and ensure readers/writers are closed correctly in all branches, including error paths." }
+    @{ Weight = 5;  Prompt = "Optimize memory and stream handling in upload/download paths. Remove avoidable buffering and ensure readers/writers are closed correctly in all branches, including error paths." }
     @{ Weight = 8;  Prompt = "Ensure the sync command is idempotent and can recover from an interrupted run (e.g. crash or reboot mid-sync). Focus on checkpointing progress in the database so already-synced files are not re-processed. Do not change sync semantics." }
-    @{ Weight = 7;  Prompt = "Audit sync and API call paths for proper handling of 429 Too Many Requests and transient server errors. Ensure rate-limit responses trigger backoff/retry rather than failing the entire sync. Do not change retry logic for non-retriable errors." }
-    @{ Weight = 60; Prompt = @"
+    @{ Weight = 6;  Prompt = "Audit sync and API call paths for proper handling of 429 Too Many Requests and transient server errors. Ensure rate-limit responses trigger backoff/retry rather than failing the entire sync. Do not change retry logic for non-retriable errors." }
+    @{ Weight = 15; Prompt = @"
 Look for possible optimizations. 
 Find the single highest-impact, low-risk improvement.
 Make only focused changes that are clearly justified.
