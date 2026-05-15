@@ -1149,9 +1149,111 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	return files, nil
 }
 
-// GetAllFilesAcrossProviders returns all active files (optimized alias)
+// GetAllFilesAcrossProviders returns all active files with their active replicas
 func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
-	return db.GetFilesByStatus("active")
+	queryFiles := `
+	SELECT id, path, name, size, calculated_id, mod_time, status
+	FROM files
+	WHERE status = 'active'
+	`
+
+	rows, err := db.query(queryFiles)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	fileMap := make(map[string]*model.File)
+	var files []*model.File
+
+	for rows.Next() {
+		file := &model.File{}
+		var modTime int64
+		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status); err != nil {
+			return nil, err
+		}
+		file.ModTime = time.Unix(modTime, 0)
+		fileMap[file.ID] = file
+		files = append(files, file)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(files) == 0 {
+		return files, nil
+	}
+
+	var allReplicas []*model.Replica
+	
+	queryReplicas := `
+	SELECT r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
+	FROM replicas r
+	JOIN files f ON r.file_id = f.id
+	WHERE f.status = 'active' AND r.status = 'active'
+	`
+	repRows, err := db.query(queryReplicas)
+	if err != nil {
+		return nil, err
+	}
+
+	for repRows.Next() {
+		r := &model.Replica{}
+		var rFileID, rCalcID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus string
+		var rSize, rModTime int64
+		var rFragmented bool
+		var rOwner sql.NullString
+
+		if err := repRows.Scan(
+			&r.ID, &rFileID, &rCalcID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner,
+		); err != nil {
+			repRows.Close()
+			return nil, err
+		}
+
+		r.FileID = rFileID
+		r.CalculatedID = rCalcID
+		r.Path = rPath
+		r.Name = rName
+		r.Size = rSize
+		r.Provider = model.Provider(rProvider)
+		r.AccountID = rAccountID
+		r.NativeID = rNativeID
+		r.NativeHash = rNativeHash
+		r.ModTime = time.Unix(rModTime, 0)
+		r.Status = rStatus
+		r.Fragmented = rFragmented
+		if rOwner.Valid {
+			r.Owner = rOwner.String
+		}
+
+		if file, ok := fileMap[r.FileID]; ok {
+			file.Replicas = append(file.Replicas, r)
+			allReplicas = append(allReplicas, r)
+		}
+	}
+
+	if err := repRows.Err(); err != nil {
+		repRows.Close()
+		return nil, err
+	}
+	repRows.Close()
+
+	// Load fragments for fragmented replicas in batch
+	fragmented := make([]*model.Replica, 0, len(allReplicas))
+	for _, r := range allReplicas {
+		if r.Fragmented {
+			fragmented = append(fragmented, r)
+		}
+	}
+	if len(fragmented) > 0 {
+		if err := db.batchLoadFragments(fragmented); err != nil {
+			return nil, err
+		}
+	}
+
+	return files, nil
 }
 
 // GetReplicas returns all replicas for a file
