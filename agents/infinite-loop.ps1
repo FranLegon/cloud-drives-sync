@@ -126,15 +126,25 @@ while ($iteration -le $maxIterations) {
         Write-Host "Next iteration focus: $mainPrompt" -ForegroundColor Cyan
         $prompt = ($mainPrompt + $gitClarification)
     }
-    # run OpenCode
+    # run OpenCode with 2hr timeout
     if ($prompt -eq ($mainPrompt + $gitClarification)) {
         $sessionMessages = 1
-        opencode run $prompt --model $model
+        $proc = Start-Process opencode -ArgumentList @("run", $prompt, "--model", $model) -NoNewWindow -PassThru
     } else {
         $sessionMessages++
-        opencode run -c $prompt 
+        $proc = Start-Process opencode -ArgumentList @("run", "-c", $prompt) -NoNewWindow -PassThru
     }
-    if (-not $? -or $LASTEXITCODE -ne 0) { 
+    if (-not $proc.WaitForExit(7200000)) {
+        Write-Host "OpenCode timed out after 2 hours. Resetting..." -ForegroundColor Red
+        $proc.Kill()
+        git checkout main --force | Out-Null
+        git clean -fd | Out-Null
+        Remove-Item .commitmsg -ErrorAction SilentlyContinue
+        if (git stash list) { git stash pop | Out-Null }
+        $prompt = $mainPrompt + $gitClarification
+        continue
+    }
+    if ($proc.ExitCode -ne 0) { 
         Write-Host "OpenCode execution failed. Checking out to main and resetting to discard any changes..." -ForegroundColor Red
         git checkout main --force | Out-Null
         git clean -fd | Out-Null
