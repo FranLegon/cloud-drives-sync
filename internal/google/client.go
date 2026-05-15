@@ -241,7 +241,6 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 
 	c.folderCacheMu.Lock()
 	if cached, ok := c.folderCache[parentID]; ok {
-		delete(c.folderCache, parentID)
 		c.folderCacheMu.Unlock()
 		return cached, nil
 	}
@@ -287,6 +286,13 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 		}
 		pageToken = fileList.NextPageToken
 	}
+
+	c.folderCacheMu.Lock()
+	if c.folderCache == nil {
+		c.folderCache = make(map[string][]*model.Folder)
+	}
+	c.folderCache[parentID] = allFolders
+	c.folderCacheMu.Unlock()
 
 	return allFolders, nil
 }
@@ -424,11 +430,20 @@ func (c *Client) CreateFolder(parentID, name string) (*model.Folder, error) {
 	}
 
 	if len(createdFolder.Owners) > 0 {
-		result.OwnerEmail = createdFolder.Owners[0].EmailAddress
+		result.UserEmail = createdFolder.Owners[0].EmailAddress
 	}
+
+	c.folderCacheMu.Lock()
+	if c.folderCache != nil {
+		if _, ok := c.folderCache[parentID]; ok {
+			c.folderCache[parentID] = append(c.folderCache[parentID], result)
+		}
+	}
+	c.folderCacheMu.Unlock()
 
 	return result, nil
 }
+
 
 // EmptySyncFolder recursively deletes all items inside the sync folder and the folder itself.
 // It deletes files first, then folders from inner to outer.

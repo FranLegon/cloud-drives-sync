@@ -1769,7 +1769,25 @@ func (r *Runner) DeleteUnsyncedFiles() error {
 			continue
 		}
 
-		// List folders in root
+		// List files in root first to populate folder cache
+		files, err := client.ListFiles("root")
+		if err != nil {
+			logger.Error("Failed to list files for %s: %v", user.Email, err)
+			continue
+		}
+
+		for _, file := range files {
+			if !r.safeMode {
+				logger.InfoTagged(user.LogTags(), "Deleting unsynced file: %s", file.Name)
+				if err := client.DeleteFile(file.ID); err != nil {
+					logger.Error("Failed to delete file %s: %v", file.Name, err)
+				}
+			} else {
+				logger.DryRunTagged(user.LogTags(), "Would delete unsynced file: %s", file.Name)
+			}
+		}
+
+		// List folders in root (will use cache from ListFiles if implemented)
 		folders, err := client.ListFolders("root")
 		if err != nil {
 			logger.Error("Failed to list folders for %s: %v", user.Email, err)
@@ -1786,24 +1804,6 @@ func (r *Runner) DeleteUnsyncedFiles() error {
 				} else {
 					logger.DryRunTagged(user.LogTags(), "Would delete unsynced folder: %s", folder.Name)
 				}
-			}
-		}
-
-		// List files in root
-		files, err := client.ListFiles("root")
-		if err != nil {
-			logger.Error("Failed to list files for %s: %v", user.Email, err)
-			continue
-		}
-
-		for _, file := range files {
-			if !r.safeMode {
-				logger.InfoTagged(user.LogTags(), "Deleting unsynced file: %s", file.Name)
-				if err := client.DeleteFile(file.ID); err != nil {
-					logger.Error("Failed to delete file %s: %v", file.Name, err)
-				}
-			} else {
-				logger.DryRunTagged(user.LogTags(), "Would delete unsynced file: %s", file.Name)
 			}
 		}
 	}

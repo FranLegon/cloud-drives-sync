@@ -531,7 +531,6 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 
 	c.folderCacheMu.Lock()
 	if cached, ok := c.folderCache[parentID]; ok {
-		delete(c.folderCache, parentID)
 		c.folderCacheMu.Unlock()
 		return cached, nil
 	}
@@ -564,6 +563,13 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 		allFolders = append(allFolders, folder)
 	}
 
+	c.folderCacheMu.Lock()
+	if c.folderCache == nil {
+		c.folderCache = make(map[string][]*model.Folder)
+	}
+	c.folderCache[parentID] = allFolders
+	c.folderCacheMu.Unlock()
+
 	return allFolders, nil
 }
 
@@ -588,6 +594,14 @@ func (c *Client) CreateFolder(parentID, name string) (*model.Folder, error) {
 		UserEmail:      c.user.Email,
 		ParentFolderID: parentID,
 	}
+
+	c.folderCacheMu.Lock()
+	if c.folderCache != nil {
+		if _, ok := c.folderCache[parentID]; ok {
+			c.folderCache[parentID] = append(c.folderCache[parentID], folder)
+		}
+	}
+	c.folderCacheMu.Unlock()
 
 	return folder, nil
 }
