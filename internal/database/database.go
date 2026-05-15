@@ -2082,10 +2082,11 @@ func (db *DB) CreateSyncRun(safeMode bool) (int64, error) {
 	return id, err
 }
 
-// GetIncompleteSyncRun returns the most recent sync run that has not completed, or nil
+// GetIncompleteSyncRun returns the most recent sync run that has not completed and was started within the last 24 hours, or nil
 func (db *DB) GetIncompleteSyncRun() (*model.SyncRun, error) {
-	query := `SELECT id, started_at, last_completed_step, safe_mode FROM sync_runs WHERE completed_at IS NULL ORDER BY id DESC LIMIT 1`
-	row := db.queryRow(query)
+	twentyFourHoursAgo := time.Now().Add(-24 * time.Hour).Unix()
+	query := `SELECT id, started_at, last_completed_step, safe_mode FROM sync_runs WHERE completed_at IS NULL AND started_at > ? ORDER BY id DESC LIMIT 1`
+	row := db.queryRow(query, twentyFourHoursAgo)
 
 	var run model.SyncRun
 	var startedAt int64
