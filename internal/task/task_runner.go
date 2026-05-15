@@ -942,7 +942,16 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *AccountStatus, file *model.File, nativeID string, mainEmail string, oldReplicaDB *model.Replica) error {
 	logger.InfoTagged([]string{"Google", mainEmail}, "Transfer via ownership not supported (consent required). Falling back to Copy+Delete...")
 
-	// 1. Download
+	// 1. Ensure destination folder exists before starting stream
+	dir := model.NormalizePath(filepath.Dir(file.Path))
+
+	logger.Info("Ensuring folder structure for %s on target...", dir)
+	targetFolderID, folderErr := r.ensureFolderStructure(target.Client, dir, target.User.Provider)
+	if folderErr != nil {
+		return fmt.Errorf("failed to ensure destination folder: %w", folderErr)
+	}
+
+	// 2. Download
 	pr, pw := io.Pipe()
 	defer pr.Close() // Ensure reader is closed to prevent goroutine leaks if upload fails early
 	downloadErrChan := make(chan error, 1)
@@ -966,15 +975,7 @@ func (r *Runner) fallbackCopyDelete(mainClient api.CloudClient, target *AccountS
 		close(downloadErrChan)
 	}()
 
-	// 2. Upload - ensure destination folder exists
-	dir := model.NormalizePath(filepath.Dir(file.Path))
-
-	logger.Info("Ensuring folder structure for %s on target...", dir)
-	targetFolderID, folderErr := r.ensureFolderStructure(target.Client, dir, target.User.Provider)
-	if folderErr != nil {
-		return fmt.Errorf("failed to ensure destination folder: %w", folderErr)
-	}
-
+	// 3. Upload
 	logger.Info("Uploading %s to target...", file.Name)
 	uploadedFile, uploadErr := target.Client.UploadFile(targetFolderID, file.Name, pr, file.Size)
 	_ = pr.Close() // Ensure writer stops blocking if upload failed or finished early
