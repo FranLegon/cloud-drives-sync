@@ -1099,7 +1099,7 @@ func (r *Runner) SyncProviders(syncRunID int64) error {
 	}
 
 	// Phase 3: Distribute Shortcuts for Microsoft OneDrive
-	if err := r.distributeShortcuts(files, syncRunID); err != nil {
+	if err := r.distributeShortcuts(filesByPath, syncRunID); err != nil {
 		logger.Error("Failed to distribute shortcuts: %v", err)
 		if r.stopOnError {
 			return fmt.Errorf("distribute shortcuts failed: %w", err)
@@ -1575,14 +1575,8 @@ func (r *Runner) enforceSoftDeletedPlacement(masterFile *model.File, softDeleted
 
 // distributeShortcuts ensures that for every file in Microsoft OneDrive,
 // all other OneDrive accounts have a shortcut to it.
-func (r *Runner) distributeShortcuts(files []*model.File, syncRunID int64) error {
+func (r *Runner) distributeShortcuts(filesByPath map[string]map[model.Provider]*model.File, syncRunID int64) error {
 	logger.Info("Distributing OneDrive shortcuts...")
-
-	// Group files by Path
-	filesByPath := make(map[string][]*model.File, len(files))
-	for _, f := range files {
-		filesByPath[f.Path] = append(filesByPath[f.Path], f)
-	}
 
 	// Identify all Microsoft accounts
 	var msUsers []model.User
@@ -1612,7 +1606,7 @@ type shortcutJob struct {
 	syncRunID  int64
 }
 
-func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, filesByPath map[string][]*model.File, syncRunID int64) {
+func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, filesByPath map[string]map[model.Provider]*model.File, syncRunID int64) {
 	jobs := make([]shortcutJob, 0, len(filesByPath))
 
 	var doneCopies map[string]bool
@@ -1624,34 +1618,18 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 		}
 	}
 
-	for path, pathFiles := range filesByPath {
+	for path, fileMap := range filesByPath {
 		// Check if this path exists in Microsoft
-		msFiles := make([]*model.File, 0, len(pathFiles))
-		for _, f := range pathFiles {
-			for _, replica := range f.Replicas {
-				if replica.Status == "active" && replica.Provider == model.ProviderMicrosoft {
-					msFiles = append(msFiles, f)
-					break
-				}
-			}
-		}
-
-		if len(msFiles) == 0 {
+		msFile, hasMS := fileMap[model.ProviderMicrosoft]
+		if !hasMS {
 			continue
 		}
 
-		sourceFile := msFiles[0]
-
 		for _, user := range msUsers {
 			hasIt := false
-			for _, f := range msFiles {
-				for _, replica := range f.Replicas {
-					if replica.Status == "active" && replica.Provider == model.ProviderMicrosoft && replica.AccountID == user.Email {
-						hasIt = true
-						break
-					}
-				}
-				if hasIt {
+			for _, replica := range msFile.Replicas {
+				if replica.Status == "active" && replica.Provider == model.ProviderMicrosoft && replica.AccountID == user.Email {
+					hasIt = true
 					break
 				}
 			}
@@ -1659,7 +1637,7 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 			if !hasIt {
 				if syncRunID > 0 && doneCopies != nil {
 					targetProviderKey := fmt.Sprintf("shortcut:%s", user.Email)
-					if doneCopies[sourceFile.ID+"\x00"+targetProviderKey] {
+					if doneCopies[msFile.ID+"\x00"+targetProviderKey] {
 						logger.Info("Skipping already-created shortcut for %s in %s (crash recovery)", path, user.Email)
 						continue
 					}
@@ -1667,13 +1645,13 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 
 				if r.safeMode {
 					sourceAccount := ""
-					if len(sourceFile.Replicas) > 0 {
-						sourceAccount = sourceFile.Replicas[0].AccountID
+					if len(msFile.Replicas) > 0 {
+						sourceAccount = msFile.Replicas[0].AccountID
 					}
 					logger.DryRun("Would create shortcut for %s in %s -> %s", path, user.Email, sourceAccount)
 				} else {
 					jobs = append(jobs, shortcutJob{
-						sourceFile: sourceFile,
+						sourceFile: msFile,
 						user:       user,
 						path:       path,
 						syncRunID:  syncRunID,
