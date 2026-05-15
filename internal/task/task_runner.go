@@ -634,7 +634,23 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 			for _, file := range candidates {
 				// Skip if already processed in this sync run
 				if syncRunID > 0 && doneCopies != nil {
-					if doneCopies[file.ID+"\x00"+"balance"] {
+					skip := false
+					for _, t := range targets {
+						if doneCopies[file.ID+"\x00"+"balance:"+t.User.Email] {
+							skip = true
+							t.Free -= file.Size
+							t.Quota.Used += file.Size
+							r.updateQuotaUsed(&t.User, file.Size)
+							
+							source.Quota.Used -= file.Size
+							source.Free += file.Size
+							r.updateQuotaUsed(&source.User, -file.Size)
+							source.UsagePct = float64(source.Quota.Used) / float64(source.Quota.Total) * 100
+							t.UsagePct = float64(t.Quota.Used) / float64(t.Quota.Total) * 100
+							break
+						}
+					}
+					if skip {
 						logger.Info("Skipping already-balanced file %s (crash recovery)", file.Name)
 						continue
 					}
@@ -705,9 +721,9 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				r.updateQuotaUsed(&target.User, file.Size)
 
 				if syncRunID > 0 {
-					r.db.LogSyncCopy(syncRunID, file.ID, "balance")
+					r.db.LogSyncCopy(syncRunID, file.ID, "balance:"+target.User.Email)
 					if doneCopies != nil {
-						doneCopies[file.ID+"\x00"+"balance"] = true
+						doneCopies[file.ID+"\x00"+"balance:"+target.User.Email] = true
 					}
 				}
 			}
@@ -821,7 +837,18 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 	for _, file := range candidates {
 		// Skip if already processed in this sync run
 		if syncRunID > 0 && doneCopies != nil {
-			if doneCopies[file.ID+"\x00"+"freemain"] {
+			skip := false
+			for _, t := range targets {
+				if doneCopies[file.ID+"\x00"+"freemain:"+t.User.Email] {
+					skip = true
+					t.Free -= file.Size
+					t.Quota.Used += file.Size
+					r.updateQuotaUsed(&t.User, file.Size)
+					r.updateQuotaUsed(mainUser, -file.Size)
+					break
+				}
+			}
+			if skip {
 				logger.Info("Skipping already-transferred file %s (crash recovery)", file.Name)
 				continue
 			}
@@ -900,9 +927,9 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 			r.updateQuotaUsed(mainUser, -file.Size)
 
 			if syncRunID > 0 {
-				r.db.LogSyncCopy(syncRunID, file.ID, "freemain")
+				r.db.LogSyncCopy(syncRunID, file.ID, "freemain:"+target.User.Email)
 				if doneCopies != nil {
-					doneCopies[file.ID+"\x00"+"freemain"] = true
+					doneCopies[file.ID+"\x00"+"freemain:"+target.User.Email] = true
 				}
 			}
 		}
@@ -1056,7 +1083,7 @@ func (r *Runner) SyncProviders(syncRunID int64) error {
 	softDeletedPath := AuxFolder + "/" + SoftDeletedFolder
 
 	// Phase 1: Converge soft-deleted status across providers
-	if err := r.convergeReplicaStatus(files, softDeletedPath); err != nil {
+	if err := r.convergeReplicaStatus(files, softDeletedPath, syncRunID); err != nil {
 		return fmt.Errorf("status convergence failed: %w", err)
 	}
 
@@ -1067,7 +1094,7 @@ func (r *Runner) SyncProviders(syncRunID int64) error {
 	}
 
 	// Check for soft-delete consistency
-	if err := r.checkSoftDeletedConsistency(filesByPath, softDeletedPath); err != nil {
+	if err := r.checkSoftDeletedConsistency(filesByPath, softDeletedPath, syncRunID); err != nil {
 		logger.Error("Failed to check soft deleted consistency: %v", err)
 	}
 
@@ -1134,8 +1161,18 @@ type statusIntent struct {
 }
 
 // convergeReplicaStatus ensures replicas are moved to/from soft-deleted based on main account status
-func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath string) error {
+func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath string, syncRunID int64) error {
 	mainAccounts := r.buildMainAccountSet()
+
+	var doneCopies map[string]bool
+	if syncRunID > 0 {
+		var err error
+		doneCopies, err = r.db.BatchCheckSyncCopyDone(syncRunID)
+		if err != nil {
+			logger.Warning("Failed to load sync copy log for run %d: %v", syncRunID, err)
+			doneCopies = nil
+		}
+	}
 
 	filesByCalculatedID := make(map[string][]*model.File, len(files))
 	for _, f := range files {
@@ -1194,25 +1231,37 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 					if replicaInSoftDeleted {
 						continue
 					}
+					if syncRunID > 0 && doneCopies != nil && doneCopies[f.ID+"\x00soft-delete-"+string(replica.Provider)] {
+						continue
+					}
 					wg.Add(1)
 					sem <- struct{}{}
-					go func(rep *model.Replica, fname string) {
+					go func(rep *model.Replica, fname string, fileID string) {
 						defer wg.Done()
 						defer func() { <-sem }()
 						r.softDeleteReplica(rep, fname, softDeletedPath)
-					}(replica, f.Name)
+						if syncRunID > 0 {
+							r.db.LogSyncCopy(syncRunID, fileID, "soft-delete-"+string(rep.Provider))
+						}
+					}(replica, f.Name, f.ID)
 
 				case "active":
 					if !replicaInSoftDeleted || intent.ActivePath == "" || replica.Provider == model.ProviderTelegram {
 						continue
 					}
+					if syncRunID > 0 && doneCopies != nil && doneCopies[f.ID+"\x00restore-"+string(replica.Provider)] {
+						continue
+					}
 					wg.Add(1)
 					sem <- struct{}{}
-					go func(rep *model.Replica, fname, apath string) {
+					go func(rep *model.Replica, fname, apath string, fileID string) {
 						defer wg.Done()
 						defer func() { <-sem }()
 						r.moveReplicaToPath(rep, fname, apath)
-					}(replica, f.Name, intent.ActivePath)
+						if syncRunID > 0 {
+							r.db.LogSyncCopy(syncRunID, fileID, "restore-"+string(rep.Provider))
+						}
+					}(replica, f.Name, intent.ActivePath, f.ID)
 				}
 			}
 		}
@@ -2062,9 +2111,19 @@ func (r *Runner) getUser(provider model.Provider, accountID string) *model.User 
 }
 
 // checkSoftDeletedConsistency ensures that if a file is in soft-deleted in one provider, it moves it there for others.
-func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string) error {
+func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string, syncRunID int64) error {
 	// Map CalculatedID -> SoftDeletedFile (if exists)
 	softDeletedIDs := make(map[string]*model.File)
+
+	var doneCopies map[string]bool
+	if syncRunID > 0 {
+		var err error
+		doneCopies, err = r.db.BatchCheckSyncCopyDone(syncRunID)
+		if err != nil {
+			logger.Warning("Failed to load sync copy log for run %d: %v", syncRunID, err)
+			doneCopies = nil
+		}
+	}
 
 	for path, fileMap := range filesByPath {
 		if strings.Contains(path, softDeletedPath) {
@@ -2127,6 +2186,9 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 
 					// Telegram handling
 					if provider == model.ProviderTelegram {
+						if syncRunID > 0 && doneCopies != nil && doneCopies[file.ID+"\x00soft-del-cons-"+string(provider)] {
+							continue
+						}
 						if tgClient, ok := client.(*telegram.Client); ok {
 							logger.Info("Marking file as deleted on Telegram: %s", file.Name)
 							if err := tgClient.UpdateFileStatus(targetReplica, "deleted"); err != nil {
@@ -2134,8 +2196,15 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 							} else {
 								targetReplica.Status = "deleted"
 								r.db.UpdateReplica(targetReplica)
+								if syncRunID > 0 {
+									r.db.LogSyncCopy(syncRunID, file.ID, "soft-del-cons-"+string(provider))
+								}
 							}
 						}
+						continue
+					}
+
+					if syncRunID > 0 && doneCopies != nil && doneCopies[file.ID+"\x00soft-del-cons-"+string(provider)] {
 						continue
 					}
 
@@ -2148,6 +2217,10 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 
 					if err := client.MoveFile(targetReplica.NativeID, targetFolderID); err != nil {
 						logger.Error("Failed to move file %s to soft-deleted: %v", path, err)
+					} else {
+						if syncRunID > 0 {
+							r.db.LogSyncCopy(syncRunID, file.ID, "soft-del-cons-"+string(provider))
+						}
 					}
 				} else {
 					logger.DryRun("Would move %s to %s in %s", path, targetSoftPath, provider)
