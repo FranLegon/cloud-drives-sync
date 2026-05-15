@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
 	"github.com/FranLegon/cloud-drives-sync/internal/auth"
@@ -188,15 +190,9 @@ func DownloadMetadataDB(cfg *model.Config, dbPath string) error {
 
 // UploadMetadataDB uploads the local metadata.db to all providers
 func UploadMetadataDB(cfg *model.Config, dbPath string) error {
-	file, err := os.Open(dbPath)
+	stat, err := os.Stat(dbPath)
 	if err != nil {
-		return fmt.Errorf("failed to open metadata.db: %w", err)
-	}
-	defer file.Close()
-
-	stat, err := file.Stat()
-	if err != nil {
-		return err
+		return fmt.Errorf("failed to stat metadata.db: %w", err)
 	}
 	size := stat.Size()
 
@@ -252,9 +248,11 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 			}
 		}
 
-		if _, err := file.Seek(0, 0); err != nil {
-			return err
+		file, err := os.Open(dbPath)
+		if err != nil {
+			return fmt.Errorf("failed to open metadata.db: %w", err)
 		}
+		defer file.Close()
 
 		if existingFileID != "" {
 			logger.Info("Updating existing metadata.db on %s (%s)...", user.Provider, user.Email)
@@ -275,17 +273,21 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 	// Standardize path separators for logs
 	// dbPath logic is already standard
 
-	successCount := 0
+	var successCount int32
+	var wg sync.WaitGroup
 	for i := range cfg.Users {
 		user := &cfg.Users[i]
-		// Skip calling upload if token is known invalid? No, createClient handles refreshing.
-
-		if err := uploadToUser(user); err != nil {
-			logger.ErrorTagged(user.LogTags(), "Failed to sync metadata: %v", err)
-		} else {
-			successCount++
-		}
+		wg.Add(1)
+		go func(u *model.User) {
+			defer wg.Done()
+			if err := uploadToUser(u); err != nil {
+				logger.ErrorTagged(u.LogTags(), "Failed to sync metadata: %v", err)
+			} else {
+				atomic.AddInt32(&successCount, 1)
+			}
+		}(user)
 	}
+	wg.Wait()
 
 	if successCount == 0 && len(cfg.Users) > 0 {
 		return fmt.Errorf("failed to upload metadata.db to any provider")
