@@ -109,6 +109,7 @@ $maxIterations = 50
 $iteration = 1
 $sessionMessages = 1
 $maxSessionMessages = 4
+$opencodeTimeoutMs = 7200000 # 2 hours
 while ($iteration -le $maxIterations) {
     # Banner: set terminal tab title (survives TUI apps like opencode) + ANSI row-1 banner (visible between commands)
     $trimmed = $mainPrompt.Trim() -replace '\s+', ' '
@@ -130,7 +131,7 @@ while ($iteration -le $maxIterations) {
         Write-Host "Next iteration focus: $mainPrompt" -ForegroundColor Cyan
         $prompt = ($mainPrompt + $gitClarification)
     }
-    # run OpenCode with 2hr timeout
+    # run OpenCode with timeout
     if ($prompt -eq ($mainPrompt + $gitClarification)) {
         $sessionMessages = 1
         $proc = Start-Process opencode -ArgumentList @("run", $prompt, "--model", $model) -NoNewWindow -PassThru
@@ -138,8 +139,9 @@ while ($iteration -le $maxIterations) {
         $sessionMessages++
         $proc = Start-Process opencode -ArgumentList @("run", "-c", $prompt) -NoNewWindow -PassThru
     }
-    if (-not $proc.WaitForExit(7200000)) {
-        Write-Host "OpenCode timed out after 2 hours. Resetting..." -ForegroundColor Red
+    $timeoutHours = $opencodeTimeoutMs / 3600000
+    if (-not $proc.WaitForExit($opencodeTimeoutMs)) {
+        Write-Host "OpenCode timed out after ${timeoutHours}h. Resetting..." -ForegroundColor Red
         $proc.Kill()
         Reset-WorkingTree
         $prompt = $mainPrompt + $gitClarification
