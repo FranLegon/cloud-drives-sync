@@ -98,6 +98,13 @@ $opencodeConfig | ConvertTo-Json -Depth 10 | Set-Content opencode.json
 
 $model = 'google-vertex/gemini-3.1-pro-preview'
 
+function Reset-WorkingTree {
+    git checkout main --force | Out-Null
+    git clean -fd | Out-Null
+    Remove-Item .commitmsg -ErrorAction SilentlyContinue
+    if (git stash list) { git stash pop | Out-Null }
+}
+
 $maxIterations = 50
 $iteration = 1
 $sessionMessages = 1
@@ -117,10 +124,7 @@ while ($iteration -le $maxIterations) {
     # abort if prompt keeps failing
     if ($sessionMessages -ge $maxSessionMessages) {
         Write-Host "Too many consecutive failed attempts ($sessionMessages). Resetting to a new prompt." -ForegroundColor Red
-        git checkout main --force | Out-Null
-        git clean -fd | Out-Null
-        Remove-Item .commitmsg -ErrorAction SilentlyContinue
-        if (git stash list) { git stash pop | Out-Null }
+        Reset-WorkingTree
         $iteration++
         $mainPrompt = Select-WeightedPrompt
         Write-Host "Next iteration focus: $mainPrompt" -ForegroundColor Cyan
@@ -137,19 +141,13 @@ while ($iteration -le $maxIterations) {
     if (-not $proc.WaitForExit(7200000)) {
         Write-Host "OpenCode timed out after 2 hours. Resetting..." -ForegroundColor Red
         $proc.Kill()
-        git checkout main --force | Out-Null
-        git clean -fd | Out-Null
-        Remove-Item .commitmsg -ErrorAction SilentlyContinue
-        if (git stash list) { git stash pop | Out-Null }
+        Reset-WorkingTree
         $prompt = $mainPrompt + $gitClarification
         continue
     }
     if ($proc.ExitCode -ne 0) { 
         Write-Host "OpenCode execution failed. Checking out to main and resetting to discard any changes..." -ForegroundColor Red
-        git checkout main --force | Out-Null
-        git clean -fd | Out-Null
-        Remove-Item .commitmsg -ErrorAction SilentlyContinue
-        if (git stash list) { git stash pop | Out-Null }
+        Reset-WorkingTree
         $prompt = $mainPrompt + $gitClarification
         continue
     }
