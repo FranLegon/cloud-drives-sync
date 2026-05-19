@@ -10,9 +10,8 @@ cloud-drives-sync
 *.test
 test.log
 *.log
-logs/*
 logs/**
-logs
+!logs/tests_by_commit_summary.csv
 
 # Output of the go coverage tool
 *.out
