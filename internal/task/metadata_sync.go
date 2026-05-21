@@ -109,6 +109,10 @@ func getMetadataFileID(client api.CloudClient, user *model.User, auxID string) (
 			}
 		}
 		if match {
+			// Telegram needs the numeric message ID (NativeID), not the logical file UUID
+			if user.Provider == model.ProviderTelegram && len(f.Replicas) > 0 {
+				return f.Replicas[0].NativeID, nil
+			}
 			return f.ID, nil
 		}
 	}
@@ -128,34 +132,34 @@ func DownloadMetadataDB(cfg *model.Config, dbPath string) error {
 	tryDownload := func(user *model.User) error {
 		return api.WithRetry(func() error {
 			client, err := createClient(user, cfg, true)
-		if err != nil {
-			return err
-		}
+			if err != nil {
+				return err
+			}
 
-		rootID, err := client.GetSyncFolderID()
-		if err != nil {
-			return err
-		}
+			rootID, err := client.GetSyncFolderID()
+			if err != nil {
+				return err
+			}
 
-		auxID, err := getAuxFolderID(client, user, rootID, false)
-		if err != nil {
-			return err
-		}
+			auxID, err := getAuxFolderID(client, user, rootID, false)
+			if err != nil {
+				return err
+			}
 
-		fileID, err := getMetadataFileID(client, user, auxID)
-		if err != nil {
-			return err
-		}
+			fileID, err := getMetadataFileID(client, user, auxID)
+			if err != nil {
+				return err
+			}
 
-		// Create file locally
-		out, err := os.Create(dbPath)
-		if err != nil {
-			return err
-		}
-		defer out.Close()
+			// Create file locally
+			out, err := os.Create(dbPath)
+			if err != nil {
+				return err
+			}
+			defer out.Close()
 
-		logger.Info("Downloading metadata.db from %s (%s)...", user.Provider, user.Email)
-		if err := client.DownloadFile(fileID, out); err != nil {
+			logger.Info("Downloading metadata.db from %s (%s)...", user.Provider, user.Email)
+			if err := client.DownloadFile(fileID, out); err != nil {
 				out.Close()
 				os.Remove(dbPath) // Clean up partial
 				return err
@@ -201,65 +205,65 @@ func UploadMetadataDB(cfg *model.Config, dbPath string) error {
 	uploadToUser := func(user *model.User) error {
 		return api.WithRetry(func() error {
 			client, err := createClient(user, cfg, true)
-		if err != nil {
-			return err
-		}
-
-		rootID, err := client.GetSyncFolderID()
-		if err != nil {
-			return err
-		}
-
-		// Find or Create Aux Folder
-		auxID, err := getAuxFolderID(client, user, rootID, true)
-		if err != nil {
-			return err
-		}
-
-		// Check for existing metadata.db to overwrite or Create
-		// We do this BEFORE ListFolders(auxID) so that if getMetadataFileID (which calls ListFiles)
-		// succeeds, it populates the folder cache and saves ListFolders an API call.
-		existingFileID, err := getMetadataFileID(client, user, auxID)
-		if err != nil && !strings.Contains(err.Error(), "not found in aux folder") {
-			return err
-		}
-
-		// Ensure soft-deleted folder exists
-		if user.Provider == model.ProviderTelegram {
-			if _, err := client.CreateFolder(auxID, SoftDeletedFolder); err != nil {
-				return fmt.Errorf("failed to create soft-deleted folder: %w", err)
-			}
-		} else {
-			folders, err := client.ListFolders(auxID)
 			if err != nil {
-				return fmt.Errorf("failed to list folders in aux: %w", err)
+				return err
 			}
-			foundSoftDeleted := false
-			for _, f := range folders {
-				if f.Name == SoftDeletedFolder {
-					foundSoftDeleted = true
-					break
-				}
+
+			rootID, err := client.GetSyncFolderID()
+			if err != nil {
+				return err
 			}
-			if !foundSoftDeleted {
+
+			// Find or Create Aux Folder
+			auxID, err := getAuxFolderID(client, user, rootID, true)
+			if err != nil {
+				return err
+			}
+
+			// Check for existing metadata.db to overwrite or Create
+			// We do this BEFORE ListFolders(auxID) so that if getMetadataFileID (which calls ListFiles)
+			// succeeds, it populates the folder cache and saves ListFolders an API call.
+			existingFileID, err := getMetadataFileID(client, user, auxID)
+			if err != nil && !strings.Contains(err.Error(), "not found in aux folder") {
+				return err
+			}
+
+			// Ensure soft-deleted folder exists
+			if user.Provider == model.ProviderTelegram {
 				if _, err := client.CreateFolder(auxID, SoftDeletedFolder); err != nil {
 					return fmt.Errorf("failed to create soft-deleted folder: %w", err)
 				}
+			} else {
+				folders, err := client.ListFolders(auxID)
+				if err != nil {
+					return fmt.Errorf("failed to list folders in aux: %w", err)
+				}
+				foundSoftDeleted := false
+				for _, f := range folders {
+					if f.Name == SoftDeletedFolder {
+						foundSoftDeleted = true
+						break
+					}
+				}
+				if !foundSoftDeleted {
+					if _, err := client.CreateFolder(auxID, SoftDeletedFolder); err != nil {
+						return fmt.Errorf("failed to create soft-deleted folder: %w", err)
+					}
+				}
 			}
-		}
 
-		file, err := os.Open(dbPath)
-		if err != nil {
-			return fmt.Errorf("failed to open metadata.db: %w", err)
-		}
-		defer file.Close()
-
-		if existingFileID != "" {
-			logger.Info("Updating existing metadata.db on %s (%s)...", user.Provider, user.Email)
-			if err := client.UpdateFile(existingFileID, file, size); err != nil {
-				return fmt.Errorf("failed to update metadata.db: %w", err)
+			file, err := os.Open(dbPath)
+			if err != nil {
+				return fmt.Errorf("failed to open metadata.db: %w", err)
 			}
-		} else {
+			defer file.Close()
+
+			if existingFileID != "" {
+				logger.Info("Updating existing metadata.db on %s (%s)...", user.Provider, user.Email)
+				if err := client.UpdateFile(existingFileID, file, size); err != nil {
+					return fmt.Errorf("failed to update metadata.db: %w", err)
+				}
+			} else {
 				logger.Info("Uploading new metadata.db to %s (%s)...", user.Provider, user.Email)
 				if _, err := client.UploadFile(auxID, MetadataFileName, file, size); err != nil {
 					return fmt.Errorf("failed to upload metadata.db: %w", err)
