@@ -204,6 +204,7 @@ func interactiveUpdate() error {
 			"Update Microsoft Client Credentials",
 			"Update Telegram Client Credentials",
 			"Update Main Account",
+			"Repair Share Permissions",
 			"Cancel",
 		},
 	}
@@ -222,6 +223,9 @@ func interactiveUpdate() error {
 		return updateTelegramCredentials(cfg, password)
 	case "Update Main Account":
 		return updateMainAccount(cfg, password)
+	case "Repair Share Permissions":
+		runner := task.NewRunner(cfg, nil, false)
+		return runner.ShareWithMain()
 	case "Cancel":
 		return nil
 	}
