@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"strings"
 	"time"
 
@@ -95,6 +97,59 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 			logger.Info("Test log archived to: %s", archivedLogPath)
 		}
 	}()
+
+	// Start CPU profiling
+	pprofTimestamp := time.Now().Format("2006-Jan-02_15-04-05")
+	pprofDir := filepath.Join("logs", "prof")
+	pprofPath := filepath.Join(pprofDir, fmt.Sprintf("cpu_%s.prof", pprofTimestamp))
+	if err := os.MkdirAll(pprofDir, 0755); err != nil {
+		return fmt.Errorf("failed to create logs/prof directory for pprof: %w", err)
+	}
+	pprofFile, err := os.Create(pprofPath)
+	if err != nil {
+		return fmt.Errorf("failed to create pprof file: %w", err)
+	}
+	if err := pprof.StartCPUProfile(pprofFile); err != nil {
+		pprofFile.Close()
+		return fmt.Errorf("failed to start CPU profile: %w", err)
+	}
+	defer func() {
+		pprof.StopCPUProfile()
+		pprofFile.Close()
+		logger.Info("CPU profile saved to: %s", pprofPath)
+
+		// Write memory (heap) profile
+		memPath := filepath.Join(pprofDir, fmt.Sprintf("mem_%s.prof", pprofTimestamp))
+		memFile, err := os.Create(memPath)
+		if err != nil {
+			logger.Warning("Failed to create memory profile: %v", err)
+		} else {
+			if err := pprof.WriteHeapProfile(memFile); err != nil {
+				logger.Warning("Failed to write memory profile: %v", err)
+			} else {
+				logger.Info("Memory profile saved to: %s", memPath)
+			}
+			memFile.Close()
+		}
+
+		// Write block (IO/contention) profile
+		blockPath := filepath.Join(pprofDir, fmt.Sprintf("block_%s.prof", pprofTimestamp))
+		blockFile, err := os.Create(blockPath)
+		if err != nil {
+			logger.Warning("Failed to create block profile: %v", err)
+		} else {
+			if err := pprof.Lookup("block").WriteTo(blockFile, 0); err != nil {
+				logger.Warning("Failed to write block profile: %v", err)
+			} else {
+				logger.Info("Block profile saved to: %s", blockPath)
+			}
+			blockFile.Close()
+		}
+	}()
+
+	// Enable block profiling for IO/contention tracking
+	runtime.SetBlockProfileRate(1)
+	defer runtime.SetBlockProfileRate(0)
 
 	testRuntimes := map[int]time.Duration{}
 	totalStart := time.Now()
@@ -250,7 +305,10 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 			// Commit
 			commitMsg := strings.TrimSpace(testWithCommit)
 			if commitMsg == "" || commitMsg == "__auto__" {
-				if stat, err := runGit("diff", "--cached", "--stat"); err == nil && strings.TrimSpace(stat) != "" {
+				if msgBytes, err := os.ReadFile(".commitmsg"); err == nil && len(strings.TrimSpace(string(msgBytes))) > 0 {
+					commitMsg = strings.TrimSpace(string(msgBytes))
+					os.Remove(".commitmsg")
+				} else if stat, err := runGit("diff", "--cached", "--stat"); err == nil && strings.TrimSpace(stat) != "" {
 					commitMsg = stat
 				} else {
 					commitMsg = fmt.Sprintf("Test Run: %s", time.Now().Format("02Jan2006 15:04:05"))
