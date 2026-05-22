@@ -641,7 +641,7 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 							t.Free -= file.Size
 							t.Quota.Used += file.Size
 							r.updateQuotaUsed(&t.User, file.Size)
-							
+
 							source.Quota.Used -= file.Size
 							source.Free += file.Size
 							r.updateQuotaUsed(&source.User, -file.Size)
@@ -1225,6 +1225,12 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 					continue
 				}
 
+				// For Google shared files, only the owner can move the file.
+				// Skip non-owner replicas; the owner's replica will handle the move.
+				if replica.Provider == model.ProviderGoogle && replica.Owner != "" && replica.Owner != replica.AccountID {
+					continue
+				}
+
 				replicaInSoftDeleted := strings.Contains(replica.Path, softDeletedPath) || strings.Contains(replica.Path, softPathWin)
 
 				switch intent.Status {
@@ -1338,13 +1344,50 @@ func (r *Runner) moveReplicaToPath(replica *model.Replica, fileName, targetPath 
 	}
 
 	if err := client.MoveFile(replica.NativeID, destID); err != nil {
-		logger.Error("Move failed path=%q provider=%s target_path=%q native_id=%s: %v", fileName, replica.Provider, targetPath, replica.NativeID, err)
-		return
+		// If move failed with 404, the cached folder ID may be stale; invalidate and retry once
+		if strings.Contains(err.Error(), "404") || strings.Contains(err.Error(), "notFound") {
+			logger.Warning("Move got 404, invalidating folder cache and retrying for %s on %s", fileName, replica.Provider)
+			r.invalidateFolderCache(replica.Provider, client.GetUserIdentifier(), targetDir)
+			destID, err = r.ensureFolderStructure(client, targetDir, replica.Provider)
+			if err != nil {
+				logger.Error("Failed to ensure folder structure on retry for %s: %v", targetDir, err)
+				return
+			}
+			if err := client.MoveFile(replica.NativeID, destID); err != nil {
+				logger.Error("Move failed after retry path=%q provider=%s target_path=%q native_id=%s: %v", fileName, replica.Provider, targetPath, replica.NativeID, err)
+				return
+			}
+		} else {
+			logger.Error("Move failed path=%q provider=%s target_path=%q native_id=%s: %v", fileName, replica.Provider, targetPath, replica.NativeID, err)
+			return
+		}
 	}
 
 	replica.Path = model.NormalizePath(filepath.Join(targetDir, fileName))
 	if err := r.db.UpdateReplica(replica); err != nil {
 		logger.Warning("Failed to update replica path in DB: %v", err)
+	}
+}
+
+// invalidateFolderCache removes cached folder IDs for a path and all its parent segments for the given account.
+func (r *Runner) invalidateFolderCache(provider model.Provider, accountID, path string) {
+	cachePrefix := model.GenerateCacheKey(provider, accountID) + ":"
+	path = strings.Trim(path, "/\\")
+
+	// Invalidate the full path and all parent segments
+	r.folderCache.Delete(cachePrefix + path)
+	parts := strings.Split(path, "/")
+	current := ""
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		if current == "" {
+			current = part
+		} else {
+			current += "/" + part
+		}
+		r.folderCache.Delete(cachePrefix + current)
 	}
 }
 
@@ -1716,12 +1759,22 @@ func (r *Runner) syncFolderStructures() error {
 		}
 	}
 
+	// Process main accounts first so they create (and own) the folders
+	// before backup accounts attempt to access them.
+	var mainUsers, backupUsers []*model.User
 	for i := range r.config.Users {
 		u := &r.config.Users[i]
 		if u.Provider == model.ProviderTelegram {
 			continue
 		}
+		if u.IsMain {
+			mainUsers = append(mainUsers, u)
+		} else {
+			backupUsers = append(backupUsers, u)
+		}
+	}
 
+	for _, u := range append(mainUsers, backupUsers...) {
 		logger.InfoTagged(u.LogTags(), "Verifying folder structure...")
 		client, err := r.GetOrCreateClient(u)
 		if err != nil {
@@ -1736,7 +1789,99 @@ func (r *Runner) syncFolderStructures() error {
 		}
 	}
 
+	// Transfer ownership of Google folders not owned by the main account
+	r.claimGoogleFolderOwnership()
+
 	return nil
+}
+
+// claimGoogleFolderOwnership transfers ownership of Google folders to the main account.
+// In a shared folder, any account that creates a sub-folder becomes its owner.
+// The main account should own all folders so it retains full control.
+func (r *Runner) claimGoogleFolderOwnership() {
+	googleMain := config.GetMainAccount(r.config, model.ProviderGoogle)
+	if googleMain == nil {
+		return
+	}
+
+	mainClient, err := r.GetOrCreateClient(googleMain)
+	if err != nil {
+		logger.Warning("Failed to get main account client for folder ownership: %v", err)
+		return
+	}
+
+	allFolders, err := r.db.GetAllFolders()
+	if err != nil {
+		logger.Warning("Failed to get folders for ownership check: %v", err)
+		return
+	}
+
+	for _, folder := range allFolders {
+		if folder.Provider != model.ProviderGoogle {
+			continue
+		}
+		// Skip folders already owned by main or with unknown owner
+		if folder.OwnerEmail == "" || folder.OwnerEmail == googleMain.Email {
+			continue
+		}
+
+		// The current owner must initiate the transfer
+		ownerUser := r.getUser(model.ProviderGoogle, folder.OwnerEmail)
+		if ownerUser == nil {
+			continue
+		}
+
+		ownerClient, err := r.GetOrCreateClient(ownerUser)
+		if err != nil {
+			logger.Warning("Failed to get client for folder owner %s: %v", folder.OwnerEmail, err)
+			continue
+		}
+
+		if r.safeMode {
+			logger.DryRun("Would transfer folder %q ownership from %s to %s", folder.Path, folder.OwnerEmail, googleMain.Email)
+			continue
+		}
+
+		logger.Info("Transferring folder %q ownership from %s to %s", folder.Path, folder.OwnerEmail, googleMain.Email)
+		err = ownerClient.TransferOwnership(folder.ID, googleMain.Email)
+
+		if err == api.ErrOwnershipTransferPending {
+			// Pending transfer — main account needs to accept
+			if acceptErr := mainClient.AcceptOwnership(folder.ID); acceptErr != nil {
+				logger.Warning("Failed to accept folder %q ownership: %v", folder.Path, acceptErr)
+				continue
+			}
+			logger.Info("Accepted folder %q ownership", folder.Path)
+			// Move folder back into sync folder structure
+			targetDir := strings.Trim(filepath.Dir(folder.Path), "/\\")
+			if destID, fErr := r.ensureFolderStructure(mainClient, targetDir, model.ProviderGoogle); fErr == nil {
+				mainClient.MoveFile(folder.ID, destID)
+			}
+		} else if err != nil {
+			errStr := err.Error()
+			if strings.Contains(errStr, "404") || strings.Contains(errStr, "notFound") {
+				// Folder no longer exists — remove stale DB entry
+				logger.Info("Removing stale folder entry %q (no longer exists)", folder.Path)
+				r.db.DeleteFolder(folder.ID)
+				continue
+			}
+			if strings.Contains(errStr, "ONLY_PENDING_OWNER_CAN_BECOME_NEW_OWNER") {
+				// A pending transfer already exists — main account just needs to accept
+				if acceptErr := mainClient.AcceptOwnership(folder.ID); acceptErr != nil {
+					logger.Warning("Failed to accept pending folder %q ownership: %v", folder.Path, acceptErr)
+					continue
+				}
+				logger.Info("Accepted pending folder %q ownership", folder.Path)
+			} else {
+				logger.Warning("Failed to transfer folder %q ownership: %v", folder.Path, err)
+				continue
+			}
+		}
+
+		// Update DB
+		folder.OwnerEmail = googleMain.Email
+		r.db.InsertFolder(folder)
+	}
 }
 
 // DeleteUnsyncedFiles deletes files in backup accounts that are not in the sync folder

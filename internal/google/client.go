@@ -392,15 +392,25 @@ func (c *Client) DeleteFile(fileID string) error {
 
 // MoveFile moves a file to a different folder
 func (c *Client) MoveFile(fileID, targetFolderID string) error {
-	file, err := c.service.Files.Get(fileID).Fields("parents").Do()
+	file, err := c.service.Files.Get(fileID).Fields("parents").SupportsAllDrives(true).Do()
 	if err != nil {
 		return fmt.Errorf("failed to get file: %w", err)
 	}
 
-	updateCall := c.service.Files.Update(fileID, &drive.File{}).AddParents(targetFolderID)
+	// If the file is already in the target folder, nothing to do
+	for _, p := range file.Parents {
+		if p == targetFolderID {
+			return nil
+		}
+	}
+
+	updateCall := c.service.Files.Update(fileID, &drive.File{}).
+		AddParents(targetFolderID).
+		SupportsAllDrives(true)
 
 	if len(file.Parents) > 0 {
-		updateCall = updateCall.RemoveParents(file.Parents[0])
+		// Remove ALL current parents to avoid "cannotAddParent" error
+		updateCall = updateCall.RemoveParents(strings.Join(file.Parents, ","))
 	}
 
 	_, err = updateCall.Do()
@@ -443,7 +453,6 @@ func (c *Client) CreateFolder(parentID, name string) (*model.Folder, error) {
 
 	return result, nil
 }
-
 
 // EmptySyncFolder recursively deletes all items inside the sync folder and the folder itself.
 // It deletes files first, then folders from inner to outer.
