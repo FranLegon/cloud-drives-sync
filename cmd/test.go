@@ -2232,6 +2232,19 @@ func testMetadata(runner *task.Runner) error {
 				continue
 			}
 
+			// Skip replicas belonging to a soft-deleted logical file. Their rows remain
+			// "active" (pending hard-delete) but the physical file lives in the soft-deleted
+			// aux folder. For shared Google files (a single physical copy shared across all
+			// accounts via one NativeID) the moved file may not be visible in every account's
+			// listing, so per-account presence is not guaranteed. This mirrors the Cloud -> DB
+			// pass below which already tolerates soft-deleted files.
+			if r.FileID != "" {
+				if file, _ := db.GetFileByID(r.FileID); file != nil && file.Status == "softdeleted" {
+					delete(cloudFiles, r.NativeID)
+					continue
+				}
+			}
+
 			// Special handling for Telegram which aggregates fragments in ListFiles
 			// Ideally we should check if ListFiles returns fragments or files.
 			// Currently Telegram ListFiles returns aggregated Files, so we match against Reference NativeID (Part 1).
