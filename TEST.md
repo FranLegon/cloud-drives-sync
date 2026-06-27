@@ -27,6 +27,14 @@ Get-Content .env | ForEach-Object { if ($_ -match '^(.*?)=(.*)$') { Set-Item -Pa
 go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --with-commit
 ```
 
+# Test specific test case
+```powershell
+#Load .env variables into environment:
+Get-Content .env | ForEach-Object { if ($_ -match '^(.*?)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] } }
+#Run specific test case:
+go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --test-case "TestCaseNumber"
+```
+
 <!--
 # Compare current vs last commit results:
 ```powershell
