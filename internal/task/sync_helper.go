@@ -99,6 +99,7 @@ func (r *Runner) transferOwnershipWithFallback(sourceClient api.CloudClient, tar
 	}
 	return err
 }
+
 // It is safe to call concurrently; a mutex prevents duplicate folder creation.
 func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, provider model.Provider) (string, error) {
 	// Telegram doesn't support folders, so just return the path
@@ -110,8 +111,11 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		return path, nil
 	}
 
-	// Clean path and split
-	path = strings.Trim(path, "/\\")
+	// Clean path and split. Cloud paths always use forward slashes; normalize any
+	// OS-specific separators (e.g. backslashes introduced by filepath.Dir/Join on
+	// Windows) so the path is split into individual nested folders rather than a
+	// single folder whose name contains separators.
+	path = strings.Trim(model.NormalizePath(path), "/")
 	if path == "" || path == "." {
 		return client.GetSyncFolderID()
 	}
@@ -126,8 +130,8 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 		return cachedID.(string), nil
 	}
 
-	// Quick fast-path lookup in DB is redundant since PreloadFolderCache 
-	// loads all DB folders into memory, and any new folders are added 
+	// Quick fast-path lookup in DB is redundant since PreloadFolderCache
+	// loads all DB folders into memory, and any new folders are added
 	// to the cache. We only need the memory cache check.
 
 	mu := r.getAccountFolderLock(provider, accountID)

@@ -1083,14 +1083,19 @@ func (r *Runner) SyncProviders(syncRunID int64) error {
 
 	softDeletedPath := AuxFolder + "/" + SoftDeletedFolder
 
+	// Google is the source of truth. Compute Google's authoritative verdict
+	// (active vs soft-deleted) per content so that, when providers disagree,
+	// Google's state always wins.
+	googleVerdict := computeGoogleVerdict(files, softDeletedPath)
+
 	// Phase 1: Converge soft-deleted status across providers
-	if err := r.convergeReplicaStatus(files, softDeletedPath, syncRunID); err != nil {
+	if err := r.convergeReplicaStatus(files, softDeletedPath, syncRunID, googleVerdict); err != nil {
 		return fmt.Errorf("status convergence failed: %w", err)
 	}
 
 	// Phase 2: Copy missing files and resolve conflicts
 	filesByPath := buildFilesByPath(files)
-	if err := r.syncMissingAndConflicts(filesByPath, softDeletedPath, syncRunID); err != nil {
+	if err := r.syncMissingAndConflicts(filesByPath, softDeletedPath, syncRunID, googleVerdict); err != nil {
 		return err
 	}
 
@@ -1161,8 +1166,52 @@ type statusIntent struct {
 	SoftPath   string
 }
 
-// convergeReplicaStatus ensures replicas are moved to/from soft-deleted based on main account status
-func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath string, syncRunID int64) error {
+// computeGoogleVerdict returns Google's authoritative status per content
+// (calculated_id). Google is the source of truth: when providers disagree,
+// Google's state wins.
+//   - If Google has an active replica outside the soft-deleted folder, the
+//     content is "active" (located at that path).
+//   - If Google only has active replica(s) inside the soft-deleted folder, the
+//     content is "soft-deleted".
+//
+// Contents where Google has no active replica are absent from the map, meaning
+// Google has no opinion and callers should fall back to other providers.
+func computeGoogleVerdict(files []*model.File, softDeletedPath string) map[string]statusIntent {
+	softPathWin := strings.ReplaceAll(softDeletedPath, "/", "\\")
+	inSoft := func(p string) bool {
+		return strings.Contains(p, softDeletedPath) || strings.Contains(p, softPathWin)
+	}
+
+	verdict := make(map[string]statusIntent)
+	for _, f := range files {
+		if f.CalculatedID == "" {
+			continue
+		}
+		for _, replica := range f.Replicas {
+			if replica.Provider != model.ProviderGoogle || replica.Status != "active" {
+				continue
+			}
+			v := verdict[f.CalculatedID]
+			if inSoft(replica.Path) {
+				// An active root replica always wins over a soft-deleted one.
+				if v.Status != "active" {
+					v.Status = "soft-deleted"
+					v.SoftPath = replica.Path
+				}
+			} else {
+				v.Status = "active"
+				v.ActivePath = replica.Path
+			}
+			verdict[f.CalculatedID] = v
+		}
+	}
+	return verdict
+}
+
+// convergeReplicaStatus ensures replicas are moved to/from soft-deleted based on
+// Google's authoritative status (falling back to the main account when Google
+// has no replica for the content).
+func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath string, syncRunID int64, googleVerdict map[string]statusIntent) error {
 	mainAccounts := r.buildMainAccountSet()
 
 	var doneCopies map[string]bool
@@ -1175,22 +1224,38 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 		}
 	}
 
+	// Index every file by content id, regardless of logical status, so that
+	// soft-deleted contents are converged too (not only active ones).
 	filesByCalculatedID := make(map[string][]*model.File, len(files))
 	for _, f := range files {
-		if f.Status != "active" || f.CalculatedID == "" {
+		if f.CalculatedID == "" {
 			continue
 		}
 		filesByCalculatedID[f.CalculatedID] = append(filesByCalculatedID[f.CalculatedID], f)
 	}
 
-	intents := make(map[string]statusIntent, len(filesByCalculatedID))
 	softPathWin := strings.ReplaceAll(softDeletedPath, "/", "\\")
+	inSoftFn := func(p string) bool {
+		return strings.Contains(p, softDeletedPath) || strings.Contains(p, softPathWin)
+	}
+
+	// Seed intents with Google's authoritative verdict. Google always wins.
+	intents := make(map[string]statusIntent, len(filesByCalculatedID))
+	for cid, v := range googleVerdict {
+		intents[cid] = v
+	}
+
+	// Fallback only for contents where Google has no opinion: derive the intent
+	// from the main account replica / logical path as before.
 	for _, f := range files {
 		if f.Status != "active" || f.CalculatedID == "" {
 			continue
 		}
+		if _, decided := googleVerdict[f.CalculatedID]; decided {
+			continue
+		}
 
-		inSoftDeleted := strings.Contains(f.Path, softDeletedPath) || strings.Contains(f.Path, softPathWin)
+		inSoftDeleted := inSoftFn(f.Path)
 
 		for _, replica := range f.Replicas {
 			if replica.Status != "active" {
@@ -1421,7 +1486,7 @@ func sortFilesBySizeDesc(files []*model.File) {
 
 // syncMissingAndConflicts copies missing files across providers, resolves conflicts, and enforces soft-delete placement.
 // syncRunID is used to skip files already copied in a previous attempt of this run (crash recovery).
-func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string, syncRunID int64) error {
+func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string, syncRunID int64, googleVerdict map[string]statusIntent) error {
 	// Determine active providers from config
 	activeProviders := make(map[model.Provider]bool)
 	for _, u := range r.config.Users {
@@ -1458,6 +1523,14 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 
 		masterFile := getMasterFile(fileMap)
 		if masterFile == nil {
+			continue
+		}
+
+		// Google is authoritative: if Google has soft-deleted this content, never
+		// re-create it at an active (root) location on any provider. The
+		// convergence phase is responsible for moving the stragglers into
+		// soft-deleted instead.
+		if v, ok := googleVerdict[masterFile.CalculatedID]; ok && v.Status == "soft-deleted" {
 			continue
 		}
 
@@ -1853,7 +1926,7 @@ func (r *Runner) claimGoogleFolderOwnership() {
 			}
 			logger.Info("Accepted folder %q ownership", folder.Path)
 			// Move folder back into sync folder structure
-			targetDir := strings.Trim(filepath.Dir(folder.Path), "/\\")
+			targetDir := strings.Trim(model.NormalizePath(filepath.Dir(folder.Path)), "/")
 			if destID, fErr := r.ensureFolderStructure(mainClient, targetDir, model.ProviderGoogle); fErr == nil {
 				mainClient.MoveFile(folder.ID, destID)
 			}
