@@ -5,20 +5,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var deleteUnsyncedFilesCmd = &cobra.Command{
-	Use:   "delete-unsynced-files",
-	Short: "Delete files in backup accounts that are not in the sync folder",
-	Long: `Iterates through all backup accounts and deletes any files or folders
-found in the root directory that are not the designated 'cloud-drives-sync' folder.
-This ensures backup accounts only contain synced data.`,
-	RunE: runDeleteUnsyncedFiles,
-}
-
-func init() {
-	rootCmd.AddCommand(deleteUnsyncedFilesCmd)
-}
-
-func runDeleteUnsyncedFiles(cmd *cobra.Command, args []string) error {
+// runSyncUnsyncedFiles handles `sync --sync-unsynced-files`.
+// TODO(Phase 2): per SPEC this must MOVE Google backup root files into
+// cloud-drives-sync-aux/unsynced-from-backups rather than delete them.
+func runSyncUnsyncedFiles(cmd *cobra.Command, args []string) error {
 	logger.Info("Starting cleanup of unsynced files...")
 	if err := sharedRunner.DeleteUnsyncedFiles(); err != nil {
 		return err

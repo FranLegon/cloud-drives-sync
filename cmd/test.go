@@ -1,3 +1,5 @@
+//go:build !auto
+
 package cmd
 
 import (

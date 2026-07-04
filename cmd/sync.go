@@ -8,13 +8,12 @@ import (
 
 var syncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Run full synchronization workflow",
-	Long: `Runs a complete synchronization sequence:
-1. quota: Check storage quotas (and update metadata)
-2. free-main: Transfer files from main account to backup
-3. remove-duplicates-unsafe (or remove-duplicates if --safe): Clean up duplicates
-4. verbose sync-providers: Synchronize files across providers
-5. balance-storage: Re-distribute files to balance usage across backup accounts`,
+	Short: "Operate and maintain the pool",
+	Long: `With no action flag, runs the full synchronization workflow in order:
+  sync-unsynced-files -> quota -> free-main -> remove-duplicates
+  -> sync-providers -> balance-storage
+
+Provide exactly one action flag to run only that operation.`,
 	Annotations: map[string]string{
 		"writesDB":         "true",
 		"autoBuildAllowed": "true",
@@ -23,10 +22,18 @@ var syncCmd = &cobra.Command{
 }
 
 func init() {
+	registerSyncActionFlags(syncCmd)
 	rootCmd.AddCommand(syncCmd)
 }
 
 func runSync(cmd *cobra.Command, args []string) error {
+	handled, err := dispatchSyncAction(cmd)
+	if err != nil {
+		return err
+	}
+	if handled {
+		return nil
+	}
 	return SyncAction(sharedRunner, safeMode)
 }
 

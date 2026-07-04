@@ -27,7 +27,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-var syncFolderPrefix = "cloud-drives-sync"
+var syncFolderPrefix = "cloud-drives-sync-root"
 
 const (
 	FakeShortcutExtension = ".placeholder"

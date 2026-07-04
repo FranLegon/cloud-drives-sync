@@ -20,24 +20,6 @@ var (
 	getJsonFlag bool
 )
 
-var initCmd = &cobra.Command{
-	Use:   "init",
-	Short: "Initialize the application or add a main account",
-	Long: `Initialize the application for first-time use by setting up encryption,
-creating configuration files, and initializing the database. Can also be used
-to add main accounts for Google Drive and Microsoft OneDrive.`,
-	Annotations: map[string]string{
-		"skipSetup": "true",
-	},
-	RunE: runInit,
-}
-
-func init() {
-	initCmd.Flags().StringVarP(&jsonFlag, "json", "j", "", "JSON string containing client credentials")
-	initCmd.Flags().BoolVarP(&getJsonFlag, "getjson", "g", false, "Output configuration as JSON string")
-	rootCmd.AddCommand(initCmd)
-}
-
 func runInit(cmd *cobra.Command, args []string) error {
 	// Check if this is first-time initialization
 	if !config.ConfigExists() {

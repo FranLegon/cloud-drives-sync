@@ -5,18 +5,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var shareWithMainCmd = &cobra.Command{
-	Use:   "share-with-main",
-	Short: "Verify and repair share permissions with main accounts",
-	Long: `Ensures that all backup accounts have proper permissions to access
-the main account's sync folders. Re-applies permissions if missing.`,
-	RunE: runShareWithMain,
-}
-
-func init() {
-	rootCmd.AddCommand(shareWithMainCmd)
-}
-
 func runShareWithMain(cmd *cobra.Command, args []string) error {
 	if err := sharedRunner.ShareWithMain(); err != nil {
 		return err

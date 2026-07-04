@@ -14,21 +14,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var addAccountCmd = &cobra.Command{
-	Use:   "add-account",
-	Short: "Add a new cloud storage account",
-	Long: `Add a new Google Drive, Microsoft OneDrive, or Telegram account
-to the configuration for synchronization.`,
-	Annotations: map[string]string{
-		"skipPreFlight": "true",
-	},
-	RunE: runAddAccount,
-}
-
-func init() {
-	rootCmd.AddCommand(addAccountCmd)
-}
-
 func runAddAccount(cmd *cobra.Command, args []string) error {
 	// Prompt for provider
 	providerPrompt := promptui.Select{
@@ -102,7 +87,7 @@ func runAddAccount(cmd *cobra.Command, args []string) error {
 		}
 
 	case model.ProviderMicrosoft:
-		syncFolderName := "cloud-drives-sync"
+		syncFolderName := "cloud-drives-sync-root"
 
 		// Create folder in backup account
 		if !safeMode {

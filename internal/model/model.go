@@ -102,14 +102,15 @@ type ProviderQuota struct {
 
 // File represents a logical file
 type File struct {
-	ID           string     // Internal UUID
-	Path         string     // Logical relative path
-	Name         string     // Filename
-	Size         int64      // File size in bytes
-	CalculatedID string     // CONCAT(name, '-', size) for deduplication
-	ModTime      time.Time  // Modification timestamp
-	Status       string     // active, softdeleted, deleted
-	Replicas     []*Replica // Physical copies
+	ID             string     // Internal UUID
+	Path           string     // Logical relative path
+	Name           string     // Filename
+	Size           int64      // File size in bytes
+	CalculatedID   string     // CONCAT(name, '-', size) for deduplication
+	GoogleDriveMD5 string     // Canonical cross-provider identity (SPEC): Google Drive MD5
+	ModTime        time.Time  // Modification timestamp
+	Status         string     // active, softdeleted, deleted
+	Replicas       []*Replica // Physical copies
 }
 
 // Replica represents a physical copy of a file on a cloud provider
@@ -151,6 +152,27 @@ type Folder struct {
 	UserPhone      string
 	ParentFolderID string
 	OwnerEmail     string
+}
+
+// LogicalFolder represents a provider-agnostic folder (SPEC new-model).
+type LogicalFolder struct {
+	ID                    string // Internal UUID
+	Path                  string // Logical relative path
+	Name                  string // Folder name
+	ParentLogicalFolderID string // Parent logical_folder ID (empty for top-level)
+	Status                string // active, soft-deleted, deleted
+}
+
+// FolderReplica represents one physical copy of a logical_folder on a specific account.
+// Google: one replica owned by main and shared. OneDrive: one per backup account. Telegram: none.
+type FolderReplica struct {
+	ID              int64
+	LogicalFolderID string
+	Provider        Provider
+	AccountID       string
+	NativeFolderID  string // provider's stable folder ID
+	Owner           string // owner account
+	LastSeenAt      int64  // last time confirmed to still exist (unix)
 }
 
 // SyncRun represents a tracked sync pipeline execution for crash recovery

@@ -29,9 +29,9 @@ go.work
 # Configuration and data files (should not be committed)
 config.json.enc
 config.salt
-metadata.db
-metadata.db-shm
-metadata.db-wal
+cloud-drives-sync-metadata.db
+cloud-drives-sync-metadata.db-shm
+cloud-drives-sync-metadata.db-wal
 
 # Temporary files
 install_deps.sh

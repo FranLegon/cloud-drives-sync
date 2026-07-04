@@ -19,8 +19,10 @@ import (
 var AuxFolder = "cloud-drives-sync-aux"
 
 const (
-	SoftDeletedFolder = "soft-deleted"
-	MetadataFileName  = "metadata.db"
+	SoftDeletedFolder         = "soft-deleted"
+	HardDeletedFolder         = "hard-deleted"
+	UnsyncedFromBackupsFolder = "unsynced-from-backups"
+	MetadataFileName          = "cloud-drives-sync-metadata.db"
 )
 
 // SetAuxFolder overrides the auxiliary folder name. Used by tests to isolate from production data.

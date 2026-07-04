@@ -8,19 +8,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var quotaCmd = &cobra.Command{
-	Use:   "quota",
-	Short: "Calculate and print total used and available quota for each provider",
-	Long: `Calculates and prints the total used quota and total available quota for each provider,
-aggregating all accounts. It also performs a cross-check to ensure that the used quota
-for any provider does not exceed the available quota of any other provider.`,
-	RunE: runQuota,
-}
-
-func init() {
-	rootCmd.AddCommand(quotaCmd)
-}
-
 func runQuota(cmd *cobra.Command, args []string) error {
 	return QuotaAction(sharedRunner, true)
 }

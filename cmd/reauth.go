@@ -16,23 +16,6 @@ import (
 
 var reauthAll bool
 
-var reauthCmd = &cobra.Command{
-	Use:   "reauth",
-	Short: "Force re-authentication for all accounts",
-	Long: `Clears all saved refresh tokens and forces a new OAuth flow
-for all configured Google and Microsoft accounts.
-Useful if tokens have expired or been revoked.`,
-	Annotations: map[string]string{
-		"skipDB": "true",
-	},
-	RunE: runReauth,
-}
-
-func init() {
-	reauthCmd.Flags().BoolVarP(&reauthAll, "all", "a", false, "Re-authenticate all accounts, not just broken ones")
-	rootCmd.AddCommand(reauthCmd)
-}
-
 func runReauth(cmd *cobra.Command, args []string) error {
 	var usersToReauth []*model.User
 

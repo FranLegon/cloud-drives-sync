@@ -11,38 +11,13 @@ import (
 	"strings"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
-	"github.com/spf13/cobra"
 )
 
 const taskName = "cloud-drives-sync"
 
-var (
-	setFlag     bool
-	disableFlag bool
-)
-
-var autoCmd = &cobra.Command{
-	Use:   "auto",
-	Short: "Manage automatic scheduled synchronization",
-	Long: `Create or remove a scheduled task (Windows) or systemd timer (Linux)
-that runs the sync command every 8 hours.
-
-Use --set with --password to create the schedule.
-Use --disable to remove it.`,
-	Annotations: map[string]string{
-		"skipSetup":        "true",
-		"autoBuildAllowed": "true",
-	},
-	RunE: runAuto,
-}
-
-func init() {
-	autoCmd.Flags().BoolVar(&setFlag, "set", false, "Create the scheduled task/service")
-	autoCmd.Flags().BoolVarP(&disableFlag, "disable", "d", false, "Remove the scheduled task/service")
-	rootCmd.AddCommand(autoCmd)
-}
-
-func runAuto(cmd *cobra.Command, args []string) error {
+// runAutoAction implements `config --auto` for auto builds: install, remove or report
+// the recurring scheduled sync.
+func runAutoAction() error {
 	if !setFlag && !disableFlag {
 		return showStatus()
 	}

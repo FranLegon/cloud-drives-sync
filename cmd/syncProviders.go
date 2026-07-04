@@ -6,21 +6,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var syncProvidersCmd = &cobra.Command{
-	Use:   "sync-providers",
-	Short: "Synchronize files across all providers",
-	Long: `Synchronizes files across all configured cloud providers based on the local metadata database.
-It handles new files, modifications, and deletions. By default, it updates metadata first.`,
-	Annotations: map[string]string{
-		"writesDB": "true",
-	},
-	RunE: runSyncProviders,
-}
-
-func init() {
-	rootCmd.AddCommand(syncProvidersCmd)
-}
-
 func runSyncProviders(cmd *cobra.Command, args []string) error {
 	return SyncProvidersAction(sharedRunner, true, 0)
 }

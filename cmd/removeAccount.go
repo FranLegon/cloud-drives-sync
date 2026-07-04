@@ -10,21 +10,6 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var removeAccountCmd = &cobra.Command{
-	Use:   "remove-account",
-	Short: "Remove a cloud storage account",
-	Long: `Remove a specific cloud storage account from the configuration.
-You can specify the account by provider and email/phone, or use the interactive menu.`,
-	Annotations: map[string]string{
-		"skipPreFlight": "true",
-	},
-	RunE: runRemoveAccount,
-}
-
-func init() {
-	rootCmd.AddCommand(removeAccountCmd)
-}
-
 func runRemoveAccount(cmd *cobra.Command, args []string) error {
 	// Build list of accounts for selection
 	type accountOption struct {

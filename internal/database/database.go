@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	DBFileName = "metadata.db"
+	DBFileName = "cloud-drives-sync-metadata.db"
 	DBUser     = "owner"
 )
 
@@ -210,12 +210,14 @@ func (db *DB) Initialize() error {
 			name TEXT NOT NULL,
 			size INTEGER NOT NULL,
 			calculated_id TEXT,
+			google_drive_md5 TEXT,
 			mod_time INTEGER NOT NULL,
 			status TEXT NOT NULL
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
 		CREATE INDEX IF NOT EXISTS idx_files_calculated_id ON files(calculated_id);
+		CREATE INDEX IF NOT EXISTS idx_files_google_drive_md5 ON files(google_drive_md5);
 		CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
 
 		CREATE TABLE IF NOT EXISTS replicas (
@@ -275,6 +277,36 @@ func (db *DB) Initialize() error {
 		CREATE INDEX IF NOT EXISTS idx_folders_provider ON folders(provider);
 		CREATE INDEX IF NOT EXISTS idx_folders_path ON folders(path);
 
+		-- New-model folder tables (SPEC): a provider-agnostic logical_folder with one
+		-- folder_replica per provider/account. Populated by the Phase 2 folder sync logic.
+		CREATE TABLE IF NOT EXISTS logical_folders (
+			id TEXT PRIMARY KEY,
+			path TEXT NOT NULL,
+			name TEXT NOT NULL,
+			parent_logical_folder_id TEXT,
+			status TEXT NOT NULL DEFAULT 'active'
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_logical_folders_path ON logical_folders(path);
+		CREATE INDEX IF NOT EXISTS idx_logical_folders_parent ON logical_folders(parent_logical_folder_id);
+		CREATE INDEX IF NOT EXISTS idx_logical_folders_status ON logical_folders(status);
+
+		CREATE TABLE IF NOT EXISTS folder_replicas (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			logical_folder_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			account_id TEXT NOT NULL,
+			native_folder_id TEXT NOT NULL,
+			owner TEXT DEFAULT '',
+			last_seen_at INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY(logical_folder_id) REFERENCES logical_folders(id) ON DELETE CASCADE
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_folder_replicas_logical_folder_id ON folder_replicas(logical_folder_id);
+		CREATE INDEX IF NOT EXISTS idx_folder_replicas_provider ON folder_replicas(provider);
+		CREATE INDEX IF NOT EXISTS idx_folder_replicas_account_id ON folder_replicas(account_id);
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_folder_replicas_unique ON folder_replicas(provider, account_id, native_folder_id);
+
 		CREATE TABLE IF NOT EXISTS sync_runs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			started_at INTEGER NOT NULL,
@@ -310,6 +342,14 @@ func (db *DB) Initialize() error {
 		CREATE TRIGGER IF NOT EXISTS folders_ai AFTER INSERT ON folders BEGIN UPDATE _db_version SET version = version + 1; END;
 		CREATE TRIGGER IF NOT EXISTS folders_au AFTER UPDATE ON folders BEGIN UPDATE _db_version SET version = version + 1; END;
 		CREATE TRIGGER IF NOT EXISTS folders_ad AFTER DELETE ON folders BEGIN UPDATE _db_version SET version = version + 1; END;
+
+		CREATE TRIGGER IF NOT EXISTS logical_folders_ai AFTER INSERT ON logical_folders BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS logical_folders_au AFTER UPDATE ON logical_folders BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS logical_folders_ad AFTER DELETE ON logical_folders BEGIN UPDATE _db_version SET version = version + 1; END;
+
+		CREATE TRIGGER IF NOT EXISTS folder_replicas_ai AFTER INSERT ON folder_replicas BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS folder_replicas_au AFTER UPDATE ON folder_replicas BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS folder_replicas_ad AFTER DELETE ON folder_replicas BEGIN UPDATE _db_version SET version = version + 1; END;
 		`
 
 		if _, err := tx.Exec(schema); err != nil {
@@ -329,8 +369,8 @@ func (db *DB) InsertFile(file *model.File) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		fileQuery := `
 		INSERT OR REPLACE INTO files (
-			id, path, name, size, calculated_id, mod_time, status
-		) VALUES (?, ?, ?, ?, ?, ?, ?)
+			id, path, name, size, calculated_id, google_drive_md5, mod_time, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		`
 		fileStmt, err := db.txStmt(tx, fileQuery)
 		if err != nil {
@@ -339,7 +379,7 @@ func (db *DB) InsertFile(file *model.File) error {
 		defer fileStmt.Close()
 		
 		if _, err := fileStmt.Exec(
-			file.ID, file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status); err != nil {
+			file.ID, file.Path, file.Name, file.Size, file.CalculatedID, file.GoogleDriveMD5, file.ModTime.Unix(), file.Status); err != nil {
 			return fmt.Errorf("failed to insert file: %w", err)
 		}
 
@@ -763,6 +803,96 @@ func (db *DB) GetFolderByPathAndAccount(path string, provider model.Provider, ac
 	}
 	f.Provider = model.Provider(prov)
 	return &f, nil
+}
+
+// --- New-model folder tables (SPEC): logical_folders + folder_replicas ---
+// These are populated by the Phase 2 folder sync logic.
+
+// InsertLogicalFolder inserts or replaces a logical_folder record.
+func (db *DB) InsertLogicalFolder(f *model.LogicalFolder) error {
+	return db.WithTx(func(tx *sql.Tx) error {
+		var parent interface{}
+		if f.ParentLogicalFolderID != "" {
+			parent = f.ParentLogicalFolderID
+		}
+		status := f.Status
+		if status == "" {
+			status = "active"
+		}
+		_, err := tx.Exec(
+			`INSERT OR REPLACE INTO logical_folders (id, path, name, parent_logical_folder_id, status)
+			 VALUES (?, ?, ?, ?, ?)`,
+			f.ID, f.Path, f.Name, parent, status)
+		if err != nil {
+			return fmt.Errorf("failed to insert logical_folder: %w", err)
+		}
+		return nil
+	})
+}
+
+// GetAllLogicalFolders returns all logical_folder records.
+func (db *DB) GetAllLogicalFolders() ([]*model.LogicalFolder, error) {
+	rows, err := db.query(`SELECT id, path, name, parent_logical_folder_id, status FROM logical_folders`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var folders []*model.LogicalFolder
+	for rows.Next() {
+		f := &model.LogicalFolder{}
+		var parent sql.NullString
+		if err := rows.Scan(&f.ID, &f.Path, &f.Name, &parent, &f.Status); err != nil {
+			return nil, err
+		}
+		if parent.Valid {
+			f.ParentLogicalFolderID = parent.String
+		}
+		folders = append(folders, f)
+	}
+	return folders, rows.Err()
+}
+
+// InsertFolderReplica inserts or replaces a folder_replica record.
+func (db *DB) InsertFolderReplica(r *model.FolderReplica) error {
+	return db.WithTx(func(tx *sql.Tx) error {
+		_, err := tx.Exec(
+			`INSERT OR REPLACE INTO folder_replicas
+			 (logical_folder_id, provider, account_id, native_folder_id, owner, last_seen_at)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			r.LogicalFolderID, string(r.Provider), r.AccountID, r.NativeFolderID, r.Owner, r.LastSeenAt)
+		if err != nil {
+			return fmt.Errorf("failed to insert folder_replica: %w", err)
+		}
+		return nil
+	})
+}
+
+// GetFolderReplicas returns all folder_replica records for a logical_folder.
+func (db *DB) GetFolderReplicas(logicalFolderID string) ([]*model.FolderReplica, error) {
+	rows, err := db.query(
+		`SELECT id, logical_folder_id, provider, account_id, native_folder_id, owner, last_seen_at
+		 FROM folder_replicas WHERE logical_folder_id = ?`, logicalFolderID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var replicas []*model.FolderReplica
+	for rows.Next() {
+		r := &model.FolderReplica{}
+		var prov string
+		var owner sql.NullString
+		if err := rows.Scan(&r.ID, &r.LogicalFolderID, &prov, &r.AccountID, &r.NativeFolderID, &owner, &r.LastSeenAt); err != nil {
+			return nil, err
+		}
+		r.Provider = model.Provider(prov)
+		if owner.Valid {
+			r.Owner = owner.String
+		}
+		replicas = append(replicas, r)
+	}
+	return replicas, rows.Err()
 }
 
 // GetFilesByCalculatedID returns all files with a specific calculated_id

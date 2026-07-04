@@ -356,7 +356,7 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 	}
 
 	for _, file := range files {
-		if file.Name == "metadata.db" {
+		if file.Name == MetadataFileName {
 			continue
 		}
 		file.Path = pathPrefix + "/" + file.Name

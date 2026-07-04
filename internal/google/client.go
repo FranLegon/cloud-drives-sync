@@ -21,7 +21,7 @@ import (
 	"google.golang.org/api/option"
 )
 
-var syncFolderName = "cloud-drives-sync"
+var syncFolderName = "cloud-drives-sync-root"
 
 // SetSyncFolderName overrides the sync folder name. Used by tests to isolate from production data.
 func SetSyncFolderName(name string) {

@@ -25,7 +25,7 @@ import (
 	"github.com/gotd/td/tg"
 )
 
-var syncChannelName = "cloud-drives-sync"
+var syncChannelName = "cloud-drives-sync-root"
 
 // SetSyncChannelName overrides the sync channel name. Used by tests to isolate from production data.
 func SetSyncChannelName(name string) {

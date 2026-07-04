@@ -364,4 +364,5 @@ sync command compiled with this build variant produces no logs and no detailed o
 - When doing download/reupload/delete, never destroy an original before its replacement is confirmed intact (same filesize).
 - Concurrent independent reads across accounts are fine; all writes to the local database are serialized.
 - All file transfers are streamed (no whole-file in-memory buffering).
+- Never empty trash or recycle bin on any provider. Files moved to cloud-drives-sync-root/cloud-drives-sync-aux/hard-deleted are moved to trash/recycle bin.
 - All cloud/api calls retry with backoff on transient errors.

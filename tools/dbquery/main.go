@@ -15,7 +15,7 @@ func main() {
 		fmt.Println("SYNC_CLOUD_DRIVES_PASS not set")
 		os.Exit(1)
 	}
-	connStr := fmt.Sprintf("file:metadata.db?_pragma_key=%s&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000", url.QueryEscape(pass))
+	connStr := fmt.Sprintf("file:cloud-drives-sync-metadata.db?_pragma_key=%s&_journal_mode=WAL&_synchronous=NORMAL&_busy_timeout=5000", url.QueryEscape(pass))
 	db, err := sql.Open("sqlite3", connStr)
 	if err != nil {
 		panic(err)
