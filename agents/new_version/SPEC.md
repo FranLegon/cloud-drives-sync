@@ -165,13 +165,13 @@ completes remaining work without duplicating already-done work.
 There are four top-level commands: `config`, `sync`, `test` and `help`. Exit 0 on success, non-zero on error.
 Exactly one action flag must be provided per invocation (action flags are mutually exclusive within each command).
 
-### Global flags (all commands)
+### Global flags
 
-| Flag | What it does |
-|---|---|
-| `-p`, `--password` | Provide the master password non-interactively for scripting. If omitted, the tool prompts for it. |
-| `-s`, `--safe` | Dry-run mode: no writes, deletes, or permission changes are sent to the cloud. The tool prints exactly what it *would* do instead (e.g. `[DRY RUN] [backup@gmail.com] DELETE GDrive file 'duplicate.txt' (LogicalFileID: xyz)`). Local reads and database reads are still allowed. |
-| `-h`, `--help` | Show help for the command. |
+| Flag | What it does | Supported by commands |
+|---|---|---|
+| `-p`, `--password` | Provide the master password non-interactively for scripting. If omitted, the tool prompts for it. | `config`, `sync`, `test` |
+| `-s`, `--safe` | Dry-run mode: no writes, deletes, or permission changes are sent to the cloud. The tool prints exactly what it *would* do instead (e.g. `[DRY RUN] [backup@gmail.com] DELETE GDrive file 'duplicate.txt' (LogicalFileID: xyz)`). Local reads and database reads are still allowed. | `sync` | 
+| `-h`, `--help` | Show help for the command. | all |
 
 ### Flags specific to `config --init`
 
@@ -220,15 +220,9 @@ Runs all acceptance scenarios against real accounts using test-cloud-drives-sync
 | `--case {test-case-id}` | Run one test case only. |
 | `--with-commit` | Force commits current local state to "test" branch, runs tests, then merges to main ONLY on tests success. |
 
----
+#### Test cases
 
-## Deployment build (auto)
-
-A separate build variant (using //go:build auto) embeds the encrypted config directly in the binary (no init step needed at
-the target machine — only the master password at runtime). This variant only exposes `sync` (no flags) and `init --auto`. All other commands or flag combinations are unavailable, even --help.
-
----
-
+<!--
 ## Acceptance scenarios (self-test must cover all)
 
 1. Clean-slate setup produces a well-formed, empty pool.
@@ -248,15 +242,20 @@ the target machine — only the master password at runtime). This variant only e
 15. Divergent content at the same logical path is preserved as both versions with the incoming copy renamed; nothing is silently overwritten.
 16. Re-running sync on a consistent pool makes no changes.
 17. Sync resumed after interruption completes without creating duplicates or losing data.
+-->
+---
+
+## Deployment build (auto)
+
+A separate build variant (using //go:build auto) embeds the encrypted config directly in the binary (no init step needed at
+the target machine — only the master password at runtime). This variant only exposes `sync -p {pass_from_env_var}`, `init --auto --set` and `init --auto --disable`. All other commands or flag combinations are unavailable, even --help.
 
 ---
 
-## Constraints (without prescribing implementation)
+## Constraints
 
-- Never read, list, modify, or delete anything outside the cloud-drives-sync-root.
-- Never destroy an original before its replacement is confirmed intact.
-- Concurrent independent reads across accounts are fine; all writes to the local database are
-  serialized.
+- Never read, list, modify, or delete anything outside the cloud-drives-sync-root and test-cloud-drives-sync-root folders. The only exception is files in Google Drive backup account's actual root (no folder) — those are moved to cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups.
+- When doing download/reupload/delete, never destroy an original before its replacement is confirmed intact (same filesize).
+- Concurrent independent reads across accounts are fine; all writes to the local database are serialized.
 - All file transfers are streamed (no whole-file in-memory buffering).
-- All cloud calls retry with backoff on transient errors.
-- No unfinished capabilities, stubs, or known correctness bugs. This is a production-ready tool.
+- All cloud/api calls retry with backoff on transient errors.
