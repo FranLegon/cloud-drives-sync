@@ -26,30 +26,30 @@ items don't count.
 
 ---
 
-## Logical files vs. replicas
+## logical_files vs. replicas
 
-A **logical file** is the abstract "file the user has" — provider-agnostic, has a lifecycle
+A **logical_file** is the abstract "file the user has" — provider-agnostic, has a lifecycle
 (active, soft-deleted, permanently deleted).
 
-A **replica** is one physical copy on one specific account. A logical file can have many replicas.
+A **replica** is one physical copy on one specific account. A logical_file can have many replicas.
 Each replica carries the provider's stable file ID and its content fingerprint.
 
 ---
 
 ## File identity across providers
 
-A logical file's canonical identity is its **Google Drive MD5**. Every logical file must have a
+A logical_file's canonical identity is its **Google Drive MD5**. Every logical_file must have a
 replica on Google Drive; its Google-provided MD5 is the identity that ties all of its replicas
 together across providers.
 
 - **Same content on the same provider?** → compare provider fingerprints (MD5 on Google, SHA1 on
   OneDrive).
-- **Same logical file across providers?** → match on the Google Drive MD5 recorded in the metadata
+- **Same logical_file across providers?** → match on the Google Drive MD5 recorded in the metadata
   database. Do not use path or (name, size) for cross-provider matching, and never compare a
   non-Google fingerprint against a Google MD5.
 - **A replica on another provider not yet linked to any Google Drive MD5** has no established
   identity. To establish it, upload that file to Google Drive, read back the MD5 Google assigns, and
-  record it as the logical file's identity. Only then is the replica considered matched.
+  record it as the logical_file's identity. Only then is the replica considered matched.
 
 ---
 
@@ -77,7 +77,7 @@ requires each account to own its own complete structure.
 
 ### Telegram
 - No folder structure. All identity and path information must be embedded **within each stored
-  object** (in its caption/metadata), so the logical file and its place in the tree can be
+  object** (in its caption/metadata), so the logical_file and its place in the tree can be
   reconstructed from Telegram alone.
 - Files are stored in one dedicated managed channel. Multiple channels → stop and ask user.
 - The provider ID for an uploaded object is only known after upload, so: upload first, then update
@@ -95,20 +95,22 @@ outside the tool) called cloud-drives-sync-metadata.db. After any command that c
 account. Before any command that needs it, obtain the freshest (by last modified timestamp) copy: local → main account → other
 providers in order. If not found anywhere (and this isn't first-time setup config --init), stop with an error.
 
-The database must record:
+The database must include tables:
 
-- **Per logical file:** stable internal ID, Google Drive MD5 (canonical identity), logical path,
+- **logical_files:** stable internal ID, Google Drive MD5 (canonical identity), logical path,
   name, size, mod time, lifecycle state (active / soft-deleted / deleted).
-- **Per replica:** link to logical file, provider, account, provider's stable file ID, provider
+- **replicas:** link to logical_file, provider, account, provider's stable file ID, provider
   fingerprint, path, name, size, mod time, lifecycle state, whether fragmented, owner account, last
   time it was confirmed to still exist.
-- **Per fragment:** link to replica, sequence position, total count, size, provider's fragment ID.
-- **Per logical folder:** stable internal ID, logical path, name, parent logical folder, lifecycle
+- **fragments:** link to replica, sequence position, total count, size, provider's fragment ID.
+- **logical_folders:** stable internal ID, logical path, name, parent logical_folder, lifecycle
   state (active / soft-deleted / deleted).
-- **Per folder replica:** link to logical folder, provider, account, provider's stable folder ID,
-  owner account, last time it was confirmed to still exist. (Google: one replica per logical folder,
+- **folder_replicas:** link to logical_folder, provider, account, provider's stable folder ID,
+  owner account, last time it was confirmed to still exist. (Google: one replica per logical_folder,
   owned by main and shared. OneDrive: one replica per backup account, each owning its own copy.
   Telegram: none.)
+
+Note: Database is not self referential to avoid circular conflicts. There is no cloud-drives-sync-metadata.db entry in logical_files or replicas.
 
 ---
 
@@ -129,8 +131,8 @@ The database must record:
 
 After a successful sync, all of the following must be true:
 
-1. Every active logical file exists with identical content on every provider, at the
-   same logical path. Each logical file has exactly one single replica per provider.
+1. Every active logical_file exists with identical content on every provider, at the
+   same logical path. Each logical_file has exactly one single replica per provider.
 2. The folder structure is identical across all providers with a real structure (not Telegram).
 3. No active file is missing on any provider.
 4. File state (active, soft-deleted, deleted) is the same anywhere.
@@ -153,7 +155,7 @@ and marks its state in the database as hard-deleted. This is the only way to des
 **Loss detection and self-healing:** A replica previously recorded but now missing (without having
 been hard-deleted) is **lost**. Restore it from a surviving replica, including reassembling from
 Telegram fragments when necessary. Retrieve Google Drive MD5 from the surviving/reuploaded replica and record
-it as the logical file's identity if it was previously unknown.
+it as the logical_file's identity if it was previously unknown.
 
 **Idempotence:** Re-running a completed sync makes no changes. Resuming an interrupted sync
 completes remaining work without duplicating already-done work.
@@ -215,12 +217,12 @@ one operation.
 ### `test` — end-to-end self-test
 
 Runs all acceptance scenarios against real accounts. 
-Mimics user interaction directly with the provider's clouds and logs all actions. Example: `[MANUAL INTERACTION] [main@gmail.com] Create folder 'test-folder-1' in cloud-drives-sync-root`.
+Mimics user manual interaction directly with the provider's clouds and logs all actions. Example: `[MANUAL INTERACTION] [main@gmail.com] Create folder 'test-case-id-4-folder' in cloud-drives-sync-root`.
 Generates a log at invocation_path/logs/test-YYYYMMDD-HHMMSS.log (or test-YYYYMMDD-HHMMSS-case-{test-case-id}.log).
 
 | Flag | What it must accomplish |
 |---|---|
-| `--case {test-case-id}` | Run one test case only. |
+| `--case {test-case-id}` | Run one test case only. Without this flag, run all test cases in order. |
 | `--unsafe` | If there is pre-existing data in cloud-drives-sync-root (and subfolders), delete it all before running the test. |
 | `--backup` | If there is pre-existing data in cloud-drives-sync-root (and subfolders), rename cloud-drives-sync-root to cloud-drives-sync-root-backup-{timestamp} before running the test. |
 | `--with-commit` | Force commits current local state to "test" branch, runs tests, then merges to main ONLY on tests success. |
@@ -231,13 +233,19 @@ If there is pre-existing data in cloud-drives-sync-root (and subfolders) and nei
 
 | test-case-id | Test Name | What to do | Validation |
 |---|---|---|---|
-| 1 | Clean-slate setup | Run config --init -p {pass} | cloud-drives-sync-root, cloud-drives-sync-root/cloud-drives-sync-aux, cloud-drives-sync-root/cloud-drives-sync-aux/cloud-drives-sync-metadata.db, cloud-drives-sync-root/cloud-drives-sync-aux/soft-deleted, cloud-drives-sync-root/cloud-drives-sync-aux/hard-deleted, cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups exist on every account and are owned by main account on Google Drive Main account. |
-| 2 | Create file on main | "manually" create test-case-id-2.txt (containing text "test-case-id = 2\n{rand_str}" where rand_str is a 69-character random string generated at test runtime, stored in memory for later comparison) in cloud-drives-sync-root using main account, then run sync. | test-case-id-2.txt exists on every account, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor). In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account. In Telegram, the file is stored in the managed channel with embedded metadata. |
-| 3 | Create file on Google backup | "manually" create test-case-id-3.txt (containing text "test-case-id = 3\n{rand_str}" where rand_str is a 69-character random string generated at test runtime, stored in memory for later comparison) in cloud-drives-sync-root using a Google Drive backup account, then run sync. | test-case-id-3.txt exists on every account, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor). In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account. In Telegram, the file is stored in the managed channel with embedded metadata. |
-| 4 | Create folder on main | "manually" create test-case-id-4-folder in cloud-drives-sync-root using main account, then run sync. | test-case-id-4-folder exists on every account and provider (except Telegram, which has no empty folders). On Google Drive, the folder is owned by main and shared to all backup accounts. On Microsoft OneDrive, each backup account owns its own copy of the folder. |
-| 5 | Create folder on Google backup | "manually" create test-case-id-5-folder in cloud-drives-sync-root using a Google Drive backup account, then run sync. | test-case-id-5-folder exists on every account and provider (except Telegram, which has no empty folders). On Google Drive, the folder is owned by main and shared to all backup accounts. On Microsoft OneDrive, each backup account owns its own copy of the folder. |
-| 6 | Create file on Microsoft backup | "manually" create test-case-id-6.txt (containing text "test-case-id = 6\n{rand_str}" where rand_str is a 69-character random string generated at test runtime, stored in memory for later comparison) in cloud-drives-sync-root using a Microsoft OneDrive backup account, then run sync. | test-case-id-6.txt exists on every account, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor). In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account. In Telegram, the file is stored in the managed channel with embedded metadata. |
-| 7 | 
+| 1 | Clean-slate setup | Run config --init -p {pass} | cloud-drives-sync-root, cloud-drives-sync-root/cloud-drives-sync-aux, cloud-drives-sync-root/cloud-drives-sync-aux/cloud-drives-sync-metadata.db, cloud-drives-sync-root/cloud-drives-sync-aux/soft-deleted, cloud-drives-sync-root/cloud-drives-sync-aux/hard-deleted, cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups exist on every account and are owned by main account on Google Drive. cloud-drives-sync-metadata.db is encrypted, queryable with the master password, contains logical_folder and folder_replica rows for the special folders and contains no other rows in any other tables (because test always starts with a clean slate). |
+| 2 | Create file on main | "manually" create test-case-id-2.txt (containing text "test-case-id = 2\n{rand_str}" where rand_str is a 69-character random string generated at test runtime, stored in memory for later comparison) in cloud-drives-sync-root using main account, then run sync. | test-case-id-2.txt exists on every account, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor). In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account. In Telegram, the file is stored in the managed channel with embedded metadata. In cloud-drives-sync-metadata.db, the logical_file row has the correct Google Drive MD5 and the replica rows have the correct provider fingerprints. |
+| 3 | Create file on Google backup | "manually" create test-case-id-3.txt (containing text "test-case-id = 3\n{rand_str}" where rand_str is a 69-character random string generated at test runtime, stored in memory for later comparison) in cloud-drives-sync-root using a Google Drive backup account, then run sync. | test-case-id-3.txt exists on every account, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor). In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account. In Telegram, the file is stored in the managed channel with embedded metadata. In cloud-drives-sync-metadata.db, the logical_file row has the correct Google Drive MD5 and the replica rows have the correct provider fingerprints. |
+| 4 | Create folder on main | "manually" create test-case-id-4-folder in cloud-drives-sync-root using main account, then run sync. | test-case-id-4-folder exists on every account and provider (except Telegram, which has no empty folders). On Google Drive, the folder is owned by main and shared to all backup accounts. On Microsoft OneDrive, each backup account owns its own copy of the folder. In cloud-drives-sync-metadata.db, the logical_folder row exists and the folder_replica rows exist for every provider (except Telegram). |
+| 5 | Create folder on Google backup | "manually" create test-case-id-5-folder in cloud-drives-sync-root using a Google Drive backup account, then run sync. | test-case-id-5-folder exists on every account and provider (except Telegram, which has no empty folders). On Google Drive, the folder is owned by main and shared to all backup accounts. On Microsoft OneDrive, each backup account owns its own copy of the folder. In cloud-drives-sync-metadata.db, the logical_folder row exists and the folder_replica rows exist for every provider (except Telegram). |
+| 6 | Create file on Microsoft backup | "manually" create test-case-id-6.txt (containing text "test-case-id = 6\n{rand_str}" where rand_str is a 69-character random string generated at test runtime, stored in memory for later comparison) in cloud-drives-sync-root using a Microsoft OneDrive backup account, then run sync. | test-case-id-6.txt exists on every account, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor). In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account. In Telegram, the file is stored in the managed channel with embedded metadata. In cloud-drives-sync-metadata.db, the logical_file row has the correct Google Drive MD5 and the replica rows have the correct provider fingerprints. |
+| 7 | Create folder on Microsoft backup | "manually" create test-case-id-7-folder in cloud-drives-sync-root using a Microsoft OneDrive backup account, then run sync. | test-case-id-7-folder exists on every account and provider (except Telegram, which has no empty folders). On Google Drive, the folder is owned by main and shared to all backup accounts. On Microsoft OneDrive, each backup account owns its own copy of the folder. In cloud-drives-sync-metadata.db, the logical_folder row exists and the folder_replica rows exist for every provider (except Telegram). |
+| 8 | Sync file from Telegram | "manually" upload test-case-id-8.txt (containing text "test-case-id = 8\n{rand_str}" where rand_str is a 69-character random string generated at test runtime, stored in memory for later comparison) to Google Drive main account, then run sync. Then "manually" delete the file from all Google Drive and Microsoft OneDrive accounts, leaving only the Telegram replica. Then run sync again. | test-case-id-8.txt exists on every account, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor). In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account. In Telegram, the file is stored in the managed channel with embedded metadata. In cloud-drives-sync-metadata.db, the logical_file row has the correct Google Drive MD5 and the replica rows have the correct provider fingerprints. |
+| 9 | Sync file from Microsoft | "manually" upload test-case-id-9.txt (containing text "test-case-id = 9\n{rand_str}" where rand_str is a 69-character random string generated at test runtime, stored in memory for later comparison) to Google Drive main account, then run sync. Then "manually" delete the file from all Google Drive and Telegram accounts, leaving only the Microsoft replica. Then run sync again. | test-case-id-9.txt exists on every account, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor). In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account. In Telegram, the file is stored in the managed channel with embedded metadata. In cloud-drives-sync-metadata.db, the logical_file row has the correct Google Drive MD5 and the replica rows have the correct provider fingerprints. |
+| 10 | Move Google Drive files from backups roots | "manually" create test-case-id-10.txt (containing text "test-case-id = 10\n{rand_str}" where rand_str is a 69-character random string generated at test runtime, stored in memory for later comparison) in the actual root of a Google Drive backup account, then run sync. | test-case-id-10.txt exists on every account at folder cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor). In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account. In Telegram, the file is stored in the managed channel with embedded metadata. In cloud-drives-sync-metadata.db, the logical_file row has the correct Google Drive MD5 and the replica rows have the correct provider fingerprints. |
+| 11 | Google Drive nested folders | "manually" create a nested folder structure `test-case-id-11-folder/test-case-id-11-subfolder/test-case-id-11-subsubfolder` in cloud-drives-sync-root using main account, then run sync. | The nested folder structure exists on every account and provider (except Telegram, which has no empty folders). On Google Drive, the folders are owned by main and shared to all backup accounts. On Microsoft OneDrive, each backup account owns its own copy of the folders. In cloud-drives-sync-metadata.db, the logical_folder rows exist and the folder_replica rows exist for every provider (except Telegram). |
+| 12 | Microsoft OneDrive nested folders | "manually" create a nested folder structure `test-case-id-12-folder/test-case-id-12-subfolder/test-case-id-12-subsubfolder` in cloud-drives-sync-root using a Microsoft OneDrive backup account, then run sync. | The nested folder structure exists on every account and provider (except Telegram, which has no empty folders). On Google Drive, the folders are owned by main and shared to all backup accounts. On Microsoft OneDrive, each backup account owns its own copy of the folders. In cloud-drives-sync-metadata.db, the logical_folder rows exist and the folder_replica rows exist for every provider (except Telegram). |
+| 13 | Google Drive moved file | "manually" create test-case-id-13.txt (containing text "test-case-id = 13\n{rand_str}" where rand_str is a 69-character random string generated at test runtime, stored in memory for later comparison) and a folder test-case-id-13-folder in cloud-drives-sync-root using main account, then run sync. Then "manually" move the file into the folder and run sync again. | test-case-id-13.txt exists on every account at path cloud-drives-sync-root/test-case-id-13-folder/test-case-id-13.txt, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor). In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account. In Telegram, the file is stored in the managed channel with correct folder path in embedded metadata. In cloud-drives-sync-metadata.db, the logical_file row has the correct Google Drive MD5 and the replica rows have the correct provider fingerprints. |
 
 <!--
 ## Acceptance scenarios (self-test must cover all)
