@@ -53,6 +53,15 @@ func TestUpdateLogicalFilesGoogleMD5(t *testing.T) {
 		t.Fatalf("google_drive_md5 = %q, want %q", got, "md5abc")
 	}
 
+	// The value must also be readable through the model layer.
+	gf, err := db.GetFileByID("file-1")
+	if err != nil {
+		t.Fatalf("GetFileByID: %v", err)
+	}
+	if gf.GoogleDriveMD5 != "md5abc" {
+		t.Fatalf("GetFileByID GoogleDriveMD5 = %q, want %q", gf.GoogleDriveMD5, "md5abc")
+	}
+
 	h1, err := db.GetMetadataHash()
 	if err != nil {
 		t.Fatalf("hash: %v", err)

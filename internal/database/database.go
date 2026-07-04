@@ -209,7 +209,7 @@ func (db *DB) Initialize() error {
 			name TEXT NOT NULL,
 			size INTEGER NOT NULL,
 			calculated_id TEXT,
-			google_drive_md5 TEXT,
+			google_drive_md5 TEXT NOT NULL DEFAULT '',
 			mod_time INTEGER NOT NULL,
 			status TEXT NOT NULL
 		);
@@ -938,7 +938,7 @@ func (db *DB) UpdateLogicalFilesGoogleMD5() error {
 // GetFilesByCalculatedID returns all files with a specific calculated_id
 func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error) {
 	queryFiles := `
-	SELECT id, path, name, size, calculated_id, mod_time, status
+	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
 	FROM files
 	WHERE calculated_id = ?
 	ORDER BY mod_time ASC
@@ -956,7 +956,7 @@ func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error)
 	for rows.Next() {
 		file := &model.File{}
 		var modTime int64
-		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status); err != nil {
+		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status); err != nil {
 			return nil, err
 		}
 		file.ModTime = time.Unix(modTime, 0)
@@ -1044,7 +1044,7 @@ func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error)
 // GetAllFiles returns all files with replicas loaded in a single batch query
 func (db *DB) GetAllFiles() ([]*model.File, error) {
 	query := `
-	SELECT id, path, name, size, calculated_id, mod_time, status
+	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
 	FROM files
 	`
 
@@ -1060,7 +1060,7 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 		file := &model.File{}
 		var modTime int64
 		err := rows.Scan(
-			&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status,
+			&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status,
 		)
 		if err != nil {
 			return nil, err
@@ -1215,7 +1215,7 @@ func (db *DB) batchLoadFragments(replicas []*model.Replica) error {
 // GetFilesByStatus returns all files with a specific status
 func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	queryFiles := `
-	SELECT id, path, name, size, calculated_id, mod_time, status
+	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
 	FROM files
 	WHERE status = ?
 	`
@@ -1232,7 +1232,7 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	for rows.Next() {
 		file := &model.File{}
 		var modTime int64
-		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status); err != nil {
+		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status); err != nil {
 			return nil, err
 		}
 		file.ModTime = time.Unix(modTime, 0)
@@ -1322,7 +1322,7 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 // GetAllFilesAcrossProviders returns all active files with their active replicas
 func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 	queryFiles := `
-	SELECT id, path, name, size, calculated_id, mod_time, status
+	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
 	FROM files
 	WHERE status = 'active'
 	`
@@ -1339,7 +1339,7 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 	for rows.Next() {
 		file := &model.File{}
 		var modTime int64
-		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status); err != nil {
+		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status); err != nil {
 			return nil, err
 		}
 		file.ModTime = time.Unix(modTime, 0)
@@ -1928,7 +1928,7 @@ func CreateDB(masterPassword string) error {
 // GetFileByPath retrieves a file by its path
 func (db *DB) GetFileByPath(path string) (*model.File, error) {
 	query := `
-	SELECT id, path, name, size, calculated_id, mod_time, status
+	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
 	FROM files
 	WHERE path = ?
 	`
@@ -1938,7 +1938,7 @@ func (db *DB) GetFileByPath(path string) (*model.File, error) {
 	var modTime int64
 	err := row.Scan(
 		&file.ID, &file.Path, &file.Name, &file.Size,
-		&file.CalculatedID, &modTime, &file.Status,
+		&file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil // Return nil if not found
@@ -1961,7 +1961,7 @@ func (db *DB) GetFileByPath(path string) (*model.File, error) {
 // GetFileByID retrieves a file by its ID
 func (db *DB) GetFileByID(id string) (*model.File, error) {
 	query := `
-	SELECT id, path, name, size, calculated_id, mod_time, status
+	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
 	FROM files
 	WHERE id = ?
 	`
@@ -1969,7 +1969,7 @@ func (db *DB) GetFileByID(id string) (*model.File, error) {
 	file := &model.File{}
 	var modTime int64
 	err := db.queryRow(query, id).Scan(
-		&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &modTime, &file.Status,
+		&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status,
 	)
 	if err != nil {
 		return nil, err
