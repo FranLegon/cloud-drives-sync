@@ -5,15 +5,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// runSyncUnsyncedFiles handles `sync --sync-unsynced-files`.
-// TODO(Phase 2): per SPEC this must MOVE Google backup root files into
-// cloud-drives-sync-aux/unsynced-from-backups rather than delete them.
+// runSyncUnsyncedFiles handles `sync --sync-unsynced-files`: it moves files sitting in a Google
+// Drive backup account's actual root into cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups.
 func runSyncUnsyncedFiles(cmd *cobra.Command, args []string) error {
-	logger.Info("Starting cleanup of unsynced files...")
-	if err := sharedRunner.DeleteUnsyncedFiles(); err != nil {
+	logger.Info("Moving unsynced files from backup account roots...")
+	if err := sharedRunner.MoveUnsyncedFiles(); err != nil {
 		return err
 	}
 
-	logger.Info("Cleanup complete")
+	logger.Info("Unsynced-files move complete")
 	return nil
 }

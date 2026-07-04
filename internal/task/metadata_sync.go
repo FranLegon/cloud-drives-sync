@@ -62,6 +62,40 @@ func createClient(user *model.User, cfg *model.Config, runPreFlight bool) (api.C
 	return c, nil
 }
 
+// getOrCreateChildFolder returns the ID of the named child folder under parentID, creating it if
+// it does not already exist.
+func getOrCreateChildFolder(client api.CloudClient, parentID, name string) (string, error) {
+	folders, err := client.ListFolders(parentID)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range folders {
+		if f.Name == name {
+			return f.ID, nil
+		}
+	}
+	created, err := client.CreateFolder(parentID, name)
+	if err != nil {
+		return "", err
+	}
+	return created.ID, nil
+}
+
+// findChildFolder returns the ID of the named child folder under parentID without creating it,
+// erroring if it is not found.
+func findChildFolder(client api.CloudClient, parentID, name string) (string, error) {
+	folders, err := client.ListFolders(parentID)
+	if err != nil {
+		return "", err
+	}
+	for _, f := range folders {
+		if f.Name == name {
+			return f.ID, nil
+		}
+	}
+	return "", fmt.Errorf("folder %q not found under %q", name, parentID)
+}
+
 func getAuxFolderID(client api.CloudClient, user *model.User, rootID string, create bool) (string, error) {
 	if user.Provider == model.ProviderTelegram {
 		if create {

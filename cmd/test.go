@@ -2241,7 +2241,7 @@ func testMetadata(runner *task.Runner) error {
 			// listing, so per-account presence is not guaranteed. This mirrors the Cloud -> DB
 			// pass below which already tolerates soft-deleted files.
 			if r.FileID != "" {
-				if file, _ := db.GetFileByID(r.FileID); file != nil && file.Status == "softdeleted" {
+				if file, _ := db.GetFileByID(r.FileID); file != nil && file.Status == "soft-deleted" {
 					delete(cloudFiles, r.NativeID)
 					continue
 				}
@@ -2299,7 +2299,7 @@ func testMetadata(runner *task.Runner) error {
 			anyReplica, _ := db.GetReplicaByNativeID(user.Provider, nativeID)
 			if anyReplica != nil && anyReplica.FileID != "" {
 				file, _ := db.GetFileByID(anyReplica.FileID)
-				if file != nil && file.Status == "softdeleted" {
+				if file != nil && file.Status == "soft-deleted" {
 					continue
 				}
 			}

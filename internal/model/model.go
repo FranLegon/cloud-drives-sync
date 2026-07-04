@@ -109,7 +109,7 @@ type File struct {
 	CalculatedID   string     // CONCAT(name, '-', size) for deduplication
 	GoogleDriveMD5 string     // Canonical cross-provider identity (SPEC): Google Drive MD5
 	ModTime        time.Time  // Modification timestamp
-	Status         string     // active, softdeleted, deleted
+	Status         string     // active, soft-deleted, deleted
 	Replicas       []*Replica // Physical copies
 }
 

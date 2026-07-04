@@ -162,4 +162,3 @@ func reauthTelegram(user *model.User) error {
 
 	return nil
 }
-

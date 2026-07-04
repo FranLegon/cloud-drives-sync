@@ -1,7 +1,6 @@
 package database
 
 import (
-	"sync"
 	"database/sql"
 	"fmt"
 	"net/url"
@@ -9,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
@@ -79,7 +79,6 @@ func Open(masterPassword string) (*DB, error) {
 	db := &DB{conn: conn}
 	return db, nil
 }
-
 
 // WithTx runs a function within a database transaction, managing commit/rollback.
 func (db *DB) WithTx(fn func(*sql.Tx) error) (err error) {
@@ -344,11 +343,15 @@ func (db *DB) Initialize() error {
 		CREATE TRIGGER IF NOT EXISTS folders_ad AFTER DELETE ON folders BEGIN UPDATE _db_version SET version = version + 1; END;
 
 		CREATE TRIGGER IF NOT EXISTS logical_folders_ai AFTER INSERT ON logical_folders BEGIN UPDATE _db_version SET version = version + 1; END;
-		CREATE TRIGGER IF NOT EXISTS logical_folders_au AFTER UPDATE ON logical_folders BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS logical_folders_au AFTER UPDATE ON logical_folders
+		WHEN OLD.path IS NOT NEW.path OR OLD.name IS NOT NEW.name OR OLD.parent_logical_folder_id IS NOT NEW.parent_logical_folder_id OR OLD.status IS NOT NEW.status
+		BEGIN UPDATE _db_version SET version = version + 1; END;
 		CREATE TRIGGER IF NOT EXISTS logical_folders_ad AFTER DELETE ON logical_folders BEGIN UPDATE _db_version SET version = version + 1; END;
 
 		CREATE TRIGGER IF NOT EXISTS folder_replicas_ai AFTER INSERT ON folder_replicas BEGIN UPDATE _db_version SET version = version + 1; END;
-		CREATE TRIGGER IF NOT EXISTS folder_replicas_au AFTER UPDATE ON folder_replicas BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS folder_replicas_au AFTER UPDATE ON folder_replicas
+		WHEN OLD.logical_folder_id IS NOT NEW.logical_folder_id OR OLD.provider IS NOT NEW.provider OR OLD.account_id IS NOT NEW.account_id OR OLD.native_folder_id IS NOT NEW.native_folder_id OR OLD.owner IS NOT NEW.owner
+		BEGIN UPDATE _db_version SET version = version + 1; END;
 		CREATE TRIGGER IF NOT EXISTS folder_replicas_ad AFTER DELETE ON folder_replicas BEGIN UPDATE _db_version SET version = version + 1; END;
 		`
 
@@ -377,7 +380,7 @@ func (db *DB) InsertFile(file *model.File) error {
 			return fmt.Errorf("failed to prepare file statement: %w", err)
 		}
 		defer fileStmt.Close()
-		
+
 		if _, err := fileStmt.Exec(
 			file.ID, file.Path, file.Name, file.Size, file.CalculatedID, file.GoogleDriveMD5, file.ModTime.Unix(), file.Status); err != nil {
 			return fmt.Errorf("failed to insert file: %w", err)
@@ -520,7 +523,7 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 			return fmt.Errorf("failed to prepare check statement: %w", err)
 		}
 		defer checkStmt.Close()
-		
+
 		err = checkStmt.QueryRow(provider, newAccountID, nativeID).Scan(&exists)
 		if err != nil && err != sql.ErrNoRows {
 			return fmt.Errorf("failed to check existing replica: %w", err)
@@ -551,7 +554,7 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 			return fmt.Errorf("failed to prepare update statement: %w", err)
 		}
 		defer updateStmt.Close()
-		
+
 		res, err := updateStmt.Exec(newAccountID, provider, oldAccountID, nativeID)
 		if err != nil {
 			return fmt.Errorf("failed to update replica owner: %w", err)
@@ -581,7 +584,7 @@ func (db *DB) InsertReplica(replica *model.Replica) error {
 			return fmt.Errorf("failed to prepare statement: %w", err)
 		}
 		defer stmt.Close()
-		
+
 		res, err := stmt.Exec(
 			replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
@@ -638,7 +641,7 @@ func (db *DB) UpsertReplica(replica *model.Replica) error {
 			return fmt.Errorf("failed to prepare upsert replica statement: %w", err)
 		}
 		defer stmt.Close()
-		
+
 		_, err = stmt.Exec(
 			replica.ID, replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
@@ -663,7 +666,7 @@ func (db *DB) InsertReplicaFragment(fragment *model.ReplicaFragment) error {
 			return fmt.Errorf("failed to prepare fragment statement: %w", err)
 		}
 		defer stmt.Close()
-		
+
 		res, err := stmt.Exec(
 			fragment.ReplicaID, fragment.FragmentNumber, fragment.FragmentsTotal, fragment.Size, fragment.NativeFragmentID)
 		if err != nil {
@@ -808,7 +811,7 @@ func (db *DB) GetFolderByPathAndAccount(path string, provider model.Provider, ac
 // --- New-model folder tables (SPEC): logical_folders + folder_replicas ---
 // These are populated by the Phase 2 folder sync logic.
 
-// InsertLogicalFolder inserts or replaces a logical_folder record.
+// InsertLogicalFolder inserts or updates a logical_folder record idempotently.
 func (db *DB) InsertLogicalFolder(f *model.LogicalFolder) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		var parent interface{}
@@ -820,8 +823,13 @@ func (db *DB) InsertLogicalFolder(f *model.LogicalFolder) error {
 			status = "active"
 		}
 		_, err := tx.Exec(
-			`INSERT OR REPLACE INTO logical_folders (id, path, name, parent_logical_folder_id, status)
-			 VALUES (?, ?, ?, ?, ?)`,
+			`INSERT INTO logical_folders (id, path, name, parent_logical_folder_id, status)
+			 VALUES (?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+				path=excluded.path,
+				name=excluded.name,
+				parent_logical_folder_id=excluded.parent_logical_folder_id,
+				status=excluded.status`,
 			f.ID, f.Path, f.Name, parent, status)
 		if err != nil {
 			return fmt.Errorf("failed to insert logical_folder: %w", err)
@@ -853,13 +861,17 @@ func (db *DB) GetAllLogicalFolders() ([]*model.LogicalFolder, error) {
 	return folders, rows.Err()
 }
 
-// InsertFolderReplica inserts or replaces a folder_replica record.
+// InsertFolderReplica inserts or updates a folder_replica record idempotently.
 func (db *DB) InsertFolderReplica(r *model.FolderReplica) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		_, err := tx.Exec(
-			`INSERT OR REPLACE INTO folder_replicas
+			`INSERT INTO folder_replicas
 			 (logical_folder_id, provider, account_id, native_folder_id, owner, last_seen_at)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
+			 VALUES (?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(provider, account_id, native_folder_id) DO UPDATE SET
+				logical_folder_id=excluded.logical_folder_id,
+				owner=excluded.owner,
+				last_seen_at=excluded.last_seen_at`,
 			r.LogicalFolderID, string(r.Provider), r.AccountID, r.NativeFolderID, r.Owner, r.LastSeenAt)
 		if err != nil {
 			return fmt.Errorf("failed to insert folder_replica: %w", err)
@@ -1209,7 +1221,7 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	}
 
 	var allReplicas []*model.Replica
-	
+
 	queryReplicas := `
 	SELECT r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
 	FROM replicas r
@@ -1316,7 +1328,7 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 	}
 
 	var allReplicas []*model.Replica
-	
+
 	queryReplicas := `
 	SELECT r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
 	FROM replicas r
@@ -1789,18 +1801,18 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 		UPDATE files
 		SET status = CASE
 			WHEN r.active_google > 0 THEN 'active'
-			WHEN r.total_google > 0 AND r.active_google = 0 THEN 'softdeleted'
+			WHEN r.total_google > 0 AND r.active_google = 0 THEN 'soft-deleted'
 			WHEN r.total_google = 0 AND r.active_any > 0 THEN 'active'
-			WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'softdeleted'
+			WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'soft-deleted'
 			ELSE files.status
 		END
 		FROM ReplicaAgg r
 		WHERE files.id = r.file_id
 		AND files.status != CASE
 			WHEN r.active_google > 0 THEN 'active'
-			WHEN r.total_google > 0 AND r.active_google = 0 THEN 'softdeleted'
+			WHEN r.total_google > 0 AND r.active_google = 0 THEN 'soft-deleted'
 			WHEN r.total_google = 0 AND r.active_any > 0 THEN 'active'
-			WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'softdeleted'
+			WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'soft-deleted'
 			ELSE files.status
 		END
 		`, softDeletedPattern, softDeletedPatternWin, softDeletedPattern, softDeletedPatternWin)
@@ -1814,7 +1826,7 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 			return fmt.Errorf("failed to update soft-deleted status: %w", err)
 		}
 
-		// Second pass: catch files that remain 'softdeleted' due to file_id linkage issues
+		// Second pass: catch files that remain 'soft-deleted' due to file_id linkage issues
 		// by checking replicas via calculated_id (content-based match)
 		fallbackQuery := fmt.Sprintf(`
 		WITH LatestActive AS (
@@ -1833,10 +1845,10 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 		FROM LatestActive la
 		WHERE files.calculated_id = la.calculated_id
 		AND la.rn = 1
-		AND files.status = 'softdeleted'
+		AND files.status = 'soft-deleted'
 		AND (files.calculated_id != '' AND files.calculated_id IS NOT NULL)
 		`, softDeletedPattern, softDeletedPatternWin)
-		
+
 		fallbackStmt, err := db.txStmt(tx, fallbackQuery)
 		if err != nil {
 			return fmt.Errorf("failed to prepare fallback statement: %w", err)

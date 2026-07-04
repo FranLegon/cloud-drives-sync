@@ -195,7 +195,120 @@ func (r *Runner) RunPreFlightChecks() error {
 		}
 	}
 
+	// Ensure the reserved aux structure (soft-deleted / hard-deleted / unsynced-from-backups)
+	// exists on every account that owns folders and is recorded in the database.
+	if err := r.EnsureSpecialFolders(); err != nil {
+		return fmt.Errorf("failed to ensure special folders: %w", err)
+	}
+
 	logger.Info("All pre-flight checks passed")
+	return nil
+}
+
+// specialLogicalFolder describes one reserved aux logical_folder.
+type specialLogicalFolder struct {
+	id     string
+	path   string
+	name   string
+	parent string
+}
+
+// specialLogicalFolders returns the reserved aux logical_folders in creation order (aux first).
+func specialLogicalFolders() []specialLogicalFolder {
+	auxPath := "/" + AuxFolder
+	aux := specialLogicalFolder{id: "lf-aux", path: auxPath, name: AuxFolder, parent: ""}
+	return []specialLogicalFolder{
+		aux,
+		{id: "lf-aux-" + SoftDeletedFolder, path: auxPath + "/" + SoftDeletedFolder, name: SoftDeletedFolder, parent: aux.id},
+		{id: "lf-aux-" + HardDeletedFolder, path: auxPath + "/" + HardDeletedFolder, name: HardDeletedFolder, parent: aux.id},
+		{id: "lf-aux-" + UnsyncedFromBackupsFolder, path: auxPath + "/" + UnsyncedFromBackupsFolder, name: UnsyncedFromBackupsFolder, parent: aux.id},
+	}
+}
+
+// EnsureSpecialFolders makes sure the reserved aux folder and its special subfolders exist on
+// every account that owns folders, and records them in logical_folders / folder_replicas.
+//
+// Ownership model (SPEC): Google folders are owned by the main account and shared to backups, so
+// only the main account materializes them (one folder_replica per logical_folder). Microsoft
+// backup accounts each own their own copy (one folder_replica per account). Telegram has no folders.
+func (r *Runner) EnsureSpecialFolders() error {
+	folders := specialLogicalFolders()
+
+	// Logical folders are provider-agnostic; insert (idempotently) once.
+	for _, f := range folders {
+		if err := r.db.InsertLogicalFolder(&model.LogicalFolder{
+			ID:                    f.id,
+			Path:                  f.path,
+			Name:                  f.name,
+			ParentLogicalFolderID: f.parent,
+			Status:                "active",
+		}); err != nil {
+			return err
+		}
+	}
+
+	for i := range r.config.Users {
+		user := &r.config.Users[i]
+
+		// Telegram has no folder structure; Google backups rely on the main account's shared folders.
+		if user.Provider == model.ProviderTelegram {
+			continue
+		}
+		if user.Provider == model.ProviderGoogle && !user.IsMain {
+			continue
+		}
+
+		client, err := r.GetOrCreateClient(user)
+		if err != nil {
+			return fmt.Errorf("failed to create client for %s: %w", user.GetAccountID(), err)
+		}
+
+		rootID, err := api.WithRetryT(func() (string, error) {
+			return client.GetSyncFolderID()
+		})
+		if err != nil {
+			return fmt.Errorf("failed to get sync folder for %s: %w", user.GetAccountID(), err)
+		}
+
+		auxID, err := getAuxFolderID(client, user, rootID, true)
+		if err != nil {
+			return fmt.Errorf("failed to ensure aux folder for %s: %w", user.GetAccountID(), err)
+		}
+
+		owner := user.GetAccountID()
+		now := time.Now().Unix()
+
+		// aux replica
+		if err := r.db.InsertFolderReplica(&model.FolderReplica{
+			LogicalFolderID: folders[0].id,
+			Provider:        user.Provider,
+			AccountID:       user.GetAccountID(),
+			NativeFolderID:  auxID,
+			Owner:           owner,
+			LastSeenAt:      now,
+		}); err != nil {
+			return err
+		}
+
+		// special subfolders under aux
+		for _, f := range folders[1:] {
+			childID, err := getOrCreateChildFolder(client, auxID, f.name)
+			if err != nil {
+				return fmt.Errorf("failed to ensure %s for %s: %w", f.name, user.GetAccountID(), err)
+			}
+			if err := r.db.InsertFolderReplica(&model.FolderReplica{
+				LogicalFolderID: f.id,
+				Provider:        user.Provider,
+				AccountID:       user.GetAccountID(),
+				NativeFolderID:  childID,
+				Owner:           owner,
+				LastSeenAt:      now,
+			}); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -1958,70 +2071,63 @@ func (r *Runner) claimGoogleFolderOwnership() {
 }
 
 // DeleteUnsyncedFiles deletes files in backup accounts that are not in the sync folder
-func (r *Runner) DeleteUnsyncedFiles() error {
-	for _, user := range r.config.Users {
-		// Skip main account
-		if user.IsMain {
+// MoveUnsyncedFiles moves any file sitting directly in a Google Drive backup account's actual
+// root (i.e. not inside cloud-drives-sync-root) into
+// cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups, where the regular sync then
+// propagates it. Folders in the actual root, and all other providers/accounts, are left untouched
+// (SPEC isolation rule: the only files the tool may touch outside the fence are Google backup
+// root files).
+func (r *Runner) MoveUnsyncedFiles() error {
+	for i := range r.config.Users {
+		user := &r.config.Users[i]
+
+		// Only Google Drive backup accounts are affected: their file ownership lives inside the
+		// main account's shared folder tree, so stray root files must be pulled into the fence.
+		if user.Provider != model.ProviderGoogle || user.IsMain {
 			continue
 		}
 
-		// Skip Telegram for now as it doesn't have a root folder structure
-		if user.Provider == model.ProviderTelegram {
-			continue
-		}
+		logger.InfoTagged(user.LogTags(), "Checking for unsynced files in account root...")
 
-		logger.InfoTagged(user.LogTags(), "Checking for unsynced files...")
-
-		client, err := r.GetOrCreateClient(&user)
+		client, err := r.GetOrCreateClient(user)
 		if err != nil {
-			logger.Error("Failed to create client for %s: %v", user.Email, err)
+			logger.Error("Failed to create client for %s: %v", user.GetAccountID(), err)
 			continue
 		}
 
-		// Get sync folder ID
 		syncFolderID, err := api.WithRetryT(func() (string, error) {
 			return client.GetSyncFolderID()
 		})
 		if err != nil {
-			logger.Error("Failed to get sync folder for %s: %v", user.Email, err)
+			logger.Error("Failed to get sync folder for %s: %v", user.GetAccountID(), err)
 			continue
 		}
 
-		// List files in root first to populate folder cache
+		auxID, err := getAuxFolderID(client, user, syncFolderID, false)
+		if err != nil {
+			logger.Error("Failed to locate aux folder for %s: %v", user.GetAccountID(), err)
+			continue
+		}
+		targetID, err := findChildFolder(client, auxID, UnsyncedFromBackupsFolder)
+		if err != nil {
+			logger.Error("Failed to locate %s folder for %s: %v", UnsyncedFromBackupsFolder, user.GetAccountID(), err)
+			continue
+		}
+
 		files, err := client.ListFiles("root")
 		if err != nil {
-			logger.Error("Failed to list files for %s: %v", user.Email, err)
+			logger.Error("Failed to list root files for %s: %v", user.GetAccountID(), err)
 			continue
 		}
 
 		for _, file := range files {
-			if !r.safeMode {
-				logger.InfoTagged(user.LogTags(), "Deleting unsynced file: %s", file.Name)
-				if err := client.DeleteFile(file.ID); err != nil {
-					logger.Error("Failed to delete file %s: %v", file.Name, err)
-				}
-			} else {
-				logger.DryRunTagged(user.LogTags(), "Would delete unsynced file: %s", file.Name)
+			if r.safeMode {
+				logger.DryRunTagged(user.LogTags(), "Would move unsynced file '%s' to %s", file.Name, UnsyncedFromBackupsFolder)
+				continue
 			}
-		}
-
-		// List folders in root (will use cache from ListFiles if implemented)
-		folders, err := client.ListFolders("root")
-		if err != nil {
-			logger.Error("Failed to list folders for %s: %v", user.Email, err)
-			continue
-		}
-
-		for _, folder := range folders {
-			if folder.ID != syncFolderID {
-				if !r.safeMode {
-					logger.InfoTagged(user.LogTags(), "Deleting unsynced folder: %s", folder.Name)
-					if err := client.DeleteFolder(folder.ID); err != nil {
-						logger.Error("Failed to delete folder %s: %v", folder.Name, err)
-					}
-				} else {
-					logger.DryRunTagged(user.LogTags(), "Would delete unsynced folder: %s", folder.Name)
-				}
+			logger.InfoTagged(user.LogTags(), "Moving unsynced file '%s' to %s", file.Name, UnsyncedFromBackupsFolder)
+			if err := client.MoveFile(file.ID, targetID); err != nil {
+				logger.Error("Failed to move file %s: %v", file.Name, err)
 			}
 		}
 	}
@@ -2146,7 +2252,7 @@ func (r *Runner) GetProviderQuotasFromDB(updateMetadata bool) ([]*model.Provider
 // ProcessHardDeletes detects files that are soft-deleted but missing from Google,
 // implying a hard delete. It propagates this state to other providers.
 func (r *Runner) ProcessHardDeletes() error {
-	files, err := r.db.GetFilesByStatus("softdeleted")
+	files, err := r.db.GetFilesByStatus("soft-deleted")
 	if err != nil {
 		return fmt.Errorf("failed to get soft-deleted files: %w", err)
 	}

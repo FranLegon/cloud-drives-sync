@@ -1,6 +1,6 @@
 # Database Access
 
-The `metadata.db` file is encrypted using SQLCipher with your master password.
+The `cloud-drives-sync-metadata.db` file is encrypted using SQLCipher with your master password.
 
 ## Accessing the Database Externally
 
@@ -15,7 +15,7 @@ You can access and query the database outside of the CLI using tools that suppor
 
 ```bash
 # Open the database
-sqlcipher metadata.db
+sqlcipher cloud-drives-sync-metadata.db
 
 # At the sqlcipher> prompt, enter your password
 sqlite> PRAGMA key = 'your_master_password';
@@ -28,7 +28,7 @@ sqlite> SELECT * FROM files LIMIT 10;
 ### Using DB Browser for SQLCipher
 
 1. Download [DB Browser for SQLCipher](https://sqlitebrowser.org/)
-2. Open the `metadata.db` file
+2. Open the `cloud-drives-sync-metadata.db` file
 3. When prompted, enter your master password
 4. Browse and query the database
 
@@ -37,7 +37,7 @@ sqlite> SELECT * FROM files LIMIT 10;
 ```python
 import sqlcipher3
 
-conn = sqlcipher3.connect('metadata.db')
+conn = sqlcipher3.connect('cloud-drives-sync-metadata.db')
 conn.execute("PRAGMA key = 'your_master_password'")
 
 cursor = conn.cursor()
@@ -59,7 +59,7 @@ import (
 )
 
 password := "your_master_password"
-connStr := fmt.Sprintf("file:metadata.db?_pragma_key=%s", url.QueryEscape(password))
+connStr := fmt.Sprintf("file:cloud-drives-sync-metadata.db?_pragma_key=%s", url.QueryEscape(password))
 
 db, err := sql.Open("sqlite3", connStr)
 if err != nil {
@@ -74,10 +74,10 @@ rows, err := db.Query("SELECT * FROM files LIMIT 10")
 
 ## Database Schema
 
-The database contains four main tables:
+The database contains the following tables:
 
 ### files
-Stores logical metadata about files across all providers (path, name, size, calculated_id, status).
+Stores logical metadata about files across all providers (path, name, size, calculated_id, google_drive_md5, status). `google_drive_md5` is the canonical cross-provider identity.
 
 ### replicas
 Stores physical copies on cloud providers (provider, account_id, native_id, native_hash, owner, fragmented, last_seen_at).
@@ -87,6 +87,12 @@ Stores information about split files (primarily for Telegram files exceeding the
 
 ### folders
 Stores folder structure metadata across providers.
+
+### logical_folders
+Provider-agnostic folders (path, name, parent_logical_folder_id, status).
+
+### folder_replicas
+Per-account physical copies of each logical_folder (provider, account_id, native_folder_id, owner, last_seen_at).
 
 ## Security Notes
 

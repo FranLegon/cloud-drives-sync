@@ -11,11 +11,11 @@ if (-not (Test-Path -Path .env)) { New-Item -Path .env -ItemType File -Value "CG
 if (-not (Select-String -Path .gitignore -Pattern "^\.env$" -Quiet)) { Add-Content -Path .gitignore -Value ".env" }
 ```
 
-# Set `$env:SYNC_CLOUD_DRIVES_PASS`
+# Set `$env:CLOUD_DRIVES_SYNC_PASS`
 ```powershell
 #Set the password for testing in .env:
-$env:SYNC_CLOUD_DRIVES_PASS="your_password_here"
-if (-not (Test-Path -Path .env)) { New-Item -Path .env -ItemType File -Value "SYNC_CLOUD_DRIVES_PASS=$($env:SYNC_CLOUD_DRIVES_PASS)" }
+$env:CLOUD_DRIVES_SYNC_PASS="your_password_here"
+if (-not (Test-Path -Path .env)) { New-Item -Path .env -ItemType File -Value "CLOUD_DRIVES_SYNC_PASS=$($env:CLOUD_DRIVES_SYNC_PASS)" }
 if (-not (Select-String -Path .gitignore -Pattern "^\.env$" -Quiet)) { Add-Content -Path .gitignore -Value ".env" }
 ```
 
@@ -24,7 +24,7 @@ if (-not (Select-String -Path .gitignore -Pattern "^\.env$" -Quiet)) { Add-Conte
 #Load .env variables into environment:
 Get-Content .env | ForEach-Object { if ($_ -match '^(.*?)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] } }
 #Run tests:
-go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --with-commit
+go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --force -p $env:CLOUD_DRIVES_SYNC_PASS --with-commit
 ```
 
 # Test specific test case
@@ -32,14 +32,14 @@ go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --force -p $
 #Load .env variables into environment:
 Get-Content .env | ForEach-Object { if ($_ -match '^(.*?)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] } }
 #Run specific test case:
-go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --test-case "TestCaseNumber"
+go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --force -p $env:CLOUD_DRIVES_SYNC_PASS --test-case "TestCaseNumber"
 ```
 
 <!--
 # Compare current vs last commit results:
 ```powershell
 #Compare execution time of current code vs last commit:
-git stash && git checkout main~1 && go build -o cloud-drives-sync.exe . && Write-Host "=== BEFORE ===" && measure-command { .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS } && write-host (Get-ChildItem -Path logs -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Select-Object -ExpandProperty FullName) && git checkout main && git stash pop && go build -o cloud-drives-sync.exe . && Write-Host "=== AFTER ===" && measure-command { .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS } && write-host (Get-ChildItem -Path logs -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Select-Object -ExpandProperty FullName)
+git stash && git checkout main~1 && go build -o cloud-drives-sync.exe . && Write-Host "=== BEFORE ===" && measure-command { .\cloud-drives-sync.exe test --force -p $env:CLOUD_DRIVES_SYNC_PASS } && write-host (Get-ChildItem -Path logs -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Select-Object -ExpandProperty FullName) && git checkout main && git stash pop && go build -o cloud-drives-sync.exe . && Write-Host "=== AFTER ===" && measure-command { .\cloud-drives-sync.exe test --force -p $env:CLOUD_DRIVES_SYNC_PASS } && write-host (Get-ChildItem -Path logs -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Select-Object -ExpandProperty FullName)
 ```
 -->
 
@@ -108,7 +108,7 @@ while ($iteration -le $maxIterations) {
         $prompt = "The build failed with the following output: $buildOutput. Analyze the error and fix it before proceeding."
         continue
     }
-    .\cloud-drives-sync.exe test --force -p $env:SYNC_CLOUD_DRIVES_PASS --with-commit | Tee-Object -Variable testOutput
+    .\cloud-drives-sync.exe test --force -p $env:CLOUD_DRIVES_SYNC_PASS --with-commit | Tee-Object -Variable testOutput
     $testExitCode = $LASTEXITCODE
     $testErrorLines = Get-Content test.log | Where-Object { $_ -match "ERROR|FATAL|PANIC"}
     if ($testExitCode -ne 0) { 
