@@ -162,9 +162,23 @@ completes remaining work without duplicating already-done work.
 
 ## Commands
 
-There are four top-level commands: `config`, `sync`, `test` and `help`. Every command accepts the master
-password non-interactively (for scripting) or prompts for it. Every state-changing command supports
-**dry-run mode** (logs what it would do, no cloud writes). Exit 0 on success, non-zero on error.
+There are four top-level commands: `config`, `sync`, `test` and `help`. Exit 0 on success, non-zero on error.
+Exactly one action flag must be provided per invocation (action flags are mutually exclusive within each command).
+
+### Global flags (all commands)
+
+| Flag | What it does |
+|---|---|
+| `-p`, `--password` | Provide the master password non-interactively for scripting. If omitted, the tool prompts for it. |
+| `-s`, `--safe` | Dry-run mode: no writes, deletes, or permission changes are sent to the cloud. The tool prints exactly what it *would* do instead (e.g. `[DRY RUN] [backup@gmail.com] DELETE GDrive file 'duplicate.txt' (LogicalFileID: xyz)`). Local reads and database reads are still allowed. |
+| `-h`, `--help` | Show help for the command. |
+
+### Flags specific to `config --init`
+
+| Flag | What it does |
+|---|---|
+| `--json` | Pass all client credentials as a JSON string instead of being prompted for them interactively. |
+| `--getjson` | After collecting client credentials, print the equivalent JSON string to stdout for reuse in scripting. |
 
 ### `config` — manage configuration and accounts
 
@@ -175,7 +189,9 @@ password non-interactively (for scripting) or prompts for it. Every state-changi
 | `--remove-account` | Remove an account from config (local only, no cloud deletion). Main account removable only when no backups depend on it. |
 | `--check-tokens` | Report which stored credentials still work and which have expired/been revoked. |
 | `--reauth` | Fix broken credentials (default: only broken ones; `--all`: every account). Must confirm re-authenticated identity matches the original. |
-| `--auto` *(deployment build only)* | Install/remove/status a recurring OS-native scheduled run of `sync` (Windows: Task Scheduler; Linux: systemd user timer). Sub-flags: `--set` (requires password), `--disable`. |
+| `--auto` *(deployment build only)* | Install/remove/status a recurring OS-native scheduled run of `sync` (Windows: Task Scheduler; Linux: systemd user timer). Controlled via:<ul><li>`--set`: Must be used with --password, which is stored as environment variable with random name and retrieved by task/service when running sync (env var random name hardocded in task/service definition)</li><li>`--disable`: Deletes environment variable and task/service</li></ul> |
+
+
 
 ### `sync` — operate and maintain the pool
 
@@ -194,22 +210,22 @@ one operation.
 | `--free-main` | Move all file content off the main account to the backup accounts with the most free space. Error if backups lack combined capacity. Never delete source before destination is confirmed. |
 | `--balance-storage` | When any backup account exceeds ~95% full, move its largest files to the emptiest backup account on the same provider until it drops below ~90%. Same provider only; Telegram (no quota) is exempt as a pressure source. |
 | `--sync-providers` | Apply all synchronization rules: fill gaps, resolve conflicts, propagate soft-deletions, restore lost replicas, mirror folder structure. |
-| `--sync-unsynced-files` | Move everything in Google Drive backup accounts that sits outside the managed area to cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups. |
+| `--sync-unsynced-files` | Move everything in Google Drive backup accounts that sits on Google Drive actual root (no folder) to cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups. |
 
 ### `test` — end-to-end self-test
 
-Runs all acceptance scenarios against real accounts. Flags: `--safe` skip destructive reset,
-`--force` skip confirmation, `--stop-on-error`, `--test-case N` run one scenario. With
-`--with-commit`: commits tested `.go` files to a `test` branch and merges to `main` on full pass;
-restores working tree on failure.
+Runs all acceptance scenarios against real accounts using test-cloud-drives-sync-root instead of cloud-drives-sync-root. Generates a log at invocation_path/logs/test-YYYYMMDD-HHMMSS.log (or test-YYYYMMDD-HHMMSS-case-{test-case-id}.log).
+| Flag | What it must accomplish |
+|---|---|
+| `--case {test-case-id}` | Run one test case only. |
+| `--with-commit` | Force commits current local state to "test" branch, runs tests, then merges to main ONLY on tests success. |
 
 ---
 
 ## Deployment build (auto)
 
-A separate build variant embeds the encrypted config directly in the binary (no init step needed at
-the target machine — only the master password at runtime). This variant only exposes `sync`, `auto`,
-and `help`. All other commands are unavailable.
+A separate build variant (using //go:build auto) embeds the encrypted config directly in the binary (no init step needed at
+the target machine — only the master password at runtime). This variant only exposes `sync` (no flags) and `init --auto`. All other commands or flag combinations are unavailable, even --help.
 
 ---
 
