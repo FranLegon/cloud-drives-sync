@@ -22,7 +22,8 @@ Inside the root there is also a reserved **cloud-drives-sync-aux** folder for th
 
 **Pre-flight:** Before any cloud work, verify exactly one cloud-drives-sync-root exists per account. Zero →
 create it (or, if Google Drive, share it from main). More than one → stop and ask the user to resolve. Trashed/recycled
-items don't count.
+items don't count. On Google Drive, if the single cloud-drives-sync-root exists but is not located in the account's
+actual root directory, move it back to the root before proceeding.
 
 ---
 
@@ -65,7 +66,8 @@ together across providers. **Google Drive is also authoritative for the canonica
 ### Microsoft OneDrive
 - Each backup account owns its **own** cloud-drives-sync-root and all its sub-folders.
 - Files are distributed across accounts. An account that doesn't own a file must have a **reference**
-  at the correct path: a native shortcut if possible, otherwise a zero-byte **placeholder** with original file's name plus ".placeholder" extension. Both count as "the file is accounted for here."
+  at the correct path: a native shortcut if possible, otherwise a zero-byte **placeholder**. Both count as "the file is accounted for here."
+- **Placeholder naming:** A placeholder is named after the original file with the logical_file's Google Drive MD5 encoded and a `.placeholder` extension appended: `filename.ext.md5-<md5>.placeholder` (e.g. `report.pdf.md5-d41d8cd98f00b204e9800998ecf8427e.placeholder`). Because the placeholder itself is zero-byte, this lets the tool recover the original file's name and match it back to its logical_file (by Google Drive MD5) from the placeholder alone.
 - The complete folder tree (including empty folders) must be mirrored across every Microsoft backup
   account. No missing entries, no redundant real copies.
 - File moves: copy-then-remove (never destroy source first).
@@ -86,6 +88,32 @@ requires each account to own its own complete structure.
 - Files larger than Telegram's per-object limit (variable, 2 GB for non-tests and 2 MB for tests) are split into ordered **fragments**,
   tracked individually, reassembled on demand.
 - Non-file messages (channel creation notices, membership events, etc.) are ignored.
+- **Caption schema:** Each stored object's caption carries a JSON object mirroring the database rows so the logical_file and its place in the tree can be reconstructed from Telegram alone. The `replica_fragment` key is omitted when the object is not fragmented:
+  ```json
+  {
+    "replica": {
+      "logical_file_id": "uuid-...",
+      "google_drive_md5": "...",
+      "path": "/folder/file.ext",
+      "name": "file.ext",
+      "size": 12345,
+      "provider": "telegram",
+      "account_id": "+15550109999",
+      "native_id": "msg_id_...",
+      "native_hash": null,
+      "mod_time": 1704067200,
+      "status": "active",
+      "fragmented": true
+    },
+    "replica_fragment": {
+      "fragment_number": 1,
+      "fragments_total": 2,
+      "size": 6000,
+      "native_fragment_id": "tg_unique_id_..."
+    }
+  }
+  ```
+- **Two-step creation:** Because `native_id` and `native_fragment_id` are unknown before upload, upload the object first with a partial caption, then read the resulting message ID and file unique ID from the upload result and rewrite the caption with the complete JSON.
 
 ---
 
@@ -118,13 +146,20 @@ Note: Database is not self referential to avoid circular conflicts. There is no 
 ## Security and configuration
 
 - One master password unlocks everything at runtime. Nothing sensitive is ever written in the clear.
-- Credentials and tokens live in an **encrypted configuration json** (strong authenticated
-  encryption, key derived from master password via a slow memory-hard KDF, unique salt generated
-  once and reused).
-- The database is also encrypted with the master password and must remain directly queryable using
-  standard database tooling.
+- Credentials and tokens live in an **encrypted configuration json** stored on disk as `config.json.enc`
+  (AES-256-GCM authenticated encryption; key derived from the master password via Argon2id). A unique,
+  cryptographically secure salt is generated once on first run, stored in `config.salt`, and reused for all
+  subsequent key derivations.
+- The database is also encrypted with the master password (SQLCipher) and must remain directly queryable using
+  standard database tooling. The database login user is `owner`.
 - Config holds: per-provider application credentials, and per-account: provider, identifier
   (email/phone), main-account flag, durable auth token/refresh token/session.
+- **OAuth scopes / auth:** Google requests `https://www.googleapis.com/auth/drive` and
+  `https://www.googleapis.com/auth/userinfo.email`; Microsoft requests `files.readwrite.all`, `user.read`, and
+  `offline_access`; Telegram authenticates with phone number and verification code. Google/Microsoft flows run a
+  local web server to capture the OAuth redirect.
+- **Microsoft app registration:** The Azure App Registration must support "Accounts in any organizational
+  directory (Any Azure AD directory — Multitenant)" for OneDrive for Business.
 
 *`config.json` (before encryption):*
 ```json
@@ -193,7 +228,7 @@ folders.
 
 **Path conflicts:** If a logical_file exists at different paths on different providers, the Google Drive replica's path is authoritative. All other providers' copies are moved to match Google Drive's path on the next sync (creating folders as needed).
 
-**Content conflicts:** Same path, different content → preserve both: rename the divergent copy with a timestamped suffix, never silently overwrite.
+**Content conflicts:** Same path, different content → preserve both: rename the divergent copy with a timestamped suffix (format `_conflict_YYYY-MM-DD_hh-mm-ss`, inserted before the file extension), never silently overwrite.
 
 **Soft deletion:** Moving a file to cloud-drives-sync-root/cloud-drives-sync-aux/soft-deleted propagates that state everywhere (active
 copies on other providers are moved to soft-deleted too). Moving a file back makes it active and re-mirrors it everywhere.
@@ -302,8 +337,9 @@ If there is pre-existing data in cloud-drives-sync-root (and subfolders) and nei
 | 18 | Telegram fragmentation and defragmentation restore | "manually" create test-case-id-18.txt (containing text "test-case-id = 18\n{rand_str}" where rand_str is a 2.5 MB random string generated at test runtime, stored in memory for later comparison) in cloud-drives-sync-root using main account, then run sync. Then "manually" delete the file from all Google Drive and Microsoft OneDrive accounts, leaving only the Telegram fragmented replica. Then run sync again. | The file exists on every account, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor) and is not fragmented. In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account and is not fragmented. In Telegram, the file fragments are stored in the managed channel with embedded metadata. In cloud-drives-sync-metadata.db, the logical_file row has the correct Google Drive MD5 and the replica rows have the correct provider fingerprints, the Telegram replica is marked as fragmented, and the fragments table has the correct entries for the Telegram fragments. |
 | 19 | Idempotent sync | "manually" create test-case-id-19.txt (containing text "test-case-id = 19") and run sync. Retrieve database hash. Run sync again. Retrieve database hash again. | The database hash is identical before and after the second sync. No changes were made to any files or folders on any account. |
 | 20 | Quota check | Run sync --quota | The reported used and available space per provider is consistent with the actual usage on each account and the reported usage in cloud-drives-sync-metadata.db. No provider exceeds its quota limits. |
-| 21 | Divergent content at the same logical path | "manually" create test-case-id-21.txt (containing text "test-case-id = 21\nUploaded to provider: Google Drive") in cloud-drives-sync-root using main account, then "manually" create test-case-id-21.txt (containing text "test-case-id = 21\nUploaded to provider: Microsoft OneDrive") in cloud-drives-sync-root using a Microsoft OneDrive backup account, then run sync. | Both versions of test-case-id-21.txt exist on every account, with identical content (download from each source and check) and Google Drive MD5, but one of them has been renamed with a timestamped suffix (before file extension) to avoid overwriting. In cloud-drives-sync-metadata.db, there are two logical_file rows with different Google Drive MD5s and the replica rows have the correct provider fingerprints. |
+| 21 | Divergent content at the same logical path | "manually" create test-case-id-21.txt (containing text "test-case-id = 21\nUploaded to provider: Google Drive") in cloud-drives-sync-root using main account, then "manually" create test-case-id-21.txt (containing text "test-case-id = 21\nUploaded to provider: Microsoft OneDrive") in cloud-drives-sync-root using a Microsoft OneDrive backup account, then run sync. | Both versions of test-case-id-21.txt exist on every account, with identical content (download from each source and check) and Google Drive MD5, but one of them has been renamed with a timestamped suffix (`_conflict_YYYY-MM-DD_hh-mm-ss` before file extension) to avoid overwriting. In cloud-drives-sync-metadata.db, there are two logical_file rows with different Google Drive MD5s and the replica rows have the correct provider fingerprints. |
 | 22 | Sync resumed after interruption | "manually" create test-case-id-22.txt (containing text "test-case-id = 22") in cloud-drives-sync-root using main account, then run sync. Interrupt the sync process (e.g., kill the process) during the transfer of the file to a backup account. Restart the sync process. | The file exists on every account, with identical content (download from each source and check) and Google Drive MD5. In cloud-drives-sync-metadata.db, the logical_file row has the correct Google Drive MD5 and the replica rows have the correct provider fingerprints. No duplicates were created during the interrupted sync, and no data was lost. |
+| 23 | MS Placeholders | Check that there are at least 2 Microsoft OneDrive backup accounts. "Manually" create test-case-id-23.txt (containing text "test-case-id = 23") in cloud-drives-sync-root using a Microsoft OneDrive backup account, then run sync. Then run sync again. | The file exists on every account, with identical content (download from each source and check) and Google Drive MD5. In Microsoft OneDrive, the file is mirrored as a shortcut or placeholder in every other backup account. In cloud-drives-sync-metadata.db, the logical_file row has the correct Google Drive MD5 and the replica rows have the correct provider fingerprints. Shortcuts and placeholders are not duplicated across accounts or propagated to Google Drive or Telegram as if they were real files. |
 | inner1 | Google Drive Transfer Ownership | "manually" create test-case-id-inner1.txt (containing text "test-case-id = inner1") in cloud-drives-sync-root using main account, then run sync. | File was tranfered using "Transfer Ownership" flow, not download-reupload-delete. |
 | inner2 | Microsoft OneDrive Real Shortcut | "manually" create test-case-id-inner2.txt (containing text "test-case-id = inner2") in cloud-drives-sync-root using a Microsoft OneDrive backup account, then run sync. | File was mirrored as a real shortcut in other OneDrive backup accounts, not as a placeholder. |
 
@@ -315,6 +351,10 @@ A separate build variant (using //go:build auto) embeds the encrypted config (co
 the target machine — only the master password at auto set or sync). 
 This variant only exposes `sync -p {pass_from_env_var}`, `config --auto --set` and `config --auto --disable`. All other commands or flag combinations are unavailable, even --help.
 sync command compiled with this build variant produces no logs and no detailed output, only exit codes. It is intended for scheduled runs on a headless server, not for interactive use.
+
+**Schedule interval and triggers:** The recurring run fires every 8 hours.
+- **Windows (Task Scheduler):** creates a task named `cloud-drives-sync` that triggers on logon and repeats every 8 hours; `--set` also runs it immediately once. `--disable` deletes the task.
+- **Linux (systemd user timer):** writes service and timer units to `~/.config/systemd/user/`, then enables and starts the timer; the timer fires 5 minutes after boot and then every 8 hours. `--disable` stops and disables the timer and removes the unit files.
 
 ---
 
