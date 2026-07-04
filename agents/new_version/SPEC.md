@@ -40,7 +40,7 @@ Each replica carries the provider's stable file ID and its content fingerprint.
 
 A logical_file's canonical identity is its **Google Drive MD5**. Every logical_file must have a
 replica on Google Drive; its Google-provided MD5 is the identity that ties all of its replicas
-together across providers.
+together across providers. **Google Drive is also authoritative for the canonical path** stored in the logical_files table.
 
 - **Same content on the same provider?** → compare provider fingerprints (MD5 on Google, SHA1 on
   OneDrive).
@@ -50,6 +50,7 @@ together across providers.
 - **A replica on another provider not yet linked to any Google Drive MD5** has no established
   identity. To establish it, upload that file to Google Drive, read back the MD5 Google assigns, and
   record it as the logical_file's identity. Only then is the replica considered matched.
+- **Path authority:** When collecting metadata, if the same logical_file (by Google Drive MD5) exists at different paths on different providers, the Google Drive replica's location becomes canonical and is stored in logical_files. All other replicas record their actual paths in the replica table and are corrected during sync.
 
 ---
 
@@ -179,7 +180,7 @@ Note: Database is not self referential to avoid circular conflicts. There is no 
 After a successful sync, all of the following must be true:
 
 1. Every active logical_file exists with identical content on every provider, at the
-   same logical path. Each logical_file has exactly one single replica per provider.
+   same logical path (the path from the logical_files table, which is always Google Drive's canonical path). Each logical_file has exactly one single replica per provider.
 2. The folder structure is identical across all providers with a real structure (not Telegram).
 3. No active file is missing on any provider.
 4. File state (active, soft-deleted, deleted) is the same anywhere.
@@ -190,8 +191,9 @@ After a successful sync, all of the following must be true:
 **Gaps:** A file present on one provider but absent on another is uploaded, recreating any needed
 folders.
 
-**Conflicts:** Same path, different content → preserve both: rename the divergent copy with a
-timestamped suffix, never silently overwrite.
+**Path conflicts:** If a logical_file exists at different paths on different providers, the Google Drive replica's path is authoritative. All other providers' copies are moved to match Google Drive's path on the next sync (creating folders as needed).
+
+**Content conflicts:** Same path, different content → preserve both: rename the divergent copy with a timestamped suffix, never silently overwrite.
 
 **Soft deletion:** Moving a file to cloud-drives-sync-root/cloud-drives-sync-aux/soft-deleted propagates that state everywhere (active
 copies on other providers are moved to soft-deleted too). Moving a file back makes it active and re-mirrors it everywhere.
@@ -251,7 +253,7 @@ one operation.
 | Flag | What it must accomplish |
 |---|---|
 | `--share-with-main` | Verify and repair access permissions so all backup accounts have the correct access to the shared structure. |
-| `--get-metadata` | Recursively scan every account's managed area and update the local database to match reality: all files, replicas, fragments, folders, shortcuts, and placeholders. |
+| `--get-metadata` | Recursively scan every account's managed area and update the local database to match reality: all files, replicas, fragments, folders, shortcuts, and placeholders. **Google Drive is authoritative for paths:** when the same logical_file (matched by Google Drive MD5 or content fingerprint) exists at different paths across providers, the Google Drive replica's path becomes the canonical path in logical_files; all other replicas' paths in the replica table reflect their actual locations, but will be corrected on the next sync. |
 | `--quota` | Report used/available space per provider (aggregated), cross-check that usage fits within other providers' capacity. |
 | `--check-for-duplicates` | Refresh metadata, then report byte-identical files within the same provider, grouped. |
 | `--remove-duplicates` | Interactive: for each duplicate set, let the user choose which to delete. |
