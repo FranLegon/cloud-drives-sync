@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/config"
@@ -35,6 +36,10 @@ and Telegram.`,
 		if AutoBuild {
 			if cmd.Annotations["autoBuildAllowed"] != "true" && cmd.Name() != "help" && cmd.Name() != "__complete" && cmd.Name() != "__completeNoDesc" {
 				return fmt.Errorf("command %q is not available in auto builds (only sync, config --auto, and help are available)", cmd.Name())
+			}
+			// The deployment (auto) sync is headless: no logs or detailed output, only exit codes.
+			if cmd.Name() == "sync" {
+				logger.SetOutput(io.Discard)
 			}
 		}
 
@@ -165,5 +170,6 @@ func setupDBAndRunner(preflight bool) error {
 }
 
 func init() {
+	rootCmd.CompletionOptions.DisableDefaultCmd = true
 	rootCmd.PersistentFlags().StringVarP(&passwordFlag, "password", "p", "", "Master password (non-interactive)")
 }

@@ -386,6 +386,11 @@ func (r *Runner) GetMetadata() error {
 		return fmt.Errorf("failed to promote orphaned replicas: %w", err)
 	}
 
+	logger.Info("Recording Google Drive MD5 canonical identity...")
+	if err := r.db.UpdateLogicalFilesGoogleMD5(); err != nil {
+		return fmt.Errorf("failed to update google_drive_md5: %w", err)
+	}
+
 	logger.Info("Updating soft-deleted file status...")
 	if err := r.db.UpdateSoftDeletedFileStatus(startTime); err != nil {
 		return fmt.Errorf("failed to update soft-deleted status: %w", err)

@@ -907,6 +907,34 @@ func (db *DB) GetFolderReplicas(logicalFolderID string) ([]*model.FolderReplica,
 	return replicas, rows.Err()
 }
 
+// UpdateLogicalFilesGoogleMD5 populates each logical file's canonical Google Drive MD5 identity from
+// its most recent active Google replica's fingerprint. Only rows whose value actually changes are
+// updated, so repeated runs are idempotent (do not bump the metadata version).
+func (db *DB) UpdateLogicalFilesGoogleMD5() error {
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `
+		UPDATE files
+		SET google_drive_md5 = g.md5
+		FROM (
+			SELECT file_id, native_hash AS md5,
+				ROW_NUMBER() OVER (PARTITION BY file_id ORDER BY mod_time DESC) AS rn
+			FROM replicas
+			WHERE LOWER(provider) = 'google'
+			AND status = 'active'
+			AND native_hash IS NOT NULL
+			AND native_hash != ''
+		) g
+		WHERE files.id = g.file_id
+		AND g.rn = 1
+		AND files.google_drive_md5 IS NOT g.md5
+		`
+		if _, err := tx.Exec(query); err != nil {
+			return fmt.Errorf("failed to update google_drive_md5: %w", err)
+		}
+		return nil
+	})
+}
+
 // GetFilesByCalculatedID returns all files with a specific calculated_id
 func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error) {
 	queryFiles := `
