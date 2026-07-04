@@ -90,10 +90,10 @@ requires each account to own its own complete structure.
 
 ## State the tool must track
 
-The tool keeps an **encrypted local database** (password = master password, queryable by the user
-outside the tool). After any command that changes it, upload a copy to cloud-drives-sync-aux in every
-account. Before any command that needs it, obtain the freshest copy: local → main account → other
-providers in order. If not found anywhere (and this isn't first-time setup), stop with an error.
+The tool keeps an **encrypted SQLCipher local database** (password = master password, queryable by the user
+outside the tool) called cloud-drives-sync-metadata.db. After any command that changes it, upload a copy to cloud-drives-sync-aux in every 
+account. Before any command that needs it, obtain the freshest (by last modified timestamp) copy: local → main account → other
+providers in order. If not found anywhere (and this isn't first-time setup config --init), stop with an error.
 
 The database must record:
 
@@ -231,7 +231,7 @@ If there is pre-existing data in cloud-drives-sync-root (and subfolders) and nei
 
 | test-case-id | Test Name | What to do | Validation |
 |---|---|---|---|
-| 1 | Clean-slate setup | Run config --init -p {pass} | cloud-drives-sync-root, cloud-drives-sync-root/cloud-drives-sync-aux, cloud-drives-sync-root/cloud-drives-sync-aux/metadata.db, cloud-drives-sync-root/cloud-drives-sync-aux/soft-deleted, cloud-drives-sync-root/cloud-drives-sync-aux/hard-deleted, cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups exist on every account and are owned by main account on Google Drive Main account. |
+| 1 | Clean-slate setup | Run config --init -p {pass} | cloud-drives-sync-root, cloud-drives-sync-root/cloud-drives-sync-aux, cloud-drives-sync-root/cloud-drives-sync-aux/cloud-drives-sync-metadata.db, cloud-drives-sync-root/cloud-drives-sync-aux/soft-deleted, cloud-drives-sync-root/cloud-drives-sync-aux/hard-deleted, cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups exist on every account and are owned by main account on Google Drive Main account. |
 | 2 | Create file on main | "manually" create test-case-id-2.txt (containing text "test-case-id = 2\n{rand_str}" where rand_str is a 69-character random string generated at test runtime, stored in memory for later comparison) in cloud-drives-sync-root using main account, then run sync. | test-case-id-2.txt exists on every account, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor). In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account. In Telegram, the file is stored in the managed channel with embedded metadata. |
 | 3 | Create file on Google backup | "manually" create test-case-id-3.txt (containing text "test-case-id = 3\n{rand_str}" where rand_str is a 69-character random string generated at test runtime, stored in memory for later comparison) in cloud-drives-sync-root using a Google Drive backup account, then run sync. | test-case-id-3.txt exists on every account, with identical content (download from each source and check) and Google Drive MD5. In Google Drive, the file is owned by a backup account and shared to main (editor). In Microsoft OneDrive, the file is owned by a single backup account and mirrored as a shortcut or placeholder in every other backup account. In Telegram, the file is stored in the managed channel with embedded metadata. |
 | 4 | Create folder on main | "manually" create test-case-id-4-folder in cloud-drives-sync-root using main account, then run sync. | test-case-id-4-folder exists on every account and provider (except Telegram, which has no empty folders). On Google Drive, the folder is owned by main and shared to all backup accounts. On Microsoft OneDrive, each backup account owns its own copy of the folder. |
@@ -265,7 +265,9 @@ If there is pre-existing data in cloud-drives-sync-root (and subfolders) and nei
 ## Deployment build (auto)
 
 A separate build variant (using //go:build auto) embeds the encrypted config directly in the binary (no init step needed at
-the target machine — only the master password at runtime). This variant only exposes `sync -p {pass_from_env_var}`, `init --auto --set` and `init --auto --disable`. All other commands or flag combinations are unavailable, even --help.
+the target machine — only the master password at setup). 
+This variant only exposes `sync -p {pass_from_env_var}`, `config --auto --set` and `config --auto --disable`. All other commands or flag combinations are unavailable, even --help.
+sync command compiled with this build variant produces no logs and no detailed output, only exit codes. It is intended for scheduled runs on a headless server, not for interactive use.
 
 ---
 
