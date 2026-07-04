@@ -117,13 +117,60 @@ Note: Database is not self referential to avoid circular conflicts. There is no 
 ## Security and configuration
 
 - One master password unlocks everything at runtime. Nothing sensitive is ever written in the clear.
-- Credentials and tokens live in an **encrypted configuration file** (strong authenticated
+- Credentials and tokens live in an **encrypted configuration json** (strong authenticated
   encryption, key derived from master password via a slow memory-hard KDF, unique salt generated
   once and reused).
 - The database is also encrypted with the master password and must remain directly queryable using
   standard database tooling.
 - Config holds: per-provider application credentials, and per-account: provider, identifier
   (email/phone), main-account flag, durable auth token/refresh token/session.
+
+*`config.json` (before encryption):*
+```json
+{
+  "google_client": {
+    "id": "YOUR_GCP_CLIENT_ID",
+    "secret": "YOUR_GCP_CLIENT_SECRET"
+  },
+  "microsoft_client": {
+    "id": "YOUR_AZURE_CLIENT_ID",
+    "secret": "YOUR_AZURE_CLIENT_SECRET"
+  },
+  "telegram_client": {
+    "api_id": "YOUR_TELEGRAM_API_ID",
+    "api_hash": "YOUR_TELEGRAM_API_HASH"
+  },
+  "users": [
+    {
+      "provider": "Google",
+      "email": "main.user@gmail.com",
+      "is_main": true,
+      "refresh_token": "..."
+    },
+    {
+      "provider": "Google",
+      "email": "backup1@gmail.com",
+      "is_main": false,
+      "refresh_token": "..."
+    },
+    {
+      "provider": "Microsoft",
+      "email": "main.user@company.com",
+      "refresh_token": "..."
+    },
+    {
+      "provider": "Microsoft",
+      "email": "work.backup@company.com",
+      "refresh_token": "..."
+    },
+    {
+      "provider": "Telegram",
+      "phone": "+1234567890",
+      "session_data": "..."
+    }
+  ]
+}
+```
 
 ---
 
@@ -262,8 +309,8 @@ If there is pre-existing data in cloud-drives-sync-root (and subfolders) and nei
 
 ## Deployment build (auto)
 
-A separate build variant (using //go:build auto) embeds the encrypted config directly in the binary (no init step needed at
-the target machine — only the master password at setup). 
+A separate build variant (using //go:build auto) embeds the encrypted config (config.json) directly in the binary (no init step needed at
+the target machine — only the master password at auto set or sync). 
 This variant only exposes `sync -p {pass_from_env_var}`, `config --auto --set` and `config --auto --disable`. All other commands or flag combinations are unavailable, even --help.
 sync command compiled with this build variant produces no logs and no detailed output, only exit codes. It is intended for scheduled runs on a headless server, not for interactive use.
 
