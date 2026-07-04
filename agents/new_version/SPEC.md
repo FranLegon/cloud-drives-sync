@@ -214,13 +214,25 @@ one operation.
 
 ### `test` — end-to-end self-test
 
-Runs all acceptance scenarios against real accounts using test-cloud-drives-sync-root instead of cloud-drives-sync-root. Generates a log at invocation_path/logs/test-YYYYMMDD-HHMMSS.log (or test-YYYYMMDD-HHMMSS-case-{test-case-id}.log).
+Runs all acceptance scenarios against real accounts. 
+Mimics user interaction directly with the provider's clouds and logs all actions. Example: `[MANUAL INTERACTION] [main@gmail.com] Create folder 'test-folder-1' in cloud-drives-sync-root`.
+Generates a log at invocation_path/logs/test-YYYYMMDD-HHMMSS.log (or test-YYYYMMDD-HHMMSS-case-{test-case-id}.log).
+
 | Flag | What it must accomplish |
 |---|---|
 | `--case {test-case-id}` | Run one test case only. |
+| `--unsafe` | If there is pre-existing data in cloud-drives-sync-root (and subfolders), delete it all before running the test. |
+| `--backup` | If there is pre-existing data in cloud-drives-sync-root (and subfolders), rename cloud-drives-sync-root to cloud-drives-sync-root-backup-{timestamp} before running the test. |
 | `--with-commit` | Force commits current local state to "test" branch, runs tests, then merges to main ONLY on tests success. |
 
+If there is pre-existing data in cloud-drives-sync-root (and subfolders) and neither `--unsafe` nor `--backup` is specified, the test stops with an error.
+
 #### Test cases
+
+| test-case-id | Test Name | What it must accomplish |
+|---|---|---|
+| 1 | Clean-slate setup | After config --init -p {pass}, cloud-drives-sync-root, cloud-drives-sync-root/cloud-drives-sync-aux, cloud-drives-sync-root/cloud-drives-sync-aux/soft-deleted, cloud-drives-sync-root/cloud-drives-sync-aux/hard-deleted, cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups exist on every account and are owned by main account on Google Drive Main account. |
+
 
 <!--
 ## Acceptance scenarios (self-test must cover all)
@@ -254,7 +266,7 @@ the target machine — only the master password at runtime). This variant only e
 
 ## Constraints
 
-- Never read, list, modify, or delete anything outside the cloud-drives-sync-root and test-cloud-drives-sync-root folders. The only exception is files in Google Drive backup account's actual root (no folder) — those are moved to cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups.
+- Never read, list, modify, or delete anything outside the cloud-drives-sync-root. The only exception is files in Google Drive backup account's actual root (no folder) — those are moved to cloud-drives-sync-root/cloud-drives-sync-aux/unsynced-from-backups.
 - When doing download/reupload/delete, never destroy an original before its replacement is confirmed intact (same filesize).
 - Concurrent independent reads across accounts are fine; all writes to the local database are serialized.
 - All file transfers are streamed (no whole-file in-memory buffering).
