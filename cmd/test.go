@@ -478,25 +478,26 @@ func verifyFileOnAllProviders(r *task.Runner, mainUser *model.User, backups []*m
 		if err != nil || f == nil {
 			return fmt.Errorf("file %s not found in DB", path)
 		}
-		nid := getNativeID(f, u)
+		var nid string
+		if u.Provider == model.ProviderGoogle {
+			// Google shared folder: one physical file shared across all accounts.
+			// Always use the active Google replica's NativeID — stale per-account
+			// entries must not be used as they may refer to trashed files.
+			for _, rep := range f.Replicas {
+				if rep.Provider == model.ProviderGoogle && rep.Status == "active" {
+					nid = rep.NativeID
+					break
+				}
+			}
+		} else {
+			nid = getNativeID(f, u)
+		}
 		if nid == "" {
-			if u.Provider == model.ProviderGoogle {
-				// Google shared folder: all accounts share the same physical file.
-				// Fall back to any active Google replica's NativeID.
-				for _, rep := range f.Replicas {
-					if rep.Provider == model.ProviderGoogle && rep.Status == "active" {
-						nid = rep.NativeID
-						break
-					}
-				}
+			// Microsoft may have a placeholder/shortcut — skip content check.
+			if u.Provider == model.ProviderMicrosoft {
+				continue
 			}
-			if nid == "" {
-				// Microsoft may have a placeholder/shortcut — skip content check.
-				if u.Provider == model.ProviderMicrosoft {
-					continue
-				}
-				return fmt.Errorf("no nativeID for %s on %s", path, u.Email)
-			}
+			return fmt.Errorf("no nativeID for %s on %s", path, u.Email)
 		}
 		var buf bytes.Buffer
 		if err := client.DownloadFile(nid, &buf); err != nil {
