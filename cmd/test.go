@@ -377,6 +377,11 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("failed to recreate sync folders: %w", err)
 	}
 
+	logger.Info("[TEST] Ensuring special aux folders exist (simulating config --init)...")
+	if err := runner.EnsureSpecialFolders(); err != nil {
+		return fmt.Errorf("EnsureSpecialFolders failed: %w", err)
+	}
+
 	logger.Info("[TEST] Running initial GetMetadata...")
 	if err := runner.GetMetadata(); err != nil {
 		return fmt.Errorf("GetMetadata failed: %w", err)
@@ -475,11 +480,23 @@ func verifyFileOnAllProviders(r *task.Runner, mainUser *model.User, backups []*m
 		}
 		nid := getNativeID(f, u)
 		if nid == "" {
-			// May be a placeholder/shortcut on MS — skip content check
-			if u.Provider == model.ProviderMicrosoft {
-				continue
+			if u.Provider == model.ProviderGoogle {
+				// Google shared folder: all accounts share the same physical file.
+				// Fall back to any active Google replica's NativeID.
+				for _, rep := range f.Replicas {
+					if rep.Provider == model.ProviderGoogle && rep.Status == "active" {
+						nid = rep.NativeID
+						break
+					}
+				}
 			}
-			return fmt.Errorf("no nativeID for %s on %s", path, u.Email)
+			if nid == "" {
+				// Microsoft may have a placeholder/shortcut — skip content check.
+				if u.Provider == model.ProviderMicrosoft {
+					continue
+				}
+				return fmt.Errorf("no nativeID for %s on %s", path, u.Email)
+			}
 		}
 		var buf bytes.Buffer
 		if err := client.DownloadFile(nid, &buf); err != nil {
