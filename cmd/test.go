@@ -30,17 +30,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var testSafe bool
-var testForce bool
-var testStopOnError bool
-var testCase int
+var testUnsafe bool
+var testBackup bool
+var testCase string
 var testWithCommit string
 var test10Hash string
 
 var testCmd = &cobra.Command{
 	Use:   "test",
-	Short: "Test various provider functions",
-	Long:  `Run test operations for providers (like upload/download) without updating DB.`,
+	Short: "Run end-to-end acceptance tests",
+	Long:  `Run SPEC acceptance scenarios against real provider accounts.`,
 	Annotations: map[string]string{
 		"skipDB": "true",
 	},
@@ -48,11 +47,10 @@ var testCmd = &cobra.Command{
 }
 
 func init() {
-	testCmd.Flags().BoolVar(&testSafe, "safe", false, "Skip destructive cleanup steps")
-	testCmd.Flags().BoolVar(&testForce, "force", false, "Skip confirmation prompt")
-	testCmd.Flags().BoolVarP(&testStopOnError, "stop-on-error", "s", false, "Stop test execution immediately if an error occurs")
-	testCmd.Flags().IntVarP(&testCase, "test-case", "t", 0, "Run specific test case and its dependencies (0 = all)")
-	testCmd.Flags().StringVarP(&testWithCommit, "with-commit", "c", "", "Commit .go files to test branch and merge on success (optional: commit message)")
+	testCmd.Flags().StringVar(&testCase, "case", "", "Run one SPEC test case only")
+	testCmd.Flags().BoolVar(&testUnsafe, "unsafe", false, "Delete pre-existing managed data before running tests")
+	testCmd.Flags().BoolVar(&testBackup, "backup", false, "Rename pre-existing managed root before running tests")
+	testCmd.Flags().StringVarP(&testWithCommit, "with-commit", "c", "", "Commit current state to test branch, run tests, and merge on success")
 	testCmd.Flags().Lookup("with-commit").NoOptDefVal = "__auto__"
 	rootCmd.AddCommand(testCmd)
 }

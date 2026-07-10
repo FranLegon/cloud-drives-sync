@@ -198,18 +198,29 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 			}
 		}
 
+		logicalFolderID := "lf:" + string(provider) + ":" + currentPath
+		parentLogicalFolderID := ""
+		if parentPath != "" {
+			parentLogicalFolderID = "lf:" + string(provider) + ":" + parentPath
+		}
+		owner := client.GetUserIdentifier()
+
 		if foundID != "" {
-			parentID := currentID
 			currentID = foundID
-			// Opportunistically insert to DB for subsequent lookups
-			r.db.InsertFolder(&model.Folder{
-				ID:             foundID,
-				Name:           part,
-				Path:           "/" + currentPath,
-				Provider:       provider,
-				UserEmail:      client.GetUserEmail(),
-				UserPhone:      accountID, // fallback
-				ParentFolderID: parentID,
+			_ = r.db.InsertLogicalFolder(&model.LogicalFolder{
+				ID:                    logicalFolderID,
+				Path:                  "/" + currentPath,
+				Name:                  part,
+				ParentLogicalFolderID: parentLogicalFolderID,
+				Status:                "active",
+			})
+			_ = r.db.InsertFolderReplica(&model.FolderReplica{
+				LogicalFolderID: logicalFolderID,
+				Provider:        provider,
+				AccountID:       accountID,
+				NativeFolderID:  foundID,
+				Owner:           owner,
+				LastSeenAt:      time.Now().Unix(),
 			})
 		} else {
 			// Create folder
@@ -224,14 +235,21 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 			}
 			currentID = folder.ID
 
-			// Insert newly created folder into DB
-			folder.Path = "/" + currentPath
-			folder.Provider = provider
-			folder.UserEmail = client.GetUserEmail()
-			if provider == model.ProviderTelegram {
-				folder.UserPhone = accountID
-			}
-			r.db.InsertFolder(folder)
+			_ = r.db.InsertLogicalFolder(&model.LogicalFolder{
+				ID:                    logicalFolderID,
+				Path:                  "/" + currentPath,
+				Name:                  part,
+				ParentLogicalFolderID: parentLogicalFolderID,
+				Status:                "active",
+			})
+			_ = r.db.InsertFolderReplica(&model.FolderReplica{
+				LogicalFolderID: logicalFolderID,
+				Provider:        provider,
+				AccountID:       accountID,
+				NativeFolderID:  currentID,
+				Owner:           owner,
+				LastSeenAt:      time.Now().Unix(),
+			})
 			r.folderCache.Store(partCacheKey, currentID)
 		}
 	}

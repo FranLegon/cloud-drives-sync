@@ -907,6 +907,45 @@ func (db *DB) GetFolderReplicas(logicalFolderID string) ([]*model.FolderReplica,
 	return replicas, rows.Err()
 }
 
+// GetAllFolderReplicaViews returns cache-ready folder rows resolved from logical_folders joined with
+// folder_replicas. This is the runtime read path for folder convergence.
+func (db *DB) GetAllFolderReplicaViews() ([]*model.Folder, error) {
+	rows, err := db.query(`
+		SELECT fr.native_folder_id, lf.name, lf.path, fr.provider, fr.account_id, lf.parent_logical_folder_id, fr.owner
+		FROM logical_folders lf
+		JOIN folder_replicas fr ON fr.logical_folder_id = lf.id
+		WHERE lf.status != 'deleted'
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var folders []*model.Folder
+	for rows.Next() {
+		f := &model.Folder{}
+		var provider string
+		var parent sql.NullString
+		var owner sql.NullString
+		if err := rows.Scan(&f.ID, &f.Name, &f.Path, &provider, &f.UserEmail, &parent, &owner); err != nil {
+			return nil, err
+		}
+		f.Provider = model.Provider(provider)
+		if f.Provider == model.ProviderTelegram {
+			f.UserPhone = f.UserEmail
+			f.UserEmail = ""
+		}
+		if parent.Valid {
+			f.ParentFolderID = parent.String
+		}
+		if owner.Valid {
+			f.OwnerEmail = owner.String
+		}
+		folders = append(folders, f)
+	}
+	return folders, rows.Err()
+}
+
 // UpdateLogicalFilesGoogleMD5 populates each logical file's canonical Google Drive MD5 identity from
 // its most recent active Google replica's fingerprint. Only rows whose value actually changes are
 // updated, so repeated runs are idempotent (do not bump the metadata version).

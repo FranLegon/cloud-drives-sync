@@ -63,13 +63,13 @@ func NewRunner(config *model.Config, db *database.DB, safeMode bool) *Runner {
 	return r
 }
 
-// PreloadFolderCache loads all folders from the database into the memory cache.
+// PreloadFolderCache loads all folder replicas from the database into the memory cache.
 // This significantly speeds up folder resolution by avoiding point queries to the database.
 func (r *Runner) PreloadFolderCache() {
 	if r.db == nil {
 		return
 	}
-	folders, err := r.db.GetAllFolders()
+	folders, err := r.db.GetAllFolderReplicaViews()
 	if err != nil {
 		logger.Warning("Failed to preload folder cache: %v", err)
 		return
@@ -88,7 +88,7 @@ func (r *Runner) PreloadFolderCache() {
 		r.folderCache.Store(cachePrefix+trimmedPath, f.ID)
 		count++
 	}
-	logger.Info("Preloaded %d folders into memory cache", count)
+	logger.Info("Preloaded %d folder replicas into memory cache", count)
 }
 
 // getQuota gets the quota for a user, using the cache if available.
