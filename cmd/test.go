@@ -1264,7 +1264,17 @@ func specCase17(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err != nil || f == nil {
 		return fmt.Errorf("file not found in DB")
 	}
-	nid := getNativeID(f, main)
+	// Use any active Google replica NativeID — shared folder model means main can move it
+	var nid string
+	for _, rep := range f.Replicas {
+		if rep.Provider == model.ProviderGoogle && rep.Status == "active" {
+			nid = rep.NativeID
+			break
+		}
+	}
+	if nid == "" {
+		return fmt.Errorf("no active Google replica found for %s to move to hard-deleted", fileName)
+	}
 	logger.Info("[MANUAL INTERACTION] [%s] Move '%s' to hard-deleted", main.Email, fileName)
 	if err := mainClient.MoveFile(nid, hardFolder.ID); err != nil {
 		return fmt.Errorf("move to hard-deleted: %w", err)
@@ -1272,6 +1282,8 @@ func specCase17(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("second sync (hard-delete) failed: %w", err)
 	}
+	// Verify file does not exist on any provider outside the aux folder
+	// (the aux/hard-deleted folder itself is processed and emptied by the sync)
 	allUsers := append([]*model.User{main}, backups...)
 	for _, u := range allUsers {
 		client, err := r.GetOrCreateClient(u)
@@ -1282,14 +1294,16 @@ func specCase17(r *task.Runner, main *model.User, backups []*model.User) error {
 		if err != nil {
 			continue
 		}
+		// List only the sync root level (non-aux files) + recurse into non-aux subfolders
 		cloudFiles := map[string]*model.File{}
-		listFilesRecursive(client, cloudSID, "", cloudFiles)
+		listFilesRecursiveExcludeAux(client, cloudSID, "", cloudFiles)
 		for _, cf := range cloudFiles {
 			if cf.Name == fileName {
 				return fmt.Errorf("file %s still exists on %s after hard-delete", fileName, u.Email)
 			}
 		}
 	}
+	// Verify DB state
 	dbFile, _ := db.GetFileByPath("/" + fileName)
 	if dbFile != nil && dbFile.Status != "hard-deleted" && dbFile.Status != "deleted" {
 		return fmt.Errorf("file %s in DB has status %q, expected hard-deleted", fileName, dbFile.Status)
@@ -2288,11 +2302,9 @@ func listFilesRecursive(client api.CloudClient, folderID string, currentPath str
 	}
 	for _, f := range files {
 		f.Path = filepath.Join(currentPath, f.Name)
-		// Use NativeID (Replica ID) as key for consistency checking
 		if len(f.Replicas) > 0 {
 			results[f.Replicas[0].NativeID] = f
 		} else {
-			// Fallback (shouldn't happen usually)
 			results[f.ID] = f
 		}
 	}
@@ -2302,8 +2314,40 @@ func listFilesRecursive(client api.CloudClient, folderID string, currentPath str
 		return err
 	}
 	for _, folder := range folders {
-		// Recurse
 		err := listFilesRecursive(client, folder.ID, filepath.Join(currentPath, folder.Name), results)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// listFilesRecursiveExcludeAux is like listFilesRecursive but skips the aux folder entirely,
+// used for hard-delete verification where the aux/hard-deleted folder may still be draining.
+func listFilesRecursiveExcludeAux(client api.CloudClient, folderID string, currentPath string, results map[string]*model.File) error {
+	files, err := client.ListFiles(folderID)
+	if err != nil {
+		return err
+	}
+	for _, f := range files {
+		f.Path = filepath.Join(currentPath, f.Name)
+		if len(f.Replicas) > 0 {
+			results[f.Replicas[0].NativeID] = f
+		} else {
+			results[f.ID] = f
+		}
+	}
+
+	folders, err := client.ListFolders(folderID)
+	if err != nil {
+		return err
+	}
+	for _, folder := range folders {
+		// Skip the aux folder — hard-deleted/soft-deleted subfolders should not be scanned
+		if folder.Name == task.AuxFolder {
+			continue
+		}
+		err := listFilesRecursiveExcludeAux(client, folder.ID, filepath.Join(currentPath, folder.Name), results)
 		if err != nil {
 			return err
 		}

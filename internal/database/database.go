@@ -1260,6 +1260,88 @@ func (db *DB) batchLoadFragments(replicas []*model.Replica) error {
 	return nil
 }
 
+// GetActiveFilesByPathPrefix returns active files whose path starts with prefix, including their replicas.
+func (db *DB) GetActiveFilesByPathPrefix(prefix string) ([]*model.File, error) {
+	pattern := prefix + "%"
+	queryFiles := `
+	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
+	FROM files
+	WHERE status = 'active' AND (path LIKE ? OR path LIKE ?)
+	`
+
+	rows, err := db.query(queryFiles, pattern, prefix+`\%`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	fileMap := make(map[string]*model.File)
+	var files []*model.File
+	for rows.Next() {
+		file := &model.File{}
+		var modTime int64
+		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status); err != nil {
+			return nil, err
+		}
+		file.ModTime = time.Unix(modTime, 0)
+		fileMap[file.ID] = file
+		files = append(files, file)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return files, nil
+	}
+
+	// Load replicas for these files
+	placeholders := make([]string, len(files))
+	args := make([]interface{}, len(files))
+	for i, f := range files {
+		placeholders[i] = "?"
+		args[i] = f.ID
+	}
+	repQuery := `
+	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+	FROM replicas
+	WHERE file_id IN (` + strings.Join(placeholders, ",") + `)`
+
+	repRows, err := db.query(repQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer repRows.Close()
+	for repRows.Next() {
+		r := &model.Replica{}
+		var rFileID, rCalcID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus string
+		var rSize, rModTime int64
+		var rFragmented bool
+		var rOwner sql.NullString
+		if err := repRows.Scan(&r.ID, &rFileID, &rCalcID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner); err != nil {
+			return nil, err
+		}
+		r.FileID = rFileID
+		r.CalculatedID = rCalcID
+		r.Path = rPath
+		r.Name = rName
+		r.Size = rSize
+		r.Provider = model.Provider(rProvider)
+		r.AccountID = rAccountID
+		r.NativeID = rNativeID
+		r.NativeHash = rNativeHash
+		r.ModTime = time.Unix(rModTime, 0)
+		r.Status = rStatus
+		r.Fragmented = rFragmented
+		if rOwner.Valid {
+			r.Owner = rOwner.String
+		}
+		if file, ok := fileMap[rFileID]; ok {
+			file.Replicas = append(file.Replicas, r)
+		}
+	}
+	return files, repRows.Err()
+}
+
 // GetFilesByStatus returns all files with a specific status
 func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	queryFiles := `

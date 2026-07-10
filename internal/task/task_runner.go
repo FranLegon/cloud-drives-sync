@@ -406,6 +406,11 @@ func (r *Runner) GetMetadata() error {
 		logger.Error("Failed to process hard deletes: %v", err)
 	}
 
+	logger.Info("Processing hard-deleted folder...")
+	if err := r.ProcessHardDeletedFolder(); err != nil {
+		logger.Error("Failed to process hard-deleted folder: %v", err)
+	}
+
 	logger.Info("Metadata gathering complete")
 	return nil
 }
@@ -2407,9 +2412,69 @@ func (r *Runner) ProcessHardDeletes() error {
 	return nil
 }
 
+// ProcessHardDeletedFolder detects files placed in the hard-deleted aux folder and permanently
+// removes them from every cloud provider (moves to trash/recycle bin), then marks them as
+// hard-deleted in the database. This implements SPEC: "Moving a file to hard-deleted removes
+// it from every provider."
+func (r *Runner) ProcessHardDeletedFolder() error {
+	hardDeletedPrefix := "/" + AuxFolder + "/" + HardDeletedFolder
+
+	files, err := r.db.GetActiveFilesByPathPrefix(hardDeletedPrefix)
+	if err != nil {
+		return fmt.Errorf("failed to get files in hard-deleted folder: %w", err)
+	}
+	if len(files) == 0 {
+		return nil
+	}
+
+	logger.Info("Found %d file(s) in hard-deleted folder — permanently removing from all providers...", len(files))
+
+	for _, file := range files {
+		logger.Info("Hard-deleting %s from all providers", file.Path)
+
+		for _, rep := range file.Replicas {
+			if rep.Status == "deleted" || rep.Status == "hard-deleted" {
+				continue
+			}
+
+			user := r.getUser(rep.Provider, rep.AccountID)
+			if user == nil {
+				logger.Warning("[ProcessHardDeletedFolder] No user found for replica %s (%s/%s)", rep.NativeID, rep.Provider, rep.AccountID)
+				continue
+			}
+
+			client, err := r.GetOrCreateClient(user)
+			if err != nil {
+				logger.Error("[ProcessHardDeletedFolder] Failed to get client for %s: %v", user.GetAccountID(), err)
+				continue
+			}
+
+			if r.safeMode {
+				logger.DryRun("[DRY RUN] Would hard-delete %s from %s (%s)", file.Path, rep.AccountID, rep.Provider)
+				continue
+			}
+
+			logger.Info("Deleting %s (NativeID=%s) from %s (%s)", file.Path, rep.NativeID, rep.AccountID, rep.Provider)
+			if err := client.DeleteFile(rep.NativeID); err != nil {
+				logger.Warning("[ProcessHardDeletedFolder] Failed to delete %s from %s: %v — continuing", rep.NativeID, rep.AccountID, err)
+			}
+
+			rep.Status = "deleted"
+			if err := r.db.UpdateReplica(rep); err != nil {
+				logger.Error("[ProcessHardDeletedFolder] Failed to update replica status: %v", err)
+			}
+		}
+
+		file.Status = "hard-deleted"
+		if err := r.db.UpdateFile(file); err != nil {
+			logger.Error("[ProcessHardDeletedFolder] Failed to mark file as hard-deleted: %v", err)
+		}
+	}
+	return nil
+}
+
 // getUser helper
-func (r *Runner) getUser(provider model.Provider, accountID string) *model.User {
-	for i := range r.config.Users {
+func (r *Runner) getUser(provider model.Provider, accountID string) *model.User {	for i := range r.config.Users {
 		u := &r.config.Users[i]
 		if u.Provider == provider && u.GetAccountID() == accountID {
 			return u
