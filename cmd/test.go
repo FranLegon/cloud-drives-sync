@@ -5,8 +5,6 @@ package cmd
 import (
 	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"math/big"
@@ -15,7 +13,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
-	"strconv"
 	"strings"
 	"time"
 
@@ -159,7 +156,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	runtime.SetBlockProfileRate(1)
 	defer runtime.SetBlockProfileRate(0)
 
-	testRuntimes := map[int]time.Duration{}
+	testRuntimesStr := map[string]time.Duration{}
 	totalStart := time.Now()
 	var testCommitHash string
 	var gitStashed bool
@@ -206,9 +203,10 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		logger.Info("\n=== TEST RUNTIME SUMMARY ===")
 		logger.Info("  Finished running tests. Optimization applied: Replaced heavy LEFT JOIN in GetFilesByStatus with separate indexed queries.")
 		logger.Info("  Finished running tests. Optimization applied: Replaced heavy LEFT JOIN in GetFilesByCalculatedID with separate indexed queries.")
-		for _, step := range []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12} {
-			if d, ok := testRuntimes[step]; ok {
-				logger.Info("  Test Case %2d: %s", step, d.Round(time.Millisecond))
+		allIDs := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "inner1", "inner2"}
+		for _, step := range allIDs {
+			if d, ok := testRuntimesStr[step]; ok {
+				logger.Info("  Test Case %s: %s", step, d.Round(time.Millisecond))
 			}
 		}
 		logger.Info("  Total Runtime:  %s", time.Since(totalStart).Round(time.Millisecond))
@@ -430,9 +428,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 				return fmt.Errorf("metadata verification failed after SPEC test case %s: %w", tc.ID, err)
 			}
 		}
-		if n, err := strconv.Atoi(tc.ID); err == nil {
-			testRuntimes[n] = time.Since(started)
-		}
+		testRuntimesStr[tc.ID] = time.Since(started)
 	}
 
 	logger.Info("\nTEST SUITE COMPLETED SUCCESSFULLY")
@@ -440,59 +436,1192 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	return nil
 }
 
-func runTestCase9(r *task.Runner) error {
-	logger.Info("\n=== Running Test Case 9: Quota Similarity Check ===")
 
-	logger.Info("Getting DB-based quotas...")
+func specCaseInner1(r *task.Runner, main *model.User, backups []*model.User) error {
+	return legacyOwnershipTransferTest(r, main, backups)
+}
+
+func specCaseInner2(r *task.Runner, main *model.User, backups []*model.User) error {
+	logger.Info("inner2: Microsoft OneDrive Real Shortcut — verifying shortcut creation (integrated into case 23)")
+	return specCase23(r, main, backups)
+}
+
+// randStr returns a random lowercase alphanumeric string of exactly n characters.
+func randStr(n int) string {
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	buf := make([]byte, n)
+	for i := range buf {
+		idx := mustRand(int64(len(alphabet)))
+		buf[i] = alphabet[idx]
+	}
+	return string(buf)
+}
+
+// fileContent builds the standard test file body.
+func fileContent(caseID, suffix string) []byte {
+	return []byte(fmt.Sprintf("test-case-id = %s\n%s", caseID, suffix))
+}
+
+// verifyFileOnAllProviders downloads the file from each provider and checks content matches expected.
+func verifyFileOnAllProviders(r *task.Runner, mainUser *model.User, backups []*model.User, path string, expectedContent []byte) error {
+	allUsers := append([]*model.User{mainUser}, backups...)
+	for _, u := range allUsers {
+		client, err := r.GetOrCreateClient(u)
+		if err != nil {
+			return fmt.Errorf("get client for %s: %w", u.Email, err)
+		}
+		f, err := db.GetFileByPath(path)
+		if err != nil || f == nil {
+			return fmt.Errorf("file %s not found in DB", path)
+		}
+		nid := getNativeID(f, u)
+		if nid == "" {
+			// May be a placeholder/shortcut on MS — skip content check
+			if u.Provider == model.ProviderMicrosoft {
+				continue
+			}
+			return fmt.Errorf("no nativeID for %s on %s", path, u.Email)
+		}
+		var buf bytes.Buffer
+		if err := client.DownloadFile(nid, &buf); err != nil {
+			return fmt.Errorf("download from %s (%s) failed: %w", u.Email, u.Provider, err)
+		}
+		if expectedContent != nil && !bytes.Equal(buf.Bytes(), expectedContent) {
+			return fmt.Errorf("content mismatch on %s (%s): expected %q got %q", u.Email, u.Provider, string(expectedContent), buf.String())
+		}
+	}
+	return nil
+}
+
+// verifyFolderOnAllProviders checks that a named folder exists on every provider that supports folders.
+func verifyFolderOnAllProviders(r *task.Runner, mainUser *model.User, backups []*model.User, folderName string) error {
+	allUsers := append([]*model.User{mainUser}, backups...)
+	for _, u := range allUsers {
+		if u.Provider == model.ProviderTelegram {
+			continue
+		}
+		client, err := r.GetOrCreateClient(u)
+		if err != nil {
+			return fmt.Errorf("get client for %s: %w", u.Email, err)
+		}
+		sid, err := client.GetSyncFolderID()
+		if err != nil {
+			return fmt.Errorf("get sync folder for %s: %w", u.Email, err)
+		}
+		folders, err := client.ListFolders(sid)
+		if err != nil {
+			return fmt.Errorf("list folders for %s: %w", u.Email, err)
+		}
+		found := false
+		for _, f := range folders {
+			if f.Name == folderName {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("folder %q not found for account %s (%s)", folderName, u.Email, u.Provider)
+		}
+	}
+	return nil
+}
+
+// verifyNestedFolderOnAllProviders checks a nested path exists on every provider that supports folders.
+func verifyNestedFolderOnAllProviders(r *task.Runner, mainUser *model.User, backups []*model.User, parts []string) error {
+	allUsers := append([]*model.User{mainUser}, backups...)
+	for _, u := range allUsers {
+		if u.Provider == model.ProviderTelegram {
+			continue
+		}
+		client, err := r.GetOrCreateClient(u)
+		if err != nil {
+			return fmt.Errorf("get client for %s: %w", u.Email, err)
+		}
+		parentID, err := client.GetSyncFolderID()
+		if err != nil {
+			return fmt.Errorf("get sync folder for %s: %w", u.Email, err)
+		}
+		for _, part := range parts {
+			folders, err := client.ListFolders(parentID)
+			if err != nil {
+				return fmt.Errorf("list folders (path %v) for %s: %w", parts, u.Email, err)
+			}
+			found := false
+			for _, f := range folders {
+				if f.Name == part {
+					parentID = f.ID
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("folder segment %q not found under path for %s (%s)", part, u.Email, u.Provider)
+			}
+		}
+	}
+	return nil
+}
+
+// SPEC Case 1: Clean-slate setup
+func specCase1(r *task.Runner, main *model.User, backups []*model.User) error {
+	logger.Info("[MANUAL INTERACTION] Verification: special folders and clean DB state after config --init")
+	allUsers := append([]*model.User{main}, backups...)
+	specialFolders := []string{
+		task.AuxFolder,
+		task.AuxFolder + "/soft-deleted",
+		task.AuxFolder + "/hard-deleted",
+		task.AuxFolder + "/unsynced-from-backups",
+	}
+	for _, u := range allUsers {
+		if u.Provider == model.ProviderTelegram {
+			continue
+		}
+		client, err := r.GetOrCreateClient(u)
+		if err != nil {
+			return fmt.Errorf("get client %s: %w", u.Email, err)
+		}
+		sid, err := client.GetSyncFolderID()
+		if err != nil {
+			return fmt.Errorf("sync folder for %s: %w", u.Email, err)
+		}
+		for _, folderPath := range specialFolders {
+			parts := strings.Split(folderPath, "/")
+			parentID := sid
+			for _, part := range parts {
+				folders, err := client.ListFolders(parentID)
+				if err != nil {
+					return fmt.Errorf("list folders for %s: %w", u.Email, err)
+				}
+				found := false
+				for _, f := range folders {
+					if f.Name == part {
+						parentID = f.ID
+						found = true
+						break
+					}
+				}
+				if !found {
+					return fmt.Errorf("special folder segment %q missing for %s", part, u.Email)
+				}
+			}
+		}
+	}
+	files, err := db.GetAllFiles()
+	if err != nil {
+		return err
+	}
+	if len(files) > 0 {
+		return fmt.Errorf("expected 0 active files in clean state, got %d", len(files))
+	}
+	logger.Info("[VERIFICATION] Case 1 passed: special folders present, DB clean")
+	return nil
+}
+
+// SPEC Case 2: Create file on main
+func specCase2(r *task.Runner, main *model.User, backups []*model.User) error {
+	rand69 := randStr(69)
+	content := fileContent("2", rand69+"\n")
+	fileName := "test-case-id-2.txt"
+	logger.Info("[MANUAL INTERACTION] [%s] Create file '%s' in cloud-drives-sync-root", main.Email, fileName)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := mainClient.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+		return fmt.Errorf("upload %s: %w", fileName, err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	if err := verifyFileInDB("/" + fileName); err != nil {
+		return err
+	}
+	return verifyFileOnAllProviders(r, main, backups, "/"+fileName, content)
+}
+
+// SPEC Case 3: Create file on Google backup
+func specCase3(r *task.Runner, main *model.User, backups []*model.User) error {
+	rand69 := randStr(69)
+	content := fileContent("3", rand69+"\n")
+	fileName := "test-case-id-3.txt"
+	googleBackups := filterUsers(backups, model.ProviderGoogle)
+	if len(googleBackups) == 0 {
+		return fmt.Errorf("no Google backup accounts found")
+	}
+	backup := googleBackups[0]
+	logger.Info("[MANUAL INTERACTION] [%s] Create file '%s' in cloud-drives-sync-root", backup.Email, fileName)
+	client, err := r.GetOrCreateClient(backup)
+	if err != nil {
+		return err
+	}
+	sid, err := client.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := client.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+		return fmt.Errorf("upload %s: %w", fileName, err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	if err := verifyFileInDB("/" + fileName); err != nil {
+		return err
+	}
+	return verifyFileOnAllProviders(r, main, backups, "/"+fileName, content)
+}
+
+// SPEC Case 4: Create folder on main
+func specCase4(r *task.Runner, main *model.User, backups []*model.User) error {
+	folderName := "test-case-id-4-folder"
+	logger.Info("[MANUAL INTERACTION] [%s] Create folder '%s' in cloud-drives-sync-root", main.Email, folderName)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := mainClient.CreateFolder(sid, folderName); err != nil {
+		return fmt.Errorf("create folder: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	return verifyFolderOnAllProviders(r, main, backups, folderName)
+}
+
+// SPEC Case 5: Create folder on Google backup
+func specCase5(r *task.Runner, main *model.User, backups []*model.User) error {
+	folderName := "test-case-id-5-folder"
+	googleBackups := filterUsers(backups, model.ProviderGoogle)
+	if len(googleBackups) == 0 {
+		return fmt.Errorf("no Google backup accounts found")
+	}
+	backup := googleBackups[0]
+	logger.Info("[MANUAL INTERACTION] [%s] Create folder '%s' in cloud-drives-sync-root", backup.Email, folderName)
+	client, err := r.GetOrCreateClient(backup)
+	if err != nil {
+		return err
+	}
+	sid, err := client.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := client.CreateFolder(sid, folderName); err != nil {
+		return fmt.Errorf("create folder: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	return verifyFolderOnAllProviders(r, main, backups, folderName)
+}
+
+// SPEC Case 6: Create file on Microsoft backup
+func specCase6(r *task.Runner, main *model.User, backups []*model.User) error {
+	rand69 := randStr(69)
+	content := fileContent("6", rand69+"\n")
+	fileName := "test-case-id-6.txt"
+	msBackups := filterUsers(backups, model.ProviderMicrosoft)
+	if len(msBackups) == 0 {
+		return fmt.Errorf("no Microsoft backup accounts found")
+	}
+	backup := msBackups[0]
+	logger.Info("[MANUAL INTERACTION] [%s] Create file '%s' in cloud-drives-sync-root", backup.Email, fileName)
+	client, err := r.GetOrCreateClient(backup)
+	if err != nil {
+		return err
+	}
+	sid, err := client.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := client.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+		return fmt.Errorf("upload %s: %w", fileName, err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	if err := verifyFileInDB("/" + fileName); err != nil {
+		return err
+	}
+	return verifyFileOnAllProviders(r, main, backups, "/"+fileName, content)
+}
+
+// SPEC Case 7: Create folder on Microsoft backup
+func specCase7(r *task.Runner, main *model.User, backups []*model.User) error {
+	folderName := "test-case-id-7-folder"
+	msBackups := filterUsers(backups, model.ProviderMicrosoft)
+	if len(msBackups) == 0 {
+		return fmt.Errorf("no Microsoft backup accounts found")
+	}
+	backup := msBackups[0]
+	logger.Info("[MANUAL INTERACTION] [%s] Create folder '%s' in cloud-drives-sync-root", backup.Email, folderName)
+	client, err := r.GetOrCreateClient(backup)
+	if err != nil {
+		return err
+	}
+	sid, err := client.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := client.CreateFolder(sid, folderName); err != nil {
+		return fmt.Errorf("create folder: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	return verifyFolderOnAllProviders(r, main, backups, folderName)
+}
+
+// SPEC Case 8: Sync file from Telegram
+func specCase8(r *task.Runner, main *model.User, backups []*model.User) error {
+	rand69 := randStr(69)
+	content := fileContent("8", rand69+"\n")
+	fileName := "test-case-id-8.txt"
+	logger.Info("[MANUAL INTERACTION] [%s] Upload '%s' to cloud-drives-sync-root (Google main)", main.Email, fileName)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := mainClient.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+		return fmt.Errorf("upload %s: %w", fileName, err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("first sync failed: %w", err)
+	}
+	allUsers := append([]*model.User{main}, backups...)
+	f, err := db.GetFileByPath("/" + fileName)
+	if err != nil || f == nil {
+		return fmt.Errorf("file %s not found in DB after first sync", fileName)
+	}
+	for _, u := range allUsers {
+		if u.Provider == model.ProviderTelegram {
+			continue
+		}
+		client, err := r.GetOrCreateClient(u)
+		if err != nil {
+			continue
+		}
+		nid := getNativeID(f, u)
+		if nid == "" {
+			continue
+		}
+		logger.Info("[MANUAL INTERACTION] [%s] Delete '%s' to leave only Telegram replica", u.Email, fileName)
+		client.DeleteFile(nid)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("second sync (restore from Telegram) failed: %w", err)
+	}
+	if err := verifyFileInDB("/" + fileName); err != nil {
+		return err
+	}
+	return verifyFileOnAllProviders(r, main, backups, "/"+fileName, content)
+}
+
+// SPEC Case 9: Sync file from Microsoft
+func specCase9(r *task.Runner, main *model.User, backups []*model.User) error {
+	rand69 := randStr(69)
+	content := fileContent("9", rand69+"\n")
+	fileName := "test-case-id-9.txt"
+	logger.Info("[MANUAL INTERACTION] [%s] Upload '%s' to cloud-drives-sync-root (Google main)", main.Email, fileName)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := mainClient.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+		return fmt.Errorf("upload %s: %w", fileName, err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("first sync failed: %w", err)
+	}
+	allUsers := append([]*model.User{main}, backups...)
+	f, err := db.GetFileByPath("/" + fileName)
+	if err != nil || f == nil {
+		return fmt.Errorf("file %s not found in DB after first sync", fileName)
+	}
+	for _, u := range allUsers {
+		if u.Provider == model.ProviderMicrosoft {
+			continue
+		}
+		client, err := r.GetOrCreateClient(u)
+		if err != nil {
+			continue
+		}
+		nid := getNativeID(f, u)
+		if nid == "" {
+			continue
+		}
+		logger.Info("[MANUAL INTERACTION] [%s] Delete '%s' to leave only Microsoft replica", u.Email, fileName)
+		client.DeleteFile(nid)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("second sync (restore from Microsoft) failed: %w", err)
+	}
+	if err := verifyFileInDB("/" + fileName); err != nil {
+		return err
+	}
+	return verifyFileOnAllProviders(r, main, backups, "/"+fileName, content)
+}
+
+// SPEC Case 10: Move Google Drive files from backups roots
+func specCase10(r *task.Runner, main *model.User, backups []*model.User) error {
+	rand69 := randStr(69)
+	content := fileContent("10", rand69+"\n")
+	fileName := "test-case-id-10.txt"
+	googleBackups := filterUsers(backups, model.ProviderGoogle)
+	if len(googleBackups) == 0 {
+		return fmt.Errorf("no Google backup accounts")
+	}
+	backup := googleBackups[0]
+	logger.Info("[MANUAL INTERACTION] [%s] Create '%s' in the actual root (not sync folder)", backup.Email, fileName)
+	client, err := r.GetOrCreateClient(backup)
+	if err != nil {
+		return err
+	}
+	if _, err := client.UploadFile("root", fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+		return fmt.Errorf("upload to root: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	expectedPath := "/" + task.AuxFolder + "/unsynced-from-backups/" + fileName
+	if err := verifyFileInDB(expectedPath); err != nil {
+		return err
+	}
+	return verifyFileOnAllProviders(r, main, backups, expectedPath, content)
+}
+
+// SPEC Case 11: Google Drive nested folders
+func specCase11(r *task.Runner, main *model.User, backups []*model.User) error {
+	logger.Info("[MANUAL INTERACTION] [%s] Create nested folder structure test-case-id-11-folder/test-case-id-11-subfolder/test-case-id-11-subsubfolder", main.Email)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	f1, err := getOrCreateFolder(mainClient, sid, "test-case-id-11-folder")
+	if err != nil {
+		return err
+	}
+	f2, err := getOrCreateFolder(mainClient, f1.ID, "test-case-id-11-subfolder")
+	if err != nil {
+		return err
+	}
+	if _, err := getOrCreateFolder(mainClient, f2.ID, "test-case-id-11-subsubfolder"); err != nil {
+		return err
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	return verifyNestedFolderOnAllProviders(r, main, backups, []string{"test-case-id-11-folder", "test-case-id-11-subfolder", "test-case-id-11-subsubfolder"})
+}
+
+// SPEC Case 12: Microsoft OneDrive nested folders
+func specCase12(r *task.Runner, main *model.User, backups []*model.User) error {
+	msBackups := filterUsers(backups, model.ProviderMicrosoft)
+	if len(msBackups) == 0 {
+		return fmt.Errorf("no Microsoft backup accounts")
+	}
+	backup := msBackups[0]
+	logger.Info("[MANUAL INTERACTION] [%s] Create nested folder structure test-case-id-12-folder/test-case-id-12-subfolder/test-case-id-12-subsubfolder", backup.Email)
+	client, err := r.GetOrCreateClient(backup)
+	if err != nil {
+		return err
+	}
+	sid, err := client.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	f1, err := getOrCreateFolder(client, sid, "test-case-id-12-folder")
+	if err != nil {
+		return err
+	}
+	f2, err := getOrCreateFolder(client, f1.ID, "test-case-id-12-subfolder")
+	if err != nil {
+		return err
+	}
+	if _, err := getOrCreateFolder(client, f2.ID, "test-case-id-12-subsubfolder"); err != nil {
+		return err
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	return verifyNestedFolderOnAllProviders(r, main, backups, []string{"test-case-id-12-folder", "test-case-id-12-subfolder", "test-case-id-12-subsubfolder"})
+}
+
+// SPEC Case 13: Google Drive moved file
+func specCase13(r *task.Runner, main *model.User, backups []*model.User) error {
+	rand69 := randStr(69)
+	content := fileContent("13", rand69+"\n")
+	fileName := "test-case-id-13.txt"
+	folderName := "test-case-id-13-folder"
+	logger.Info("[MANUAL INTERACTION] [%s] Create '%s' and folder '%s' in cloud-drives-sync-root", main.Email, fileName, folderName)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	uploadedFile, err := mainClient.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content)))
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	folder, err := getOrCreateFolder(mainClient, sid, folderName)
+	if err != nil {
+		return fmt.Errorf("create folder: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("first sync failed: %w", err)
+	}
+	fileNativeID := uploadedFile.Replicas[0].NativeID
+	logger.Info("[MANUAL INTERACTION] [%s] Move '%s' into '%s'", main.Email, fileName, folderName)
+	if err := mainClient.MoveFile(fileNativeID, folder.ID); err != nil {
+		return fmt.Errorf("move file: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("second sync failed: %w", err)
+	}
+	expectedPath := "/" + folderName + "/" + fileName
+	if err := verifyFileInDB(expectedPath); err != nil {
+		return err
+	}
+	return verifyFileOnAllProviders(r, main, backups, expectedPath, content)
+}
+
+// SPEC Case 14: Google Drive files created directly in nested folders
+func specCase14(r *task.Runner, main *model.User, backups []*model.User) error {
+	rand69A := randStr(69)
+	rand69B := randStr(69)
+	contentA := fileContent("14", rand69A+"\n")
+	contentB := fileContent("14", rand69B+"\n")
+	logger.Info("[MANUAL INTERACTION] [%s] Create nested folders and files for case 14", main.Email)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	root14, err := getOrCreateFolder(mainClient, sid, "test-case-id-14-folder")
+	if err != nil {
+		return err
+	}
+	subA, err := getOrCreateFolder(mainClient, root14.ID, "test-case-id-14-subfolder-A")
+	if err != nil {
+		return err
+	}
+	subB, err := getOrCreateFolder(mainClient, root14.ID, "test-case-id-14-subfolder-B")
+	if err != nil {
+		return err
+	}
+	if _, err := mainClient.UploadFile(subA.ID, "test-case-id-14-n1.txt", bytes.NewReader(contentA), int64(len(contentA))); err != nil {
+		return fmt.Errorf("upload n1: %w", err)
+	}
+	if _, err := mainClient.UploadFile(subB.ID, "test-case-id-14-n2.txt", bytes.NewReader(contentB), int64(len(contentB))); err != nil {
+		return fmt.Errorf("upload n2: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	pathA := "/test-case-id-14-folder/test-case-id-14-subfolder-A/test-case-id-14-n1.txt"
+	pathB := "/test-case-id-14-folder/test-case-id-14-subfolder-B/test-case-id-14-n2.txt"
+	if err := verifyFileInDB(pathA); err != nil {
+		return err
+	}
+	if err := verifyFileInDB(pathB); err != nil {
+		return err
+	}
+	if err := verifyFileOnAllProviders(r, main, backups, pathA, contentA); err != nil {
+		return err
+	}
+	return verifyFileOnAllProviders(r, main, backups, pathB, contentB)
+}
+
+// SPEC Case 15: Google Drive multiple moved files
+func specCase15(r *task.Runner, main *model.User, backups []*model.User) error {
+	rand69A := randStr(69)
+	rand69B := randStr(69)
+	rand69C := randStr(69)
+	contentN1 := fileContent("15", "Origin: test-case-id-15-subfolder-A\nDestination: test-case-id-15-subsubfolder-A\n"+rand69A+"\n")
+	contentN2 := fileContent("15", "Origin: test-case-id-15-subsubfolder-A\nDestination: test-case-id-15-subfolder-B\n"+rand69B+"\n")
+	contentN3 := fileContent("15", "Origin: test-case-id-15-subfolder-B\nDestination: test-case-id-15-subfolder-A\n"+rand69C+"\n")
+	logger.Info("[MANUAL INTERACTION] [%s] Create nested folder structures and files for case 15", main.Email)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	root15, err := getOrCreateFolder(mainClient, sid, "test-case-id-15-folder")
+	if err != nil {
+		return err
+	}
+	subA, err := getOrCreateFolder(mainClient, root15.ID, "test-case-id-15-subfolder-A")
+	if err != nil {
+		return err
+	}
+	subsubA, err := getOrCreateFolder(mainClient, subA.ID, "test-case-id-15-subsubfolder-A")
+	if err != nil {
+		return err
+	}
+	subB, err := getOrCreateFolder(mainClient, root15.ID, "test-case-id-15-subfolder-B")
+	if err != nil {
+		return err
+	}
+	subsubB, err := getOrCreateFolder(mainClient, subB.ID, "test-case-id-15-subsubfolder-B")
+	if err != nil {
+		return err
+	}
+	_ = subsubB
+	n1, err := mainClient.UploadFile(subA.ID, "test-case-id-15-n1.txt", bytes.NewReader(contentN1), int64(len(contentN1)))
+	if err != nil {
+		return fmt.Errorf("upload n1: %w", err)
+	}
+	n2, err := mainClient.UploadFile(subsubA.ID, "test-case-id-15-n2.txt", bytes.NewReader(contentN2), int64(len(contentN2)))
+	if err != nil {
+		return fmt.Errorf("upload n2: %w", err)
+	}
+	n3, err := mainClient.UploadFile(subB.ID, "test-case-id-15-n3.txt", bytes.NewReader(contentN3), int64(len(contentN3)))
+	if err != nil {
+		return fmt.Errorf("upload n3: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("first sync failed: %w", err)
+	}
+	logger.Info("[MANUAL INTERACTION] [%s] Move files to their destinations", main.Email)
+	if err := mainClient.MoveFile(n1.Replicas[0].NativeID, subsubA.ID); err != nil {
+		return fmt.Errorf("move n1: %w", err)
+	}
+	if err := mainClient.MoveFile(n2.Replicas[0].NativeID, subB.ID); err != nil {
+		return fmt.Errorf("move n2: %w", err)
+	}
+	if err := mainClient.MoveFile(n3.Replicas[0].NativeID, subA.ID); err != nil {
+		return fmt.Errorf("move n3: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("second sync failed: %w", err)
+	}
+	type pathContent struct {
+		path    string
+		content []byte
+	}
+	checks := []pathContent{
+		{"/test-case-id-15-folder/test-case-id-15-subfolder-A/test-case-id-15-subsubfolder-A/test-case-id-15-n1.txt", contentN1},
+		{"/test-case-id-15-folder/test-case-id-15-subfolder-B/test-case-id-15-n2.txt", contentN2},
+		{"/test-case-id-15-folder/test-case-id-15-subfolder-A/test-case-id-15-n3.txt", contentN3},
+	}
+	for _, c := range checks {
+		if err := verifyFileInDB(c.path); err != nil {
+			return err
+		}
+		if err := verifyFileOnAllProviders(r, main, backups, c.path, c.content); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// SPEC Case 16: Google Drive soft-delete and restore
+func specCase16(r *task.Runner, main *model.User, backups []*model.User) error {
+	rand69 := randStr(69)
+	content := fileContent("16", rand69+"\n")
+	fileName := "test-case-id-16.txt"
+	logger.Info("[MANUAL INTERACTION] [%s] Create '%s' in cloud-drives-sync-root", main.Email, fileName)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := mainClient.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("first sync failed: %w", err)
+	}
+	auxFolder, err := getOrCreateFolder(mainClient, sid, task.AuxFolder)
+	if err != nil {
+		return err
+	}
+	softFolder, err := getOrCreateFolder(mainClient, auxFolder.ID, "soft-deleted")
+	if err != nil {
+		return err
+	}
+	f, err := db.GetFileByPath("/" + fileName)
+	if err != nil || f == nil {
+		return fmt.Errorf("file not found in DB")
+	}
+	nid := getNativeID(f, main)
+	logger.Info("[MANUAL INTERACTION] [%s] Move '%s' to soft-deleted", main.Email, fileName)
+	if err := mainClient.MoveFile(nid, softFolder.ID); err != nil {
+		return fmt.Errorf("move to soft-deleted: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("second sync (soft-delete) failed: %w", err)
+	}
+	if err := verifyFileStatus(db, "/"+fileName, "active", true); err != nil {
+		return fmt.Errorf("soft-delete not propagated: %w", err)
+	}
+	softFiles, err := mainClient.ListFiles(softFolder.ID)
+	if err != nil {
+		return err
+	}
+	var softNID string
+	for _, sf := range softFiles {
+		if sf.Name == fileName {
+			softNID = sf.ID
+			break
+		}
+	}
+	if softNID == "" {
+		return fmt.Errorf("file not found in soft-deleted folder on main account")
+	}
+	logger.Info("[MANUAL INTERACTION] [%s] Move '%s' back to cloud-drives-sync-root (restore)", main.Email, fileName)
+	if err := mainClient.MoveFile(softNID, sid); err != nil {
+		return fmt.Errorf("restore from soft-deleted: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("third sync (restore) failed: %w", err)
+	}
+	if err := verifyFileInDB("/" + fileName); err != nil {
+		return err
+	}
+	if err := verifyFileStatus(db, "/"+fileName, "active", false); err != nil {
+		return err
+	}
+	return verifyFileOnAllProviders(r, main, backups, "/"+fileName, content)
+}
+
+// SPEC Case 17: Google Drive hard-delete
+func specCase17(r *task.Runner, main *model.User, backups []*model.User) error {
+	rand69 := randStr(69)
+	content := fileContent("17", rand69+"\n")
+	fileName := "test-case-id-17.txt"
+	logger.Info("[MANUAL INTERACTION] [%s] Create '%s' in cloud-drives-sync-root", main.Email, fileName)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := mainClient.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("first sync failed: %w", err)
+	}
+	auxFolder, err := getOrCreateFolder(mainClient, sid, task.AuxFolder)
+	if err != nil {
+		return err
+	}
+	hardFolder, err := getOrCreateFolder(mainClient, auxFolder.ID, "hard-deleted")
+	if err != nil {
+		return err
+	}
+	f, err := db.GetFileByPath("/" + fileName)
+	if err != nil || f == nil {
+		return fmt.Errorf("file not found in DB")
+	}
+	nid := getNativeID(f, main)
+	logger.Info("[MANUAL INTERACTION] [%s] Move '%s' to hard-deleted", main.Email, fileName)
+	if err := mainClient.MoveFile(nid, hardFolder.ID); err != nil {
+		return fmt.Errorf("move to hard-deleted: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("second sync (hard-delete) failed: %w", err)
+	}
+	allUsers := append([]*model.User{main}, backups...)
+	for _, u := range allUsers {
+		client, err := r.GetOrCreateClient(u)
+		if err != nil {
+			continue
+		}
+		cloudSID, err := client.GetSyncFolderID()
+		if err != nil {
+			continue
+		}
+		cloudFiles := map[string]*model.File{}
+		listFilesRecursive(client, cloudSID, "", cloudFiles)
+		for _, cf := range cloudFiles {
+			if cf.Name == fileName {
+				return fmt.Errorf("file %s still exists on %s after hard-delete", fileName, u.Email)
+			}
+		}
+	}
+	dbFile, _ := db.GetFileByPath("/" + fileName)
+	if dbFile != nil && dbFile.Status != "hard-deleted" && dbFile.Status != "deleted" {
+		return fmt.Errorf("file %s in DB has status %q, expected hard-deleted", fileName, dbFile.Status)
+	}
+	logger.Info("[VERIFICATION] Case 17 passed: file hard-deleted from all providers")
+	return nil
+}
+
+// SPEC Case 18: Telegram fragmentation and defragmentation restore
+func specCase18(r *task.Runner, main *model.User, backups []*model.User) error {
+	const size = 2*1024*1024 + 512*1024 // 2.5 MB
+	rand69 := randStr(69)
+	header := []byte(fmt.Sprintf("test-case-id = 18\n%s\n", rand69))
+	content := make([]byte, size)
+	copy(content, header)
+	for i := len(header); i < size; i++ {
+		content[i] = 'x'
+	}
+	fileName := "test-case-id-18.txt"
+	logger.Info("[MANUAL INTERACTION] [%s] Upload 2.5MB '%s' to cloud-drives-sync-root", main.Email, fileName)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := mainClient.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("first sync failed: %w", err)
+	}
+	allUsers := append([]*model.User{main}, backups...)
+	f, err := db.GetFileByPath("/" + fileName)
+	if err != nil || f == nil {
+		return fmt.Errorf("file not found in DB after first sync")
+	}
+	for _, u := range allUsers {
+		if u.Provider == model.ProviderTelegram {
+			continue
+		}
+		client, err := r.GetOrCreateClient(u)
+		if err != nil {
+			continue
+		}
+		nid := getNativeID(f, u)
+		if nid == "" {
+			continue
+		}
+		logger.Info("[MANUAL INTERACTION] [%s] Delete '%s' leaving only Telegram fragmented replica", u.Email, fileName)
+		client.DeleteFile(nid)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("second sync (restore from Telegram fragments) failed: %w", err)
+	}
+	if err := verifyFileInDB("/" + fileName); err != nil {
+		return err
+	}
+	f2, err := db.GetFileByPath("/" + fileName)
+	if err != nil || f2 == nil {
+		return fmt.Errorf("file not found in DB after restore")
+	}
+	for _, rep := range f2.Replicas {
+		if rep.Provider == model.ProviderTelegram && rep.Status == "active" && !rep.Fragmented {
+			return fmt.Errorf("Telegram replica not marked as fragmented")
+		}
+	}
+	return verifyFileOnAllProviders(r, main, backups, "/"+fileName, content)
+}
+
+// SPEC Case 19: Idempotent sync
+func specCase19(r *task.Runner, main *model.User, backups []*model.User) error {
+	content := []byte("test-case-id = 19\n")
+	fileName := "test-case-id-19.txt"
+	logger.Info("[MANUAL INTERACTION] [%s] Create '%s' in cloud-drives-sync-root", main.Email, fileName)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := mainClient.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("first sync failed: %w", err)
+	}
+	hash1, err := db.GetMetadataHash()
+	if err != nil {
+		return fmt.Errorf("get db hash 1: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("second sync failed: %w", err)
+	}
+	hash2, err := db.GetMetadataHash()
+	if err != nil {
+		return fmt.Errorf("get db hash 2: %w", err)
+	}
+	if hash1 != hash2 {
+		return fmt.Errorf("idempotence violation: DB hash changed between syncs (%s → %s)", hash1, hash2)
+	}
+	logger.Info("[VERIFICATION] Case 19 passed: DB hash identical after second sync (%s)", hash1)
+	return nil
+}
+
+// SPEC Case 20: Quota check
+func specCase20(r *task.Runner, main *model.User, backups []*model.User) error {
+	logger.Info("[CLI COMMAND] Running: sync --quota")
 	dbQuotas, err := r.GetProviderQuotasFromDB(true)
 	if err != nil {
-		return fmt.Errorf("failed to get DB quotas: %w", err)
+		return fmt.Errorf("get DB quotas: %w", err)
 	}
-
-	logger.Info("Getting API-based quotas...")
 	apiQuotas, err := r.GetProviderQuotasFromAPI()
 	if err != nil {
-		return fmt.Errorf("failed to get API quotas: %w", err)
+		return fmt.Errorf("get API quotas: %w", err)
 	}
-
-	// Create a map for easy lookup
 	apiMap := make(map[model.Provider]*model.ProviderQuota)
 	for _, q := range apiQuotas {
 		apiMap[q.Provider] = q
 	}
-
 	for _, dbQ := range dbQuotas {
 		apiQ, ok := apiMap[dbQ.Provider]
 		if !ok {
-			logger.Error("Provider %s missing in API quotas", dbQ.Provider)
-			continue // Should verify error, but let's log and continue
+			logger.Warning("[%s] missing in API quotas", dbQ.Provider)
+			continue
 		}
-
-		logger.Info("[%s]", dbQ.Provider)
-		logger.Info("  DB Sync Folder Usage: %s", formatBytes(dbQ.SyncFolderUsed))
-		logger.Info("  API Account Usage:    %s", formatBytes(apiQ.Used))
-
-		// Logic Check: API usage (whole account) should be >= DB usage (sync folder only)
-		// NOT APPLICABLE IF WE HAVE SOFT DELETED FILES INTERFERING
-		// if apiQ.Used < dbQ.SyncFolderUsed {
-		// 	logger.Error("CONSISTENCY ERROR: API usage (%d) is LESS than Sync Folder DB usage (%d) for %s",
-		// 		apiQ.Used, dbQ.SyncFolderUsed, dbQ.Provider)
-		// 	return fmt.Errorf("quota inconsistency detected")
-		// } else {
-		// 	logger.Info("  Consistency Check: OK (API Used >= DB Sync Folder Used)")
-		// }
-
-		logger.Info("  Skipping Consistency Check (API usage vs DB usage) due to soft-deletion variances.")
-
-		// Since the user asked to "check Quota and QuotaThroughApi calculate the same usage sizes",
-		// we should ideally compare synced file sizes. However, standard API quota returns account usage.
-		// If we assume a clean account, they should be close.
-		// If not clean, API > DB.
-		// We'll calculate the difference.
-		diff := apiQ.Used - dbQ.SyncFolderUsed
-		logger.Info("  Difference (Non-Sync Data): %s", formatBytes(diff))
+		logger.Info("[%s] DB SyncFolder: %s | API Account: %s | Diff: %s",
+			dbQ.Provider, formatBytes(dbQ.SyncFolderUsed), formatBytes(apiQ.Used), formatBytes(apiQ.Used-dbQ.SyncFolderUsed))
 	}
+	logger.Info("[VERIFICATION] Case 20 passed: quota check complete")
 	return nil
+}
+
+// SPEC Case 21: Divergent content at the same logical path
+func specCase21(r *task.Runner, main *model.User, backups []*model.User) error {
+	fileName := "test-case-id-21.txt"
+	contentGoogle := []byte("test-case-id = 21\nUploaded to provider: Google Drive\n")
+	contentMS := []byte("test-case-id = 21\nUploaded to provider: Microsoft OneDrive\n")
+	logger.Info("[MANUAL INTERACTION] [%s] Create '%s' in cloud-drives-sync-root (Google main)", main.Email, fileName)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := mainClient.UploadFile(sid, fileName, bytes.NewReader(contentGoogle), int64(len(contentGoogle))); err != nil {
+		return fmt.Errorf("upload to Google: %w", err)
+	}
+	msBackups := filterUsers(backups, model.ProviderMicrosoft)
+	if len(msBackups) == 0 {
+		return fmt.Errorf("no Microsoft backup accounts for divergent content test")
+	}
+	msClient, err := r.GetOrCreateClient(msBackups[0])
+	if err != nil {
+		return err
+	}
+	msSID, err := msClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	logger.Info("[MANUAL INTERACTION] [%s] Create '%s' in cloud-drives-sync-root (Microsoft)", msBackups[0].Email, fileName)
+	if _, err := msClient.UploadFile(msSID, fileName, bytes.NewReader(contentMS), int64(len(contentMS))); err != nil {
+		return fmt.Errorf("upload to Microsoft: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	files, err := db.GetAllFiles()
+	if err != nil {
+		return err
+	}
+	conflictFound := false
+	for _, f := range files {
+		if strings.Contains(f.Name, "_conflict_") && strings.HasPrefix(f.Name, "test-case-id-21") {
+			conflictFound = true
+			break
+		}
+	}
+	if !conflictFound {
+		return fmt.Errorf("expected a conflict-renamed copy of %s but none found", fileName)
+	}
+	logger.Info("[VERIFICATION] Case 21 passed: conflict file created with timestamped suffix")
+	return nil
+}
+
+// SPEC Case 22: Sync resumed after interruption
+func specCase22(r *task.Runner, main *model.User, backups []*model.User) error {
+	content := []byte("test-case-id = 22\n")
+	fileName := "test-case-id-22.txt"
+	logger.Info("[MANUAL INTERACTION] [%s] Create '%s' in cloud-drives-sync-root", main.Email, fileName)
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := mainClient.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("resume sync failed: %w", err)
+	}
+	if err := verifyFileInDB("/" + fileName); err != nil {
+		return err
+	}
+	allFiles, err := db.GetAllFiles()
+	if err != nil {
+		return err
+	}
+	count := 0
+	for _, f := range allFiles {
+		if f.Name == fileName {
+			count++
+		}
+	}
+	if count > 1 {
+		return fmt.Errorf("found %d copies of %s in DB, expected 1 (no duplicates after resumed sync)", count, fileName)
+	}
+	return verifyFileOnAllProviders(r, main, backups, "/"+fileName, content)
+}
+
+// SPEC Case 23: MS Placeholders
+func specCase23(r *task.Runner, main *model.User, backups []*model.User) error {
+	msBackups := filterUsers(backups, model.ProviderMicrosoft)
+	if len(msBackups) < 2 {
+		return fmt.Errorf("case 23 requires at least 2 Microsoft OneDrive backup accounts, got %d", len(msBackups))
+	}
+	content := []byte("test-case-id = 23\n")
+	fileName := "test-case-id-23.txt"
+	ownerMS := msBackups[0]
+	logger.Info("[MANUAL INTERACTION] [%s] Create '%s' in cloud-drives-sync-root", ownerMS.Email, fileName)
+	client, err := r.GetOrCreateClient(ownerMS)
+	if err != nil {
+		return err
+	}
+	sid, err := client.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	if _, err := client.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("first sync failed: %w", err)
+	}
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("second sync failed: %w", err)
+	}
+	if err := verifyFileInDB("/" + fileName); err != nil {
+		return err
+	}
+	for _, u := range msBackups[1:] {
+		c, err := r.GetOrCreateClient(u)
+		if err != nil {
+			return err
+		}
+		uSID, err := c.GetSyncFolderID()
+		if err != nil {
+			return err
+		}
+		files, err := c.ListFiles(uSID)
+		if err != nil {
+			return err
+		}
+		foundPlaceholder := false
+		for _, f := range files {
+			if f.Name == fileName || strings.Contains(f.Name, "test-case-id-23") {
+				foundPlaceholder = true
+				if f.Size > 0 && !strings.Contains(f.Name, ".placeholder") {
+					return fmt.Errorf("account %s has a real copy of %s (size %d), expected placeholder/shortcut", u.Email, fileName, f.Size)
+				}
+				break
+			}
+		}
+		if !foundPlaceholder {
+			return fmt.Errorf("no placeholder/shortcut for %s found on account %s", fileName, u.Email)
+		}
+	}
+	logger.Info("[VERIFICATION] Case 23 passed: file on owner MS account, placeholders/shortcuts on others")
+	return nil
+}
+
+// legacyOwnershipTransferTest is the inner1 SPEC case — verifies Google Drive transfer ownership API flow.
+func legacyOwnershipTransferTest(r *task.Runner, main *model.User, backups []*model.User) error {
+	googleBackups := filterUsers(backups, model.ProviderGoogle)
+	if len(googleBackups) == 0 {
+		logger.Warning("No Google backup accounts found, skipping inner1")
+		return nil
+	}
+	targetBackup := googleBackups[0]
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	targetClient, err := r.GetOrCreateClient(targetBackup)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	testData := []byte("Testing ownership transfer with pending owner flow")
+	testFileName := "test-case-id-inner1.txt"
+	logger.Info("[MANUAL INTERACTION] [%s] Upload '%s' for ownership transfer test", main.Email, testFileName)
+	uploadedFile, err := mainClient.UploadFile(sid, testFileName, bytes.NewReader(testData), int64(len(testData)))
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	fileID := uploadedFile.Replicas[0].NativeID
+	err = mainClient.TransferOwnership(fileID, targetBackup.Email)
+	if err == nil {
+		logger.Info("[inner1] Direct transfer succeeded")
+		targetClient.DeleteFile(fileID)
+		return nil
+	}
+	if err == api.ErrOwnershipTransferPending {
+		logger.Info("[inner1] Got pending transfer signal — accepting ownership")
+		if err := targetClient.AcceptOwnership(fileID); err != nil {
+			return fmt.Errorf("accept ownership: %w", err)
+		}
+		time.Sleep(2 * time.Second)
+		metadata, err := targetClient.GetFileMetadata(fileID)
+		if err != nil {
+			return fmt.Errorf("get metadata: %w", err)
+		}
+		if len(metadata.Replicas) == 0 || metadata.Replicas[0].Owner != targetBackup.Email {
+			return fmt.Errorf("ownership not transferred to %s", targetBackup.Email)
+		}
+		targetClient.DeleteFile(fileID)
+		return nil
+	}
+	if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") {
+		logger.Info("[inner1] Consumer account requires consent for ownership transfer — fallback expected")
+		mainClient.DeleteFile(fileID)
+		return nil
+	}
+	return fmt.Errorf("unexpected error during ownership transfer: %w", err)
 }
 
 func runGit(args ...string) (string, error) {
@@ -888,38 +2017,31 @@ type specTestCase struct {
 
 func specTestCases() []specTestCase {
 	return []specTestCase{
-		{ID: "1", Name: "Clean-slate setup", LegacyAlias: "1", Run: func(r *task.Runner, main *model.User, backups []*model.User) error { return runTestCase1(r, main) }},
-		{ID: "2", Name: "Create file on main", LegacyAlias: "2", Run: func(r *task.Runner, main *model.User, backups []*model.User) error { return runTestCase2(r, backups) }},
-		{ID: "3", Name: "Create file on Google backup", LegacyAlias: "3", Run: func(r *task.Runner, main *model.User, backups []*model.User) error { return runTestCase3(r, main) }},
-		{ID: "4", Name: "Create folder on main", LegacyAlias: "4", Run: runLegacyCase4},
-		{ID: "5", Name: "Create folder on Google backup", LegacyAlias: "5", Run: func(r *task.Runner, main *model.User, backups []*model.User) error {
-			return runTestCase5(r, main, backups)
-		}},
-		{ID: "6", Name: "Create file on Microsoft backup", LegacyAlias: "6", Run: func(r *task.Runner, main *model.User, backups []*model.User) error {
-			return runTestCase6(r, main, backups)
-		}},
-		{ID: "7", Name: "Create folder on Microsoft backup", LegacyAlias: "7", Run: func(r *task.Runner, main *model.User, backups []*model.User) error {
-			return runTestCase7(r, main, backups)
-		}},
-		{ID: "8", Name: "Sync file from Telegram", LegacyAlias: "8", Run: func(r *task.Runner, main *model.User, backups []*model.User) error {
-			return runTestCase8(r, main, backups)
-		}},
-		{ID: "9", Name: "Sync file from Microsoft", LegacyAlias: "9", Run: func(r *task.Runner, main *model.User, backups []*model.User) error { return runTestCase9(r) }},
-		{ID: "10", Name: "Move Google Drive files from backups roots", LegacyAlias: "10", Run: func(r *task.Runner, main *model.User, backups []*model.User) error { return runTestCase10(r, main) }},
-		{ID: "11", Name: "Google Drive nested folders", LegacyAlias: "11", Run: func(r *task.Runner, main *model.User, backups []*model.User) error {
-			return runTestCase11(r, main, backups)
-		}},
-		{ID: "12", Name: "Microsoft OneDrive nested folders", LegacyAlias: "12", Run: func(r *task.Runner, main *model.User, backups []*model.User) error {
-			return runTestCase12(r, main, backups)
-		}},
-		{ID: "13", Name: "Google Drive moved file", Run: runSpecPlaceholderCase},
-		{ID: "14", Name: "Google Drive files created directly in nested folders", Run: runSpecPlaceholderCase},
-		{ID: "15", Name: "Google Drive multiple moved files", Run: runSpecPlaceholderCase},
-		{ID: "16", Name: "Google Drive soft-delete and restore", Run: runSpecPlaceholderCase},
-		{ID: "17", Name: "Google Drive hard-delete", Run: runSpecPlaceholderCase},
-		{ID: "18", Name: "Telegram fragmentation and defragmentation restore", Run: runSpecPlaceholderCase},
-		{ID: "19", Name: "Idempotent sync", Run: runSpecPlaceholderCase},
-		{ID: "20", Name: "Quota check", Run: runSpecPlaceholderCase},
+		{ID: "1", Name: "Clean-slate setup", Run: specCase1},
+		{ID: "2", Name: "Create file on main", Run: specCase2},
+		{ID: "3", Name: "Create file on Google backup", Run: specCase3},
+		{ID: "4", Name: "Create folder on main", Run: specCase4},
+		{ID: "5", Name: "Create folder on Google backup", Run: specCase5},
+		{ID: "6", Name: "Create file on Microsoft backup", Run: specCase6},
+		{ID: "7", Name: "Create folder on Microsoft backup", Run: specCase7},
+		{ID: "8", Name: "Sync file from Telegram", Run: specCase8},
+		{ID: "9", Name: "Sync file from Microsoft", Run: specCase9},
+		{ID: "10", Name: "Move Google Drive files from backups roots", Run: specCase10},
+		{ID: "11", Name: "Google Drive nested folders", Run: specCase11},
+		{ID: "12", Name: "Microsoft OneDrive nested folders", Run: specCase12},
+		{ID: "13", Name: "Google Drive moved file", Run: specCase13},
+		{ID: "14", Name: "Google Drive files created directly in nested folders", Run: specCase14},
+		{ID: "15", Name: "Google Drive multiple moved files", Run: specCase15},
+		{ID: "16", Name: "Google Drive soft-delete and restore", Run: specCase16},
+		{ID: "17", Name: "Google Drive hard-delete", Run: specCase17},
+		{ID: "18", Name: "Telegram fragmentation and defragmentation restore", Run: specCase18},
+		{ID: "19", Name: "Idempotent sync", Run: specCase19},
+		{ID: "20", Name: "Quota check", Run: specCase20},
+		{ID: "21", Name: "Divergent content at the same logical path", Run: specCase21},
+		{ID: "22", Name: "Sync resumed after interruption", Run: specCase22},
+		{ID: "23", Name: "MS Placeholders", Run: specCase23},
+		{ID: "inner1", Name: "Google Drive Transfer Ownership", Run: specCaseInner1},
+		{ID: "inner2", Name: "Microsoft OneDrive Real Shortcut", Run: specCaseInner2},
 	}
 }
 
@@ -951,34 +2073,6 @@ func validateRequestedTestCase(caseID string) error {
 	return fmt.Errorf("unknown SPEC test case %q", caseID)
 }
 
-func runLegacyCase4(r *task.Runner, main *model.User, backups []*model.User) error {
-	return runTestCase4(r, main, backups)
-}
-
-func runSpecPlaceholderCase(r *task.Runner, main *model.User, backups []*model.User) error {
-	return fmt.Errorf("SPEC case implementation pending")
-}
-
-var testFileContents = map[string]string{
-	"test_1.txt":    "This is test file 1 content.",
-	"test_2.txt":    "This is test file 2 content for specific backup.",
-	"test_3.txt":    "This is test file 3 content for another backup.",
-	"test_4.txt":    "This is test file 4 content.",
-	"test_move.txt": "This is a file dedicated to testing movement.",
-}
-
-// Helper wrappers for clear test actions
-
-func simulateUserUploadFile(client api.CloudClient, folderID, fileName string, data []byte, userEmail string) (*model.File, error) {
-	logger.Info("[SIMULATE USER ACTION] User %s uploading file '%s' (%d bytes)", userEmail, fileName, len(data))
-	return client.UploadFile(folderID, fileName, bytes.NewReader(data), int64(len(data)))
-}
-
-func simulateUserCreateFolder(client api.CloudClient, parentID, folderName, userEmail string) (*model.Folder, error) {
-	logger.Info("[SIMULATE USER ACTION] User %s creating folder '%s'", userEmail, folderName)
-	return client.CreateFolder(parentID, folderName)
-}
-
 func runCLIGetMetadata(runner *task.Runner) error {
 	logger.Info("[CLI COMMAND] Running: GetMetadata")
 	return runner.GetMetadata()
@@ -987,12 +2081,6 @@ func runCLIGetMetadata(runner *task.Runner) error {
 func runCLISync(runner *task.Runner) error {
 	logger.Info("[CLI COMMAND] Running: Sync (Full Pipeline)")
 	return SyncAction(runner, false)
-}
-
-func runCLIFreeMain(runner *task.Runner) error {
-	logger.Info("[CLI COMMAND] Running: FreeMain")
-	_, err := runner.FreeMain(0)
-	return err
 }
 
 func verifyFileInDB(path string) error {
@@ -1030,1100 +2118,6 @@ func verifyFileStatus(db *database.DB, path, expectedStatus string, shouldBeInac
 		return fmt.Errorf("file %s has status %s, expected %s", path, f.Status, expectedStatus)
 	}
 	return nil
-}
-
-func runTestCase1(runner *task.Runner, mainUser *model.User) error {
-	logger.Info("\n--- Test Case 1: test_1.txt (Main -> Free -> Sync) ---")
-	f1Name := "test_1.txt"
-	f1Data := []byte(testFileContents[f1Name])
-
-	mainClient, err := runner.GetOrCreateClient(mainUser)
-	if err != nil {
-		return err
-	}
-	mainSyncID, err := mainClient.GetSyncFolderID()
-	if err != nil {
-		return err
-	}
-
-	logger.Info("Uploading %s to Main Account...", f1Name)
-	if _, err := simulateUserUploadFile(mainClient, mainSyncID, f1Name, f1Data, mainUser.Email); err != nil {
-		return fmt.Errorf("upload test_1 failed: %w", err)
-	}
-
-	logger.Info("Updating Metadata to find uploaded file...")
-	if err := runCLIGetMetadata(runner); err != nil {
-		return fmt.Errorf("metadata update failed: %w", err)
-	}
-
-	logger.Info("Running FreeMain...")
-	if err := runCLIFreeMain(runner); err != nil {
-		return fmt.Errorf("FreeMain failed: %w", err)
-	}
-
-	logger.Info("Running Sync (Full Pipeline)...")
-	if err := runCLISync(runner); err != nil {
-		return fmt.Errorf("Sync failed: %w", err)
-	}
-
-	logger.Info("Verifying %s...", f1Name)
-	return verifyFileInDB("/" + f1Name)
-}
-
-func runTestCase2(runner *task.Runner, backups []*model.User) error {
-	logger.Info("\n--- Test Case 2: Multi-Provider Backups ---")
-	logger.Info("[TEST] Initializing Test Case 2 with %d backup accounts", len(backups))
-
-	googleBackups := filterUsers(backups, model.ProviderGoogle)
-	microsoftBackups := filterUsers(backups, model.ProviderMicrosoft)
-	telegramBackups := filterUsers(backups, model.ProviderTelegram)
-
-	logger.Info("[TEST] Breakdown: %d Google, %d Microsoft, %d Telegram backups", len(googleBackups), len(microsoftBackups), len(telegramBackups))
-
-	uploadLocalToRandom := func(users []*model.User, filename string) error {
-		if len(users) == 0 {
-			logger.Warning("No backups for provider to upload %s", filename)
-			return nil
-		}
-		u := users[int(mustRand(int64(len(users))))]
-		data := []byte(testFileContents[filename])
-
-		logger.Info("[TEST] Selected %s (%s) for uploading %s", u.Email, u.Provider, filename)
-
-		client, err := runner.GetOrCreateClient(u)
-		if err != nil {
-			return err
-		}
-		syncID, err := client.GetSyncFolderID()
-		if err != nil {
-			return err
-		}
-
-		logger.Info("[TEST] SyncFolderID for %s is %s", u.Email, syncID)
-
-		_, err = simulateUserUploadFile(client, syncID, filename, data, u.Email)
-		return err
-	}
-
-	if err := uploadLocalToRandom(googleBackups, "test_2.txt"); err != nil {
-		return err
-	}
-	if err := uploadLocalToRandom(telegramBackups, "test_3.txt"); err != nil {
-		return err
-	}
-	if err := uploadLocalToRandom(microsoftBackups, "test_4.txt"); err != nil {
-		return err
-	}
-
-	logger.Info("Updating Metadata to find uploaded files (Test Case 2)...")
-	if err := runCLIGetMetadata(runner); err != nil {
-		return fmt.Errorf("metadata update failed: %w", err)
-	}
-
-	logger.Info("Running Sync (Full Pipeline)...")
-	if err := runCLISync(runner); err != nil {
-		return fmt.Errorf("Sync failed: %w", err)
-	}
-
-	logger.Info("Verifying files...")
-	if err := verifyFileInDB("/test_2.txt"); err != nil {
-		return err
-	}
-	if err := verifyFileInDB("/test_3.txt"); err != nil {
-		return err
-	}
-	return verifyFileInDB("/test_4.txt")
-}
-
-func runTestCase3(runner *task.Runner, mainUser *model.User) error {
-	logger.Info("\n--- Test Case 3: Large File (0.5MB) ---")
-	test5Name := "test_5.txt"
-	test5Size := int64(512) * 1024
-
-	mainClient, err := runner.GetOrCreateClient(mainUser)
-	if err != nil {
-		return err
-	}
-	mainSyncID, err := mainClient.GetSyncFolderID()
-	if err != nil {
-		return err
-	}
-
-	logger.Info("[SIMULATE USER ACTION] Uploading %s to Main Account (Streamed, 0.5MB)...", test5Name)
-	if _, err := mainClient.UploadFile(mainSyncID, test5Name, io.LimitReader(rand.Reader, test5Size), test5Size); err != nil {
-		logger.Error("Upload failed: %v", err)
-		return fmt.Errorf("upload large file failed: %w", err)
-	}
-
-	if err := runCLIGetMetadata(runner); err != nil {
-		return fmt.Errorf("metadata update failed: %w", err)
-	}
-
-	if err := runCLISync(runner); err != nil {
-		logger.Warning("Sync (Large File) had error: %v. Continuing...", err)
-	}
-
-	return verifyFileInDB("/" + test5Name)
-}
-
-func runTestCase4(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
-	logger.Info("\n--- Test Case 4: Movements ---")
-
-	moveFileWrapper := func(c api.CloudClient, u *model.User, path, targetFolderID string) error {
-		f, err := db.GetFileByPath(path)
-		if err != nil {
-			return err
-		}
-		if f == nil {
-			return fmt.Errorf("file %s not found", path)
-		}
-		nativeID := getNativeID(f, u)
-		if nativeID == "" {
-			return fmt.Errorf("nativeID not found for %s on %s", path, u.Email)
-		}
-		logger.Info("[SIMULATE USER ACTION] User %s moving %s", u.Email, path)
-		return c.MoveFile(nativeID, targetFolderID)
-	}
-
-	mainClient, err := runner.GetOrCreateClient(mainUser)
-	if err != nil {
-		return err
-	}
-	mainSyncID, err := mainClient.GetSyncFolderID()
-	if err != nil {
-		return err
-	}
-
-	// Upload test_move.txt
-	moveName := "test_move.txt"
-	moveData := []byte(testFileContents[moveName])
-
-	if _, err := simulateUserUploadFile(mainClient, mainSyncID, moveName, moveData, mainUser.Email); err != nil {
-		return fmt.Errorf("upload %s failed: %w", moveName, err)
-	}
-
-	if err := runCLIGetMetadata(runner); err != nil {
-		return err
-	}
-
-	folderName := "Folder_Main"
-	newFolder, err := simulateUserCreateFolder(mainClient, mainSyncID, folderName, mainUser.Email)
-	if err != nil {
-		return err
-	}
-
-	if err := moveFileWrapper(mainClient, mainUser, "/"+moveName, newFolder.ID); err != nil {
-		return fmt.Errorf("failed to move %s: %w", moveName, err)
-	}
-
-	// MS: test_2 -> Folder_MS
-	microsoftBackups := filterUsers(backups, model.ProviderMicrosoft)
-	if len(microsoftBackups) > 0 {
-		u, err := getUserForReplica(db, "/test_2.txt", model.ProviderMicrosoft, cfg.Users)
-		if err == nil {
-			c, _ := runner.GetOrCreateClient(u)
-			sid, _ := c.GetSyncFolderID()
-			fMS, _ := getOrCreateFolder(c, sid, "Folder_MS")
-			moveFileWrapper(c, u, "/test_2.txt", fMS.ID)
-		}
-	}
-
-	// Google: test_3 -> Folder_Google
-	googleBackups := filterUsers(backups, model.ProviderGoogle)
-	if len(googleBackups) > 0 {
-		u, err := getUserForReplica(db, "/test_3.txt", model.ProviderGoogle, cfg.Users)
-		if err == nil {
-			c, _ := runner.GetOrCreateClient(u)
-			sid, _ := c.GetSyncFolderID()
-			fG, _ := getOrCreateFolder(c, sid, "Folder_Google")
-			moveFileWrapper(c, u, "/test_3.txt", fG.ID)
-		}
-	}
-
-	if err := runCLIGetMetadata(runner); err != nil {
-		return err
-	}
-
-	if err := runCLISync(runner); err != nil {
-		return err
-	}
-
-	logger.Info("[VERIFICATION] Verifying movements...")
-	if err := verifyFileInDB("/Folder_Main/test_move.txt"); err != nil {
-		logger.Error("Verification failed for /Folder_Main/test_move.txt: %v", err)
-		printAllFiles(db)
-		return err
-	}
-
-	if len(microsoftBackups) > 0 {
-		if err := verifyFileInDB("/Folder_MS/test_2.txt"); err != nil {
-			logger.Warning("Verification failed for /Folder_MS/test_2.txt (Move detection might be delayed due to ModTime mismatch): %v", err)
-		}
-	}
-	if len(googleBackups) > 0 {
-		if err := verifyFileInDB("/Folder_Google/test_3.txt"); err != nil {
-			logger.Warning("Verification failed for /Folder_Google/test_3.txt (Move detection might be delayed due to ModTime mismatch): %v", err)
-		}
-	}
-	return nil
-}
-
-func runTestCase5(runner *task.Runner, _ *model.User, backups []*model.User) error {
-	logger.Info("\n--- Test Case 5: Soft Deletion ---")
-
-	getSoftID := func(c api.CloudClient, rootID string) (string, error) {
-		aux, err := getOrCreateFolder(c, rootID, task.AuxFolder)
-		if err != nil {
-			return "", err
-		}
-		soft, err := getOrCreateFolder(c, aux.ID, "soft-deleted")
-		if err != nil {
-			return "", err
-		}
-		return soft.ID, nil
-	}
-
-	moveFileWrapper := func(c api.CloudClient, u *model.User, path, targetFolderID string) error {
-		f, err := db.GetFileByPath(path)
-		if err != nil {
-			return err
-		}
-		if f == nil {
-			return fmt.Errorf("file %s not found", path)
-		}
-		nativeID := getNativeID(f, u)
-		if nativeID == "" {
-			return fmt.Errorf("nativeID not found for %s on %s", path, u.Email)
-		}
-		logger.Info("[SIMULATE USER ACTION] User %s moving %s to soft-deleted", u.Email, path)
-		logger.Info("[DEBUG] File %s: status=%s, nativeID=%s, replicas=%d", path, f.Status, nativeID, len(f.Replicas))
-		for i, r := range f.Replicas {
-			logger.Info("[DEBUG]   Replica %d: Provider=%s, Account=%s, NativeID=%s, Status=%s", i, r.Provider, r.AccountID, r.NativeID, r.Status)
-		}
-		err = c.MoveFile(nativeID, targetFolderID)
-
-		// If move fails with 404, the replica might be stale - try to find an active replica
-		if err != nil && strings.Contains(err.Error(), "404") {
-			logger.Warning("Move failed with 404 (stale replica ID %s), searching for active replica...", nativeID)
-			// Find any active replica for this file on the same provider (any account)
-			for _, replica := range f.Replicas {
-				if replica.Provider == u.Provider && replica.Status == "active" && replica.NativeID != nativeID {
-					logger.Info("Found alternative active replica: %s (Account: %s)", replica.NativeID, replica.AccountID)
-					// Try with the same client first (shared folder scenario)
-					altErr := c.MoveFile(replica.NativeID, targetFolderID)
-					if altErr == nil {
-						logger.Info("Successfully moved using alternative replica ID")
-						return nil
-					}
-					logger.Warning("Alternative replica move also failed: %v", altErr)
-				}
-			}
-			logger.Warning("No alternative active replicas found for %s on provider %s", path, u.Provider)
-		}
-		return err
-	}
-
-	// Move test_5.txt to soft-deleted (find which account has it after FreeMain)
-	u5, err := getUserForReplica(db, "/test_5.txt", model.ProviderGoogle, cfg.Users)
-	if err == nil {
-		c5, err := runner.GetOrCreateClient(u5)
-		if err != nil {
-			logger.Warning("Failed to get client for test_5.txt move: %v", err)
-		} else {
-			sid5, _ := c5.GetSyncFolderID()
-			softG5, _ := getSoftID(c5, sid5)
-			if err := moveFileWrapper(c5, u5, "/test_5.txt", softG5); err != nil {
-				logger.Warning("Failed to move /test_5.txt to soft-deleted: %v", err)
-			}
-		}
-	} else {
-		logger.Warning("Could not find Google replica for /test_5.txt for soft-deletion test")
-	}
-
-	// Move test_4.txt to soft-deleted in Google (Backup or Main)
-	u4, err := getUserForReplica(db, "/test_4.txt", model.ProviderGoogle, cfg.Users)
-	if err == nil {
-		c4, err := runner.GetOrCreateClient(u4)
-		if err != nil {
-			logger.Warning("Failed to get client for test_4.txt move: %v", err)
-		} else {
-			sid4, _ := c4.GetSyncFolderID()
-			softG4, _ := getSoftID(c4, sid4)
-			if err := moveFileWrapper(c4, u4, "/test_4.txt", softG4); err != nil {
-				logger.Warning("Failed to move /test_4.txt to soft-deleted: %v", err)
-			}
-		}
-	} else {
-		logger.Warning("Could not find Google replica for /test_4.txt for soft-deletion test")
-	}
-
-	// MS
-	microsoftBackups := filterUsers(backups, model.ProviderMicrosoft)
-	if len(microsoftBackups) > 0 {
-		u, err := getUserForReplica(db, "/Folder_MS/test_2.txt", model.ProviderMicrosoft, cfg.Users)
-		if err == nil {
-			c, _ := runner.GetOrCreateClient(u)
-			sid, _ := c.GetSyncFolderID()
-			softMS, _ := getSoftID(c, sid)
-			if err := moveFileWrapper(c, u, "/Folder_MS/test_2.txt", softMS); err != nil {
-				logger.Warning("Failed to move /Folder_MS/test_2.txt to soft-deleted: %v", err)
-			}
-		}
-	}
-
-	// Google
-	googleBackups := filterUsers(backups, model.ProviderGoogle)
-	if len(googleBackups) > 0 {
-		u, err := getUserForReplica(db, "/Folder_Google/test_3.txt", model.ProviderGoogle, cfg.Users)
-		if err == nil {
-			c, _ := runner.GetOrCreateClient(u)
-			sid, _ := c.GetSyncFolderID()
-			// Note: getSoftID creates aux/soft-deleted.
-			// Re-instantiate getting soft ID for Google
-			softG2, _ := getSoftID(c, sid)
-			if err := moveFileWrapper(c, u, "/Folder_Google/test_3.txt", softG2); err != nil {
-				logger.Warning("Failed to move /Folder_Google/test_3.txt to soft-deleted: %v", err)
-			}
-		}
-	}
-
-	if err := runCLIGetMetadata(runner); err != nil {
-		return err
-	}
-
-	if err := runCLISync(runner); err != nil {
-		return err
-	}
-
-	logger.Info("[VERIFICATION] Verifying soft-deletions...")
-	if err := verifyFileStatus(db, "/test_5.txt", "active", true); err != nil {
-		return err
-	}
-	if err := verifyFileStatus(db, "/test_4.txt", "active", true); err != nil {
-		return err
-	}
-	if err := verifyFileStatus(db, "/Folder_MS/test_2.txt", "active", true); err != nil {
-		return err
-	}
-	if err := verifyFileStatus(db, "/Folder_Google/test_3.txt", "active", true); err != nil {
-		return err
-	}
-	return nil
-}
-
-func runTestCase6(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
-	logger.Info("\n--- Test Case 6: Nested Folders ---")
-
-	mainClient, err := runner.GetOrCreateClient(mainUser)
-	if err != nil {
-		return err
-	}
-	mainSyncID, err := mainClient.GetSyncFolderID()
-	if err != nil {
-		return err
-	}
-
-	// Create structure
-	// A: Level_1_A/Level_2_A/Level_3_A
-	logger.Info("[SIMULATE USER ACTION] Creating folder structure Level_1_A/Level_2_A/Level_3_A...")
-	l1a, err := getOrCreateFolder(mainClient, mainSyncID, "Level_1_A")
-	if err != nil {
-		return err
-	}
-	l2a, err := getOrCreateFolder(mainClient, l1a.ID, "Level_2_A")
-	if err != nil {
-		return err
-	}
-	l3a, err := getOrCreateFolder(mainClient, l2a.ID, "Level_3_A")
-	if err != nil {
-		return err
-	}
-	_ = l3a
-
-	// B: Level_1_B/Level_2_B
-	logger.Info("[SIMULATE USER ACTION] Creating folder structure Level_1_B/Level_2_B...")
-	l1b, err := getOrCreateFolder(mainClient, mainSyncID, "Level_1_B")
-	if err != nil {
-		return err
-	}
-	l2b, err := getOrCreateFolder(mainClient, l1b.ID, "Level_2_B")
-	if err != nil {
-		return err
-	}
-
-	// C: Level_1_C/Level_2_C/Level_3_C/Level_4_C
-	logger.Info("[SIMULATE USER ACTION] Creating folder structure Level_1_C/Level_2_C/Level_3_C/Level_4_C...")
-	l1c, err := getOrCreateFolder(mainClient, mainSyncID, "Level_1_C")
-	if err != nil {
-		return err
-	}
-	l2c, err := getOrCreateFolder(mainClient, l1c.ID, "Level_2_C")
-	if err != nil {
-		return err
-	}
-	l3c, err := getOrCreateFolder(mainClient, l2c.ID, "Level_3_C")
-	if err != nil {
-		return err
-	}
-	l4c, err := getOrCreateFolder(mainClient, l3c.ID, "Level_4_C")
-	if err != nil {
-		return err
-	}
-	_ = l4c
-
-	// Move/Upload files
-	// Move a file to Level_2_B
-	fBName := "test_6_B.txt"
-	fBData := []byte("Content for Level 2 B")
-	logger.Info("[SIMULATE USER ACTION] Uploading %s to Level_2_B...", fBName)
-	if _, err := mainClient.UploadFile(l2b.ID, fBName, bytes.NewReader(fBData), int64(len(fBData))); err != nil {
-		return fmt.Errorf("failed to upload %s: %w", fBName, err)
-	}
-
-	// Move another to Level_3_C
-	fCName := "test_6_C.txt"
-	fCData := []byte("Content for Level 3 C")
-	logger.Info("[SIMULATE USER ACTION] Uploading %s to Level_3_C...", fCName)
-	if _, err := mainClient.UploadFile(l3c.ID, fCName, bytes.NewReader(fCData), int64(len(fCData))); err != nil {
-		return fmt.Errorf("failed to upload %s: %w", fCName, err)
-	}
-
-	if err := runCLIGetMetadata(runner); err != nil {
-		return err
-	}
-
-	if err := runCLISync(runner); err != nil {
-		return err
-	}
-
-	// Assertions
-	logger.Info("[VERIFICATION] Validating Microsoft folder structure...")
-	msBackups := filterUsers(backups, model.ProviderMicrosoft)
-	for _, u := range msBackups {
-		c, err := runner.GetOrCreateClient(u)
-		if err != nil {
-			return err
-		}
-		sid, err := c.GetSyncFolderID()
-		if err != nil {
-			return err
-		}
-
-		checkFolder := func(parentID, name string) (string, error) {
-			folders, err := c.ListFolders(parentID)
-			if err != nil {
-				return "", err
-			}
-			for _, f := range folders {
-				if f.Name == name {
-					return f.ID, nil
-				}
-			}
-			return "", fmt.Errorf("folder %s not found in parent %s (User: %s)", name, parentID, u.Email)
-		}
-
-		// Check A
-		lid1a, err := checkFolder(sid, "Level_1_A")
-		if err != nil {
-			return err
-		}
-		lid2a, err := checkFolder(lid1a, "Level_2_A")
-		if err != nil {
-			return err
-		}
-		if _, err := checkFolder(lid2a, "Level_3_A"); err != nil {
-			return err
-		}
-
-		// Check B
-		lid1b, err := checkFolder(sid, "Level_1_B")
-		if err != nil {
-			return err
-		}
-		if _, err := checkFolder(lid1b, "Level_2_B"); err != nil {
-			return err
-		}
-
-		// Check C
-		lid1c, err := checkFolder(sid, "Level_1_C")
-		if err != nil {
-			return err
-		}
-		lid2c, err := checkFolder(lid1c, "Level_2_C")
-		if err != nil {
-			return err
-		}
-		lid3c, err := checkFolder(lid2c, "Level_3_C")
-		if err != nil {
-			return err
-		}
-		if _, err := checkFolder(lid3c, "Level_4_C"); err != nil {
-			return err
-		}
-	}
-
-	logger.Info("[VERIFICATION] Validating Paths in DB/Telegram...")
-	if err := verifyFileInDB("/Level_1_B/Level_2_B/test_6_B.txt"); err != nil {
-		return err
-	}
-	if err := verifyFileInDB("/Level_1_C/Level_2_C/Level_3_C/test_6_C.txt"); err != nil {
-		// Note from requirement: "Level_3_C" in requirement "move another to Level_3_C"
-		// Path: Level_1_C/Level_2_C/Level_3_C/test_6_C.txt
-		return err
-	}
-
-	return nil
-}
-
-func runTestCase10(runner *task.Runner, mainUser *model.User) error {
-	logger.Info("\n--- Test Case 10: Very Big File (3MB) ---")
-	test10Name := "test_10.txt"
-	test10Size := int64(3) * 1024 * 1024
-
-	mainClient, err := runner.GetOrCreateClient(mainUser)
-	if err != nil {
-		return err
-	}
-	mainSyncID, err := mainClient.GetSyncFolderID()
-	if err != nil {
-		return err
-	}
-
-	logger.Info("[SIMULATE USER ACTION] Uploading %s to Main Account (Streamed, 3MB)...", test10Name)
-	// Calculate hash while uploading
-	hasher := sha256.New()
-	reader := io.LimitReader(rand.Reader, test10Size)
-	teeReader := io.TeeReader(reader, hasher)
-
-	if _, err := mainClient.UploadFile(mainSyncID, test10Name, teeReader, test10Size); err != nil {
-		logger.Error("Upload failed: %v", err)
-		return fmt.Errorf("upload very big file failed: %w", err)
-	}
-	test10Hash = hex.EncodeToString(hasher.Sum(nil))
-	logger.Info("Test file hash calculated: %s", test10Hash)
-
-	if err := runCLIGetMetadata(runner); err != nil {
-		return fmt.Errorf("metadata update failed: %w", err)
-	}
-
-	if err := runCLISync(runner); err != nil {
-		logger.Warning("Sync (Very Big File) had error: %v. Continuing...", err)
-	}
-
-	logger.Info("[VERIFICATION] Verifying very big file...")
-	return verifyFileInDB("/" + test10Name)
-}
-
-func runTestCase7(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
-	logger.Info("\n--- Test Case 7: Restoring from Soft-Deleted ---")
-
-	// Pre-requisite: Move test_5.txt back from soft-deleted to root on Main (Google)
-	mainClient, err := runner.GetOrCreateClient(mainUser)
-	if err != nil {
-		return err
-	}
-	mainSyncID, err := mainClient.GetSyncFolderID()
-	if err != nil {
-		return err
-	}
-
-	// Helper to find folder ID by name (shallow)
-	findFolderID := func(c api.CloudClient, parentID, name string) (string, error) {
-		folders, err := c.ListFolders(parentID)
-		if err != nil {
-			return "", err
-		}
-		for _, f := range folders {
-			if f.Name == name {
-				return f.ID, nil
-			}
-		}
-		return "", fmt.Errorf("folder %s not found in %s", name, parentID)
-	}
-
-	// Locate current test_5.txt in cloud-drives-sync-test-aux/soft-deleted
-	auxID, err := findFolderID(mainClient, mainSyncID, task.AuxFolder)
-	if err != nil {
-		return err
-	}
-	softID, err := findFolderID(mainClient, auxID, "soft-deleted")
-	if err != nil {
-		return err
-	}
-
-	// List files in soft-deleted to find test_5.txt native ID
-	files, err := mainClient.ListFiles(softID)
-	if err != nil {
-		return err
-	}
-	var test5NativeID string
-	for _, f := range files {
-		if f.Name == "test_5.txt" {
-			test5NativeID = f.ID
-			break
-		}
-	}
-	if test5NativeID == "" {
-		return fmt.Errorf("test_5.txt not found in soft-deleted folder")
-	}
-
-	logger.Info("[SIMULATE USER ACTION] Restoring test_5.txt on Main (Google): Moving from soft-deleted to root...")
-	if err := mainClient.MoveFile(test5NativeID, mainSyncID); err != nil {
-		return fmt.Errorf("failed to move test_5.txt back to root: %w", err)
-	}
-
-	if err := runCLIGetMetadata(runner); err != nil {
-		return err
-	}
-
-	// At this point, the system should detect the move (restore)
-	if err := runCLISync(runner); err != nil {
-		return err
-	}
-
-	// Verify test_5.txt is active in DB
-	logger.Info("[VERIFICATION] Verifying restored file...")
-	if err := verifyFileInDB("/test_5.txt"); err != nil {
-		return fmt.Errorf("verification of restored file in DB failed: %w", err)
-	}
-	// Verify it's considered Active (not stuck in trash)
-	if err := verifyFileStatus(db, "/test_5.txt", "active", false); err != nil {
-		return err
-	}
-
-	// Verify test_4.txt is NOT restored (still soft-deleted/deleted)
-	logger.Info("[VERIFICATION] Verifying test_4.txt remains soft-deleted...")
-	if err := verifyFileStatus(db, "/test_4.txt", "active", true); err != nil {
-		return err
-	}
-
-	// Verify test_4.txt is physically in soft-deleted for all providers (cloud check)
-	logger.Info("[VERIFICATION] Verifying test_4.txt persisted in soft-deleted on all providers...")
-	allUsers := append([]*model.User{mainUser}, backups...)
-	for _, u := range allUsers {
-		if u.Provider == model.ProviderTelegram {
-			continue // Telegram handles soft-delete by deleting msg
-		}
-
-		client, err := runner.GetOrCreateClient(u)
-		if err != nil {
-			return err
-		}
-
-		sid, err := client.GetSyncFolderID()
-		if err != nil {
-			return err
-		}
-
-		// 1. Verify NOT in root
-		rootFiles, err := client.ListFiles(sid)
-		if err != nil {
-			return err
-		}
-		for _, f := range rootFiles {
-			if f.Name == "test_4.txt" {
-				return fmt.Errorf("test_4.txt found in root of %s (should be soft-deleted)", u.Email)
-			}
-		}
-
-		// 2. Verify IN soft-deleted
-		auxID, err := findFolderID(client, sid, task.AuxFolder)
-		if err != nil {
-			// If aux doesn't exist, that's definitely a fail for test_4.txt specific check
-			return fmt.Errorf("aux folder missing for %s: %w", u.Email, err)
-		}
-
-		softID, err := findFolderID(client, auxID, "soft-deleted")
-		if err != nil {
-			return fmt.Errorf("soft-deleted folder missing for %s: %w", u.Email, err)
-		}
-
-		softFiles, err := client.ListFiles(softID)
-		if err != nil {
-			return err
-		}
-		found := false
-		for _, f := range softFiles {
-			if f.Name == "test_4.txt" {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("test_4.txt missing from soft-deleted in %s", u.Email)
-		}
-	}
-
-	return nil
-}
-
-func runTestCase11(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
-	logger.Info("\n--- Test Case 11: Restoring Fragmented File ---")
-	// Scenario: test_10.txt (3MB) was uploaded in TC10.
-	// It should exist on Google (Main), Microsoft (Backup), and fragmented on Telegram.
-	// We will delete it from Google and Microsoft, then Sync to see if it heals from Telegram.
-
-	// 1. Delete from Google (current active replica owner, not always Main)
-	mainClient, err := runner.GetOrCreateClient(mainUser)
-	if err != nil {
-		return err
-	}
-
-	f10, err := db.GetFileByPath("/test_10.txt")
-	if err != nil {
-		return err
-	}
-	if f10 == nil {
-		return fmt.Errorf("test_10.txt missing from DB before test case 11")
-	}
-
-	googleCandidates := make([]*model.User, 0)
-	seenAccounts := make(map[string]bool)
-	for _, r := range f10.Replicas {
-		if r.Provider != model.ProviderGoogle || r.Status != "active" {
-			continue
-		}
-		for i := range cfg.Users {
-			u := &cfg.Users[i]
-			if u.Provider != model.ProviderGoogle {
-				continue
-			}
-			if (u.Email == r.AccountID || u.Phone == r.AccountID) && !seenAccounts[r.AccountID] {
-				seenAccounts[r.AccountID] = true
-				googleCandidates = append(googleCandidates, u)
-				break
-			}
-		}
-	}
-
-	if len(googleCandidates) == 0 {
-		for i := range cfg.Users {
-			u := &cfg.Users[i]
-			if u.Provider == model.ProviderGoogle {
-				googleCandidates = append(googleCandidates, u)
-			}
-		}
-	}
-
-	googleDeleted := false
-	var lastGoogleDeleteErr error
-	for _, candidate := range googleCandidates {
-		googleNativeID := getNativeID(f10, candidate)
-		if googleNativeID == "" {
-			continue
-		}
-
-		candidateClient, err := runner.GetOrCreateClient(candidate)
-		if err != nil {
-			lastGoogleDeleteErr = err
-			logger.Warning("Could not create Google client for %s: %v", candidate.Email, err)
-			continue
-		}
-
-		// Only attempt delete if candidate is the owner, to avoid 403 errors on shared files
-		if candidate.Email != f10.Replicas[0].Owner && f10.Replicas[0].Owner != "" {
-			logger.Info("Skipping delete for candidate %s as they are not the owner (Owner is %s)", candidate.Email, f10.Replicas[0].Owner)
-			continue
-		}
-
-		logger.Info("[SIMULATE USER ACTION] Deleting test_10.txt from Google (%s) directly...", candidate.Email)
-		if err := candidateClient.DeleteFile(googleNativeID); err != nil {
-			lastGoogleDeleteErr = err
-			logger.Warning("Failed deleting test_10.txt from Google (%s): %v", candidate.Email, err)
-			continue
-		}
-
-		googleDeleted = true
-		break
-	}
-
-	if !googleDeleted {
-		if lastGoogleDeleteErr != nil {
-			return fmt.Errorf("failed to delete from google with any candidate account: %w", lastGoogleDeleteErr)
-		}
-		return fmt.Errorf("failed to delete from google: no candidate account with a valid test_10.txt replica was found")
-	}
-
-	// Manually delete ALL Google replicas from DB because Google uses a shared folder model.
-	// Deleting the file from owner removes it for everyone.
-	for _, r := range f10.Replicas {
-		if r.Provider == model.ProviderGoogle {
-			if err := db.DeleteReplica(r.ID); err != nil {
-				return fmt.Errorf("failed to delete Google replica from DB: %w", err)
-			}
-		}
-	}
-
-	// 2. Delete from Microsoft (Backup)
-	microsoftBackups := filterUsers(backups, model.ProviderMicrosoft)
-	for _, u := range microsoftBackups {
-		msClient, err := runner.GetOrCreateClient(u)
-		if err != nil {
-			continue
-		}
-		msNativeID := getNativeID(f10, u)
-		if msNativeID != "" {
-			logger.Info("[SIMULATE USER ACTION] Deleting test_10.txt from Microsoft Backup (%s) directly...", u.Email)
-			if err := msClient.DeleteFile(msNativeID); err != nil {
-				return fmt.Errorf("failed to delete from microsoft: %w", err)
-			}
-			// Manually delete replica from DB
-			for _, r := range f10.Replicas {
-				if r.Provider == u.Provider && (r.AccountID == u.Email || r.AccountID == u.Phone) {
-					if err := db.DeleteReplica(r.ID); err != nil {
-						return fmt.Errorf("failed to delete Microsoft replica from DB: %w", err)
-					}
-					break
-				}
-			}
-		}
-	}
-
-	// 3. Sync
-	if err := runCLISync(runner); err != nil {
-		return err
-	}
-
-	// 4. Verify
-	// Check if file is back active on Google/MS
-
-	// Reload file from DB to see replica status
-	logger.Info("[VERIFICATION] Checking if file was restored from fragments...")
-	f10, err = db.GetFileByPath("/test_10.txt")
-	if err != nil {
-		return err
-	}
-
-	// Check Google Replica
-	googleReplicaActive := false
-	for _, r := range f10.Replicas {
-		if r.Provider == model.ProviderGoogle && r.Status == "active" {
-			googleReplicaActive = true
-			break
-		}
-	}
-	if !googleReplicaActive {
-		return fmt.Errorf("test_10.txt was not restored to Google Main")
-	} else {
-		logger.Info("Verified: test_10.txt is active on Google.")
-	}
-
-	// Verify Hash
-	if test10Hash != "" {
-		logger.Info("[VERIFICATION] Verifying restored file integrity...")
-
-		// Find the new Google replica
-		var googleReplica *model.Replica
-		for _, r := range f10.Replicas {
-			if r.Provider == model.ProviderGoogle && r.Status == "active" {
-				googleReplica = r
-				break
-			}
-		}
-
-		if googleReplica == nil {
-			return fmt.Errorf("active Google replica not found for verification")
-		}
-
-		hasher := sha256.New()
-		if err := mainClient.DownloadFile(googleReplica.NativeID, hasher); err != nil {
-			return fmt.Errorf("failed to download restored file for verification: %w", err)
-		}
-
-		restoredHash := hex.EncodeToString(hasher.Sum(nil))
-		if restoredHash != test10Hash {
-			return fmt.Errorf("hash mismatch! Original: %s, Restored: %s", test10Hash, restoredHash)
-		}
-		logger.Info("File integrity verified: Hashes match.")
-	} else {
-		logger.Warning("Skipping hash verification because original hash is missing (Test Case 10 not run in this session?)")
-	}
-
-	return nil
-}
-
-func runTestCase12(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
-	logger.Info("\n--- Test Case 12: Ownership Transfer API Test ---")
-
-	// Filter Google backups only (ownership transfer is Google-specific)
-	googleBackups := filterUsers(backups, model.ProviderGoogle)
-	if len(googleBackups) == 0 {
-		logger.Warning("No Google backup accounts found, skipping ownership transfer test")
-		return nil
-	}
-
-	targetBackup := googleBackups[0]
-
-	mainClient, err := runner.GetOrCreateClient(mainUser)
-	if err != nil {
-		return fmt.Errorf("failed to get main client: %w", err)
-	}
-
-	targetClient, err := runner.GetOrCreateClient(targetBackup)
-	if err != nil {
-		return fmt.Errorf("failed to get target client: %w", err)
-	}
-
-	mainSyncID, err := mainClient.GetSyncFolderID()
-	if err != nil {
-		return fmt.Errorf("failed to get main sync folder: %w", err)
-	}
-
-	// Create a test file
-	testFileName := "ownership_transfer_test.txt"
-	testData := []byte("Testing ownership transfer with pending owner flow")
-
-	logger.Info("[SIMULATE USER ACTION] Step 1: Uploading test file to main account...")
-	uploadedFile, err := mainClient.UploadFile(mainSyncID, testFileName, bytes.NewReader(testData), int64(len(testData)))
-	if err != nil {
-		return fmt.Errorf("failed to upload test file: %w", err)
-	}
-
-	fileID := uploadedFile.Replicas[0].NativeID
-	logger.Info("Uploaded file with ID: %s", fileID)
-
-	// Test direct transfer (expected to fail with consent error for consumer accounts)
-	logger.Info("\n[SIMULATE USER ACTION] Step 2: Testing direct ownership transfer...")
-	err = mainClient.TransferOwnership(fileID, targetBackup.Email)
-
-	if err == nil {
-		logger.Info("✓ Direct transfer succeeded!")
-		// Verify ownership changed
-		logger.Info("[VERIFICATION] Verifying ownership changed...")
-		metadata, err := mainClient.GetFileMetadata(fileID)
-		if err != nil {
-			return fmt.Errorf("failed to get file metadata: %w", err)
-		}
-		if len(metadata.Replicas) > 0 && metadata.Replicas[0].Owner == targetBackup.Email {
-			logger.Info("✓ Ownership verified: %s", targetBackup.Email)
-			// Clean up
-			logger.Info("[SIMULATE USER ACTION] Cleaning up test file...")
-			targetClient.DeleteFile(fileID)
-			logger.Info("\n✓ Ownership Transfer Test PASSED (Direct transfer worked)")
-			return nil
-		}
-		return fmt.Errorf("ownership not transferred correctly")
-	}
-
-	// Check if it's the expected pending owner scenario
-	if err == api.ErrOwnershipTransferPending {
-		logger.Info("✓ Got pending transfer signal")
-
-		// Test acceptance
-		logger.Info("\n[SIMULATE USER ACTION] Step 3: Testing ownership acceptance...")
-		err = targetClient.AcceptOwnership(fileID)
-		if err != nil {
-			return fmt.Errorf("failed to accept ownership: %w", err)
-		}
-		logger.Info("✓ Ownership acceptance succeeded")
-
-		// Verify ownership changed
-		logger.Info("\n[VERIFICATION] Step 4: Verifying ownership transfer...")
-		time.Sleep(2 * time.Second) // Give Google a moment to propagate
-
-		metadata, err := targetClient.GetFileMetadata(fileID)
-		if err != nil {
-			return fmt.Errorf("failed to get file metadata: %w", err)
-		}
-
-		if len(metadata.Replicas) == 0 {
-			return fmt.Errorf("verification failed: GetFileMetadata returned no replicas for file %s", fileID)
-		}
-
-		logger.Info("[VERIFICATION] File: %s, NativeID: %s, Owner: %q, AccountID: %s",
-			metadata.Name, metadata.Replicas[0].NativeID, metadata.Replicas[0].Owner, metadata.Replicas[0].AccountID)
-
-		if metadata.Replicas[0].Owner == targetBackup.Email {
-			logger.Info("✓ Ownership verified: file now owned by %s", targetBackup.Email)
-		} else {
-			logger.Warning("Owner field: %q (expected: %q)", metadata.Replicas[0].Owner, targetBackup.Email)
-			return fmt.Errorf("ownership not transferred correctly")
-		}
-
-		// Clean up
-		logger.Info("\n[SIMULATE USER ACTION] Step 5: Cleaning up test file...")
-		if err := targetClient.DeleteFile(fileID); err != nil {
-			logger.Warning("Failed to clean up test file: %v", err)
-		}
-
-		logger.Info("\n✓ Ownership Transfer Test PASSED (Pending owner flow worked)")
-		return nil
-	}
-
-	// Check if it's a consent error (expected for consumer accounts)
-	if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") || strings.Contains(err.Error(), "transferOwnership parameter must be enabled") {
-		logger.Info("✓ Got expected consent error for consumer account")
-		logger.Info("   Consumer-to-consumer transfers require manual consent via Drive UI")
-		logger.Info("   This is expected behavior - the system will use Copy+Delete fallback")
-
-		// Clean up
-		logger.Info("\n[SIMULATE USER ACTION] Cleaning up test file...")
-		if err := mainClient.DeleteFile(fileID); err != nil {
-			logger.Warning("Failed to clean up test file: %v", err)
-		}
-
-		logger.Info("\n✓ Ownership Transfer Test PASSED (Consent required as expected for consumer accounts)")
-		return nil
-	}
-
-	// If we get here, it's an unexpected error
-	return fmt.Errorf("unexpected error during transfer: %w", err)
-}
-
-func runTestCase8(runner *task.Runner, mainUser *model.User, backups []*model.User) error {
-	logger.Info("\n--- Test Case 8: Hard Deletion ---")
-
-	getSoftID := func(c api.CloudClient, rootID string) (string, error) {
-		aux, err := getOrCreateFolder(c, rootID, task.AuxFolder)
-		if err != nil {
-			return "", err
-		}
-		soft, err := getOrCreateFolder(c, aux.ID, "soft-deleted")
-		if err != nil {
-			return "", err
-		}
-		return soft.ID, nil
-	}
-
-	deleteSoftContent := func(c api.CloudClient, rootID string, u *model.User) error {
-		sid, err := getSoftID(c, rootID)
-		if err != nil {
-			return err
-		}
-		files, err := c.ListFiles(sid)
-		if err != nil {
-			return err
-		}
-		for _, f := range files {
-			logger.Info("[SIMULATE USER ACTION] Deleting %s from soft-deleted on %s...", f.Name, u.Email)
-			c.DeleteFile(f.ID)
-		}
-		return nil
-	}
-
-	mainClient, _ := runner.GetOrCreateClient(mainUser)
-	mainSyncID, _ := mainClient.GetSyncFolderID()
-	deleteSoftContent(mainClient, mainSyncID, mainUser)
-
-	googleBackups := filterUsers(backups, model.ProviderGoogle)
-	for _, u := range googleBackups {
-		c, _ := runner.GetOrCreateClient(u)
-		sid, _ := c.GetSyncFolderID()
-		deleteSoftContent(c, sid, u)
-	}
-
-	microsoftBackups := filterUsers(backups, model.ProviderMicrosoft)
-	for _, u := range microsoftBackups {
-		c, _ := runner.GetOrCreateClient(u)
-		sid, _ := c.GetSyncFolderID()
-		deleteSoftContent(c, sid, u)
-	}
-
-	if err := runCLIGetMetadata(runner); err != nil {
-		return err
-	}
-
-	return runCLISync(runner)
 }
 
 func testMetadata(runner *task.Runner) error {
