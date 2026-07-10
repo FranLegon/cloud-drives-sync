@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
 	"strings"
 	"time"
 
@@ -409,150 +410,33 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("no main account found")
 	}
 
-	shouldRun := func(step string) bool {
-		if testCase == "" {
-			return true
+	selectedCases := specTestCases()
+	if testCase != "" {
+		selected := findSpecTestCase(testCase)
+		if selected == nil {
+			return fmt.Errorf("unknown SPEC test case %q", testCase)
 		}
-		if testCase == step {
-			return true
-		}
-		// Legacy dependency mapping retained temporarily while the SPEC runner is rebuilt.
-		if testCase == "11" && step == "10" {
-			return true
-		}
-		if testCase == "7" {
-			return step == "5" || step == "4" || step == "3" || step == "2"
-		}
-		if testCase == "5" {
-			return step == "4" || step == "3" || step == "2"
-		}
-		if testCase == "4" && step == "2" {
-			return true
-		}
-		return false
+		selectedCases = []specTestCase{*selected}
 	}
 
-	// Dependency execution
-	if shouldRun("1") {
-		t := time.Now()
-		if err := runTestCase1(runner, mainUser); err != nil {
-			return err
+	for _, tc := range selectedCases {
+		logger.Info("\n=== Running SPEC Test Case %s: %s ===", tc.ID, tc.Name)
+		started := time.Now()
+		if err := tc.Run(runner, mainUser, backups); err != nil {
+			return fmt.Errorf("SPEC test case %s (%s) failed: %w", tc.ID, tc.Name, err)
 		}
-		if err := testMetadata(runner); err != nil {
-			return err
+		if tc.LegacyAlias != "9" && tc.LegacyAlias != "12" {
+			if err := testMetadata(runner); err != nil {
+				return fmt.Errorf("metadata verification failed after SPEC test case %s: %w", tc.ID, err)
+			}
 		}
-		testRuntimes[1] = time.Since(t)
-	}
-	if shouldRun("2") {
-		t := time.Now()
-		if err := runTestCase2(runner, backups); err != nil {
-			return err
+		if n, err := strconv.Atoi(tc.ID); err == nil {
+			testRuntimes[n] = time.Since(started)
 		}
-		if err := testMetadata(runner); err != nil {
-			return err
-		}
-		testRuntimes[2] = time.Since(t)
-	}
-	if shouldRun("3") {
-		t := time.Now()
-		if err := runTestCase3(runner, mainUser); err != nil {
-			return err
-		}
-		if err := testMetadata(runner); err != nil {
-			return err
-		}
-		testRuntimes[3] = time.Since(t)
-	}
-	if shouldRun("4") {
-		t := time.Now()
-		if err := runTestCase4(runner, mainUser, backups); err != nil {
-			return err
-		}
-		if err := testMetadata(runner); err != nil {
-			return err
-		}
-		testRuntimes[4] = time.Since(t)
-	}
-
-	if shouldRun("5") {
-		t := time.Now()
-		if err := runTestCase5(runner, mainUser, backups); err != nil {
-			return err
-		}
-		if err := testMetadata(runner); err != nil {
-			return err
-		}
-		testRuntimes[5] = time.Since(t)
-	}
-	if shouldRun("6") {
-		t := time.Now()
-		if err := runTestCase6(runner, mainUser, backups); err != nil {
-			return err
-		}
-		if err := testMetadata(runner); err != nil {
-			return err
-		}
-		testRuntimes[6] = time.Since(t)
-	}
-	if shouldRun("7") {
-		t := time.Now()
-		if err := runTestCase7(runner, mainUser, backups); err != nil {
-			return err
-		}
-		if err := testMetadata(runner); err != nil {
-			return err
-		}
-		testRuntimes[7] = time.Since(t)
-	}
-	if shouldRun("8") {
-		t := time.Now()
-		if err := runTestCase8(runner, mainUser, backups); err != nil {
-			return err
-		}
-		if err := testMetadata(runner); err != nil {
-			return err
-		}
-		testRuntimes[8] = time.Since(t)
-	}
-	if shouldRun("9") {
-		t := time.Now()
-		if err := runTestCase9(runner); err != nil {
-			return err
-		}
-		testRuntimes[9] = time.Since(t)
-	}
-
-	// Run large file tests at the end
-	if shouldRun("10") {
-		t := time.Now()
-		if err := runTestCase10(runner, mainUser); err != nil {
-			return err
-		}
-		if err := testMetadata(runner); err != nil {
-			return err
-		}
-		testRuntimes[10] = time.Since(t)
-	}
-	if shouldRun("11") {
-		t := time.Now()
-		if err := runTestCase11(runner, mainUser, backups); err != nil {
-			return err
-		}
-		if err := testMetadata(runner); err != nil {
-			return err
-		}
-		testRuntimes[11] = time.Since(t)
-	}
-	if shouldRun("12") {
-		t := time.Now()
-		if err := runTestCase12(runner, mainUser, backups); err != nil {
-			return err
-		}
-		testRuntimes[12] = time.Since(t)
 	}
 
 	logger.Info("\nTEST SUITE COMPLETED SUCCESSFULLY")
-	logger.Info("All test cases have passed.")
+	logger.Info("All SPEC test cases have passed.")
 	return nil
 }
 
@@ -995,44 +879,84 @@ func sanitizeTestCaseID(caseID string) string {
 	return caseID
 }
 
-func specTestCaseRegistry() map[string]string {
-	return map[string]string{
-		"1":      "Clean-slate setup",
-		"2":      "Create file on main",
-		"3":      "Create file on Google backup",
-		"4":      "Create folder on main",
-		"5":      "Create folder on Google backup",
-		"6":      "Create file on Microsoft backup",
-		"7":      "Create folder on Microsoft backup",
-		"8":      "Sync file from Telegram",
-		"9":      "Sync file from Microsoft",
-		"10":     "Move Google Drive files from backups roots",
-		"11":     "Google Drive nested folders",
-		"12":     "Microsoft OneDrive nested folders",
-		"13":     "Google Drive moved file",
-		"14":     "Google Drive files created directly in nested folders",
-		"15":     "Google Drive multiple moved files",
-		"16":     "Google Drive soft-delete and restore",
-		"17":     "Google Drive hard-delete",
-		"18":     "Telegram fragmentation and defragmentation restore",
-		"19":     "Idempotent sync",
-		"20":     "Quota check",
-		"21":     "Divergent content at the same logical path",
-		"22":     "Sync resumed after interruption",
-		"23":     "MS Placeholders",
-		"inner1": "Google Drive Transfer Ownership",
-		"inner2": "Microsoft OneDrive Real Shortcut",
+type specTestCase struct {
+	ID          string
+	Name        string
+	LegacyAlias string
+	Run         func(*task.Runner, *model.User, []*model.User) error
+}
+
+func specTestCases() []specTestCase {
+	return []specTestCase{
+		{ID: "1", Name: "Clean-slate setup", LegacyAlias: "1", Run: func(r *task.Runner, main *model.User, backups []*model.User) error { return runTestCase1(r, main) }},
+		{ID: "2", Name: "Create file on main", LegacyAlias: "2", Run: func(r *task.Runner, main *model.User, backups []*model.User) error { return runTestCase2(r, backups) }},
+		{ID: "3", Name: "Create file on Google backup", LegacyAlias: "3", Run: func(r *task.Runner, main *model.User, backups []*model.User) error { return runTestCase3(r, main) }},
+		{ID: "4", Name: "Create folder on main", LegacyAlias: "4", Run: runLegacyCase4},
+		{ID: "5", Name: "Create folder on Google backup", LegacyAlias: "5", Run: func(r *task.Runner, main *model.User, backups []*model.User) error {
+			return runTestCase5(r, main, backups)
+		}},
+		{ID: "6", Name: "Create file on Microsoft backup", LegacyAlias: "6", Run: func(r *task.Runner, main *model.User, backups []*model.User) error {
+			return runTestCase6(r, main, backups)
+		}},
+		{ID: "7", Name: "Create folder on Microsoft backup", LegacyAlias: "7", Run: func(r *task.Runner, main *model.User, backups []*model.User) error {
+			return runTestCase7(r, main, backups)
+		}},
+		{ID: "8", Name: "Sync file from Telegram", LegacyAlias: "8", Run: func(r *task.Runner, main *model.User, backups []*model.User) error {
+			return runTestCase8(r, main, backups)
+		}},
+		{ID: "9", Name: "Sync file from Microsoft", LegacyAlias: "9", Run: func(r *task.Runner, main *model.User, backups []*model.User) error { return runTestCase9(r) }},
+		{ID: "10", Name: "Move Google Drive files from backups roots", LegacyAlias: "10", Run: func(r *task.Runner, main *model.User, backups []*model.User) error { return runTestCase10(r, main) }},
+		{ID: "11", Name: "Google Drive nested folders", LegacyAlias: "11", Run: func(r *task.Runner, main *model.User, backups []*model.User) error {
+			return runTestCase11(r, main, backups)
+		}},
+		{ID: "12", Name: "Microsoft OneDrive nested folders", LegacyAlias: "12", Run: func(r *task.Runner, main *model.User, backups []*model.User) error {
+			return runTestCase12(r, main, backups)
+		}},
+		{ID: "13", Name: "Google Drive moved file", Run: runSpecPlaceholderCase},
+		{ID: "14", Name: "Google Drive files created directly in nested folders", Run: runSpecPlaceholderCase},
+		{ID: "15", Name: "Google Drive multiple moved files", Run: runSpecPlaceholderCase},
+		{ID: "16", Name: "Google Drive soft-delete and restore", Run: runSpecPlaceholderCase},
+		{ID: "17", Name: "Google Drive hard-delete", Run: runSpecPlaceholderCase},
+		{ID: "18", Name: "Telegram fragmentation and defragmentation restore", Run: runSpecPlaceholderCase},
+		{ID: "19", Name: "Idempotent sync", Run: runSpecPlaceholderCase},
+		{ID: "20", Name: "Quota check", Run: runSpecPlaceholderCase},
 	}
+}
+
+func specTestCaseRegistry() map[string]string {
+	registry := make(map[string]string)
+	for _, tc := range specTestCases() {
+		registry[tc.ID] = tc.Name
+	}
+	return registry
+}
+
+func findSpecTestCase(caseID string) *specTestCase {
+	for _, tc := range specTestCases() {
+		if tc.ID == caseID {
+			copy := tc
+			return &copy
+		}
+	}
+	return nil
 }
 
 func validateRequestedTestCase(caseID string) error {
 	if caseID == "" {
 		return nil
 	}
-	if _, ok := specTestCaseRegistry()[caseID]; ok {
+	if findSpecTestCase(caseID) != nil {
 		return nil
 	}
-	return fmt.Errorf("unknown test case %q", caseID)
+	return fmt.Errorf("unknown SPEC test case %q", caseID)
+}
+
+func runLegacyCase4(r *task.Runner, main *model.User, backups []*model.User) error {
+	return runTestCase4(r, main, backups)
+}
+
+func runSpecPlaceholderCase(r *task.Runner, main *model.User, backups []*model.User) error {
+	return fmt.Errorf("SPEC case implementation pending")
 }
 
 var testFileContents = map[string]string{
