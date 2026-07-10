@@ -2474,7 +2474,8 @@ func (r *Runner) ProcessHardDeletedFolder() error {
 }
 
 // getUser helper
-func (r *Runner) getUser(provider model.Provider, accountID string) *model.User {	for i := range r.config.Users {
+func (r *Runner) getUser(provider model.Provider, accountID string) *model.User {
+	for i := range r.config.Users {
 		u := &r.config.Users[i]
 		if u.Provider == provider && u.GetAccountID() == accountID {
 			return u
