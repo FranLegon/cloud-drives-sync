@@ -191,7 +191,7 @@ Note: Database is not self referential to avoid circular conflicts. There is no 
     },
     {
       "provider": "Microsoft",
-      "email": "main.user@company.com",
+      "email": "user@hotmail.com",
       "refresh_token": "..."
     },
     {
