@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"regexp"
-	"strconv"
 	"sync"
 	"time"
 
@@ -43,7 +42,19 @@ func GetSyncFolderName() string {
 	return syncFolderPrefix
 }
 
-var fakeShortcutRegex = regexp.MustCompile(`^(.*)\.sz-(\d+)` + regexp.QuoteMeta(FakeShortcutExtension) + `$`)
+var fakeShortcutRegex = regexp.MustCompile(`^(.*)\.md5-([A-Fa-f0-9]{32})` + regexp.QuoteMeta(FakeShortcutExtension) + `$`)
+
+func parseFakeShortcutName(name string) (originalName string, googleDriveMD5 string, ok bool) {
+	matches := fakeShortcutRegex.FindStringSubmatch(name)
+	if len(matches) != 3 {
+		return "", "", false
+	}
+	return matches[1], matches[2], true
+}
+
+func buildFakeShortcutName(name, googleDriveMD5 string) string {
+	return fmt.Sprintf("%s.md5-%s%s", name, googleDriveMD5, FakeShortcutExtension)
+}
 
 // Client represents a Microsoft OneDrive client
 type Client struct {
@@ -210,13 +221,12 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 		}
 
 		var nativeHash string
+		var googleDriveMD5 string
 
 		// Check for custom placeholder shortcut
-		if matches := fakeShortcutRegex.FindStringSubmatch(itemName); len(matches) == 3 {
-			itemName = matches[1]
-			if parsedSize, err := strconv.ParseInt(matches[2], 10, 64); err == nil {
-				itemSize = parsedSize
-			}
+		if originalName, placeholderMD5, ok := parseFakeShortcutName(itemName); ok {
+			itemName = originalName
+			googleDriveMD5 = placeholderMD5
 			nativeHash = model.NativeHashShortcut
 		} else {
 			// Get hashes for regular files/shortcuts
@@ -236,15 +246,19 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 		}
 
 		calculatedID := model.GenerateCalculatedID(itemName, itemSize)
+		if googleDriveMD5 != "" {
+			calculatedID = googleDriveMD5
+		}
 
 		file := &model.File{
-			ID:           *item.GetId(), // Will be replaced with UUID in database layer
-			Name:         itemName,
-			Size:         itemSize,
-			Path:         "", // Path will be set by caller
-			CalculatedID: calculatedID,
-			ModTime:      modTime,
-			Status:       "active",
+			ID:             *item.GetId(), // Will be replaced with UUID in database layer
+			Name:           itemName,
+			Size:           itemSize,
+			Path:           "", // Path will be set by caller
+			CalculatedID:   calculatedID,
+			GoogleDriveMD5: googleDriveMD5,
+			ModTime:        modTime,
+			Status:         "active",
 		}
 
 		replica := &model.Replica{
@@ -260,6 +274,9 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			ModTime:      modTime,
 			Status:       "active",
 			Fragmented:   false,
+		}
+		if googleDriveMD5 != "" {
+			replica.CalculatedID = googleDriveMD5
 		}
 
 		if isShortcut || nativeHash == model.NativeHashShortcut {
@@ -995,8 +1012,8 @@ func (c *Client) CreateShortcut(parentID, name, targetID, targetDriveID string) 
 }
 
 // CreateFakeShortcut creates a placeholder file to act as a shortcut
-func (c *Client) CreateFakeShortcut(parentID, name string, size int64) (*model.File, error) {
-	placeholderName := fmt.Sprintf("%s.sz-%d%s", name, size, FakeShortcutExtension)
+func (c *Client) CreateFakeShortcut(parentID, name string, size int64, googleDriveMD5 string) (*model.File, error) {
+	placeholderName := buildFakeShortcutName(name, googleDriveMD5)
 
 	// Create an empty file
 	uploadedFile, err := c.UploadFile(parentID, placeholderName, bytes.NewBufferString(""), 0)
@@ -1007,7 +1024,11 @@ func (c *Client) CreateFakeShortcut(parentID, name string, size int64) (*model.F
 	// Convert to "Fake" mode for DB consistency with ListFiles logic
 	uploadedFile.Name = name
 	uploadedFile.Size = size
-	uploadedFile.CalculatedID = model.GenerateCalculatedID(name, size)
+	uploadedFile.GoogleDriveMD5 = googleDriveMD5
+	uploadedFile.CalculatedID = googleDriveMD5
+	if uploadedFile.CalculatedID == "" {
+		uploadedFile.CalculatedID = model.GenerateCalculatedID(name, size)
+	}
 
 	// Make sure Replicas are also updated
 	if len(uploadedFile.Replicas) > 0 {

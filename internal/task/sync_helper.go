@@ -394,7 +394,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 
 		newReplica := &model.Replica{
 			FileID:       masterFile.ID,
-			CalculatedID: masterFile.CalculatedID,
+			CalculatedID: masterFile.GoogleDriveMD5,
 			Path:         masterFile.Path,
 			Name:         uploadedFile.Name,
 			Size:         uploadedFile.Size,
@@ -405,6 +405,9 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 			NativeHash:   uploadedFile.CalculatedID,
 			ModTime:      time.Now(),
 			Fragmented:   false,
+		}
+		if newReplica.CalculatedID == "" {
+			newReplica.CalculatedID = masterFile.CalculatedID
 		}
 
 		if len(uploadedFile.Replicas) > 0 {
@@ -559,7 +562,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 			if targetUser.Provider == model.ProviderMicrosoft && (strings.Contains(err.Error(), "Invalid request") || strings.Contains(err.Error(), "invalidRequest")) {
 				logger.Warning("Shortcut creation failed path=%q native_id=%s (likely unsupported cross-account operation): %v. Falling back to placeholder creation.", sourceFile.Path, sourceReplica.NativeID, err)
 				if msClient, ok := targetClient.(*microsoft.Client); ok {
-					shortcut, err = msClient.CreateFakeShortcut(parentID, sourceFile.Name, sourceFile.Size)
+					shortcut, err = msClient.CreateFakeShortcut(parentID, sourceFile.Name, sourceFile.Size, sourceFile.GoogleDriveMD5)
 					if err != nil {
 						return fmt.Errorf("failed to create fake shortcut: %w", err)
 					}
@@ -580,7 +583,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 
 	newReplica := &model.Replica{
 		FileID:       sourceFile.ID,
-		CalculatedID: sourceFile.CalculatedID,
+		CalculatedID: sourceFile.GoogleDriveMD5,
 		Path:         sourceFile.Path,
 		Name:         shortcut.Name,
 		Size:         shortcut.Size,
@@ -589,6 +592,9 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 		NativeID:     shortcut.ID,
 		ModTime:      time.Now(),
 		Status:       "active",
+	}
+	if newReplica.CalculatedID == "" {
+		newReplica.CalculatedID = sourceFile.CalculatedID
 	}
 
 	if err := r.db.InsertReplica(newReplica); err != nil {

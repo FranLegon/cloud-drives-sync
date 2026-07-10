@@ -2123,21 +2123,58 @@ func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
 	return replicas, nil
 }
 
-// LinkOrphanedReplicas links orphaned replicas to existing files based on calculated_id
+// LinkOrphanedReplicas links orphaned replicas to existing files, preferring canonical Google Drive MD5
+// identity and only falling back to calculated_id when no Google identity has been established yet.
 func (db *DB) LinkOrphanedReplicas() error {
 	return db.WithTx(func(tx *sql.Tx) error {
-		// Update replicas that match an existing file by calculated_id using a single join (CTE)
 		query := `
 		WITH FileMap AS (
-			SELECT calculated_id, MIN(id) as id
+			SELECT id, google_drive_md5, calculated_id
 			FROM files
-			GROUP BY calculated_id
+		),
+		ReplicaMatch AS (
+			SELECT r.id AS replica_id,
+				COALESCE(
+					(
+						SELECT fm.id
+						FROM FileMap fm
+						WHERE fm.google_drive_md5 != ''
+						AND r.provider = 'Google'
+						AND r.native_hash = fm.google_drive_md5
+						LIMIT 1
+					),
+					(
+						SELECT fm.id
+						FROM FileMap fm
+						WHERE fm.google_drive_md5 != ''
+						AND EXISTS (
+							SELECT 1
+							FROM replicas rg
+							WHERE rg.file_id = fm.id
+							AND rg.provider = 'Google'
+							AND rg.status = 'active'
+							AND rg.native_hash = fm.google_drive_md5
+							AND rg.calculated_id = r.calculated_id
+						)
+						LIMIT 1
+					),
+					(
+						SELECT fm.id
+						FROM FileMap fm
+						WHERE (fm.google_drive_md5 IS NULL OR fm.google_drive_md5 = '')
+						AND fm.calculated_id = r.calculated_id
+						LIMIT 1
+					)
+				) AS file_id
+			FROM replicas r
+			WHERE r.file_id IS NULL OR r.file_id = ''
 		)
 		UPDATE replicas
-		SET file_id = fm.id
-		FROM FileMap fm
-		WHERE (replicas.file_id IS NULL OR replicas.file_id = '')
-		AND replicas.calculated_id = fm.calculated_id
+		SET file_id = rm.file_id
+		FROM ReplicaMatch rm
+		WHERE replicas.id = rm.replica_id
+		AND rm.file_id IS NOT NULL
+		AND rm.file_id != ''
 		`
 		stmt, err := db.txStmt(tx, query)
 		if err != nil {
@@ -2152,11 +2189,12 @@ func (db *DB) LinkOrphanedReplicas() error {
 	})
 }
 
-// PromoteOrphanedReplicasToFiles creates new file records for replicas that don't match any existing file
+// PromoteOrphanedReplicasToFiles creates new logical file records for replicas that still do not match any
+// existing file. Established Google identities are grouped by MD5; otherwise calculated_id remains a
+// temporary fallback until a Google replica exists.
 func (db *DB) PromoteOrphanedReplicasToFiles() error {
-	// Find replicas still without file_id
 	query := `
-	SELECT id, calculated_id, path, name, size, mod_time, status
+	SELECT id, calculated_id, path, name, size, mod_time, status, provider, native_hash
 	FROM replicas
 	WHERE file_id IS NULL OR file_id = ''
 	`
@@ -2166,22 +2204,33 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 	}
 	defer rows.Close()
 
-	// Need to collect data first to avoid locking issues if we modify inside loop with same connection
 	type Orphan struct {
-		ReplicaID    int64
-		CalculatedID string
-		Path         string
-		Name         string
-		Size         int64
-		ModTime      int64
-		Status       string
+		ReplicaID      int64
+		CalculatedID   string
+		Path           string
+		Name           string
+		Size           int64
+		ModTime        int64
+		Status         string
+		Provider       string
+		NativeHash     string
+		GoogleDriveMD5 string
+		GroupingKey    string
+		GroupingIsMD5  bool
 	}
 
 	var orphans []Orphan
 	for rows.Next() {
 		var o Orphan
-		if err := rows.Scan(&o.ReplicaID, &o.CalculatedID, &o.Path, &o.Name, &o.Size, &o.ModTime, &o.Status); err != nil {
+		if err := rows.Scan(&o.ReplicaID, &o.CalculatedID, &o.Path, &o.Name, &o.Size, &o.ModTime, &o.Status, &o.Provider, &o.NativeHash); err != nil {
 			return err
+		}
+		if strings.EqualFold(o.Provider, string(model.ProviderGoogle)) && o.NativeHash != "" {
+			o.GoogleDriveMD5 = o.NativeHash
+			o.GroupingKey = "md5:" + o.GoogleDriveMD5
+			o.GroupingIsMD5 = true
+		} else {
+			o.GroupingKey = "calc:" + o.CalculatedID
 		}
 		orphans = append(orphans, o)
 	}
@@ -2191,16 +2240,15 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 		return nil
 	}
 
-	// Group orphans by calculated_id to merge replicas of the same file
 	orphanGroups := make(map[string][]Orphan)
 	for _, o := range orphans {
-		orphanGroups[o.CalculatedID] = append(orphanGroups[o.CalculatedID], o)
+		orphanGroups[o.GroupingKey] = append(orphanGroups[o.GroupingKey], o)
 	}
 
 	return db.WithTx(func(tx *sql.Tx) error {
 		insertFileStmt, err := db.txStmt(tx, `
-			INSERT OR IGNORE INTO files (id, path, name, size, calculated_id, mod_time, status)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+			INSERT OR IGNORE INTO files (id, path, name, size, calculated_id, google_drive_md5, mod_time, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		`)
 		if err != nil {
 			return err
@@ -2216,17 +2264,14 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 		defer updateReplicaStmt.Close()
 
 		for _, group := range orphanGroups {
-			// Use the first orphan's metadata for the new logical file
 			first := group[0]
 			newFileID := uuid.New().String()
-
-			// Insert File
-			_, err := insertFileStmt.Exec(newFileID, first.Path, first.Name, first.Size, first.CalculatedID, first.ModTime, first.Status)
+			googleDriveMD5 := first.GoogleDriveMD5
+			_, err := insertFileStmt.Exec(newFileID, first.Path, first.Name, first.Size, first.CalculatedID, googleDriveMD5, first.ModTime, first.Status)
 			if err != nil {
-				return fmt.Errorf("failed to promote replica group %s: %w", first.CalculatedID, err)
+				return fmt.Errorf("failed to promote replica group %s: %w", first.GroupingKey, err)
 			}
 
-			// Update all replicas in the group
 			for _, o := range group {
 				_, err = updateReplicaStmt.Exec(newFileID, o.ReplicaID)
 				if err != nil {
@@ -2239,47 +2284,62 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 	})
 }
 
-// UpdateLogicalFilesFromReplicas updates file metadata from the latest active replica
-// Improved move detection: prioritize replicas with changed paths and consider calculated_id/hash matching
+// UpdateLogicalFilesFromReplicas refreshes logical file metadata from active replicas while keeping Google
+// Drive authoritative for canonical path/name and Google MD5. Placeholder replicas are ranked last so
+// zero-byte accounting entries cannot overwrite canonical logical metadata when a real replica exists.
 func (db *DB) UpdateLogicalFilesFromReplicas() error {
 	return db.WithTx(func(tx *sql.Tx) error {
-		// SQLite 3.33+ supported UPDATE FROM.
-		// We want to pick the latest active replica for each file.
-		// We prioritize replicas that indicate a change (path difference) if timestamps are equal.
-		// Enhanced to better detect moves by considering calculated_id and hash matches
 		query := `
 		WITH RankedReplicas AS (
-			SELECT r.file_id, r.size, r.mod_time, r.calculated_id, r.name, r.path,
+			SELECT r.file_id,
+				r.size,
+				r.mod_time,
+				r.calculated_id,
+				r.name,
+				r.path,
+				r.native_hash,
+				r.provider,
 				ROW_NUMBER() OVER (
-					PARTITION BY r.file_id 
-					ORDER BY 
-						-- Prioritize replicas where path changed (likely a move)
-						CASE WHEN r.path != f.path THEN 0 ELSE 1 END,
-						-- Then by modification time (most recent first)
+					PARTITION BY r.file_id
+					ORDER BY
+						CASE WHEN LOWER(r.provider) = 'google' AND r.native_hash != ? THEN 0 ELSE 1 END,
+						CASE WHEN r.native_hash = ? THEN 1 ELSE 0 END,
 						r.mod_time DESC,
-						-- Then by calculated_id match (same content)
+						CASE WHEN r.path != f.path THEN 0 ELSE 1 END,
 						CASE WHEN r.calculated_id = f.calculated_id THEN 0 ELSE 1 END
-				) as rn
+				) AS rn
 			FROM replicas r
 			JOIN files f ON f.id = r.file_id
 			WHERE r.status = 'active'
+		),
+		CanonicalReplicas AS (
+			SELECT file_id,
+				size,
+				mod_time,
+				calculated_id,
+				name,
+				path,
+				CASE WHEN LOWER(provider) = 'google' AND native_hash != ? THEN native_hash ELSE NULL END AS google_drive_md5
+			FROM RankedReplicas
+			WHERE rn = 1
 		)
 		UPDATE files
-		SET 
-			size = rr.size,
-			mod_time = rr.mod_time,
-			calculated_id = rr.calculated_id,
-			name = rr.name,
-			path = rr.path
-		FROM RankedReplicas rr
-		WHERE files.id = rr.file_id
-		AND rr.rn = 1
+		SET
+			size = cr.size,
+			mod_time = cr.mod_time,
+			calculated_id = cr.calculated_id,
+			name = cr.name,
+			path = cr.path,
+			google_drive_md5 = COALESCE(cr.google_drive_md5, files.google_drive_md5)
+		FROM CanonicalReplicas cr
+		WHERE files.id = cr.file_id
 		AND (
-			files.size IS NOT rr.size OR
-			files.mod_time IS NOT rr.mod_time OR
-			files.calculated_id IS NOT rr.calculated_id OR
-			files.name IS NOT rr.name OR
-			files.path IS NOT rr.path
+			files.size IS NOT cr.size OR
+			files.mod_time IS NOT cr.mod_time OR
+			files.calculated_id IS NOT cr.calculated_id OR
+			files.name IS NOT cr.name OR
+			files.path IS NOT cr.path OR
+			(COALESCE(cr.google_drive_md5, files.google_drive_md5) IS NOT files.google_drive_md5)
 		)
 		`
 		stmt, err := db.txStmt(tx, query)
@@ -2287,7 +2347,7 @@ func (db *DB) UpdateLogicalFilesFromReplicas() error {
 			return fmt.Errorf("failed to prepare statement: %w", err)
 		}
 		defer stmt.Close()
-		_, err = stmt.Exec()
+		_, err = stmt.Exec(model.NativeHashShortcut, model.NativeHashShortcut, model.NativeHashShortcut)
 		if err != nil {
 			return fmt.Errorf("failed to update logical files from replicas: %w", err)
 		}
