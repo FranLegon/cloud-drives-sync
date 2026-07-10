@@ -161,7 +161,16 @@ func (db *DB) queryRow(query string, args ...interface{}) *sql.Row {
 // Reset clears all data from the database
 func (db *DB) Reset() error {
 	return db.WithTx(func(tx *sql.Tx) error {
-		tables := []string{"replica_fragments", "replicas", "files", "folders"}
+		tables := []string{
+			"replica_fragments",
+			"replicas",
+			"files",
+			"folders",
+			"folder_replicas",
+			"logical_folders",
+			"sync_copy_log",
+			"sync_runs",
+		}
 		for _, table := range tables {
 			stmt, err := db.txStmt(tx, fmt.Sprintf("DELETE FROM %s", table))
 			if err != nil {

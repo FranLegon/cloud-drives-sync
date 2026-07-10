@@ -26,7 +26,6 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
 	"github.com/FranLegon/cloud-drives-sync/internal/task"
 	"github.com/FranLegon/cloud-drives-sync/internal/telegram"
-	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
 )
 
@@ -56,6 +55,10 @@ func init() {
 }
 
 func runTest(cmd *cobra.Command, args []string) (retErr error) {
+	if err := validateRequestedTestCase(testCase); err != nil {
+		return err
+	}
+
 	// Setup Logging to file
 	logFile, err := os.OpenFile("test.log", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
 	if err != nil {
@@ -68,9 +71,13 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	// Archive test log with timestamp (runs at end regardless of success/failure)
 	defer func() {
 		logFile.Close() // Ensure all writes are flushed
-		timestamp := time.Now().Format("2006-Jan-02_15-04-05")
+		timestamp := time.Now().Format("20060102-150405")
 		logsDir := "logs"
-		archivedLogPath := filepath.Join(logsDir, fmt.Sprintf("test_%s.log", timestamp))
+		logName := fmt.Sprintf("test-%s.log", timestamp)
+		if testCase != "" {
+			logName = fmt.Sprintf("test-%s-case-%s.log", timestamp, sanitizeTestCaseID(testCase))
+		}
+		archivedLogPath := filepath.Join(logsDir, logName)
 
 		if err := os.MkdirAll(logsDir, 0755); err != nil {
 			logger.Warning("Failed to create logs directory: %v", err)
@@ -363,7 +370,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 	runner = task.NewRunner(cfg, db, false)
-	runner.SetStopOnError(testStopOnError)
+	runner.SetStopOnError(true)
 
 	logger.Info("[TEST] Ensure sync folders exist")
 	// Ensure folders exist
@@ -402,42 +409,31 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		return fmt.Errorf("no main account found")
 	}
 
-	shouldRun := func(step int) bool {
-		if testCase == 0 {
+	shouldRun := func(step string) bool {
+		if testCase == "" {
 			return true
 		}
 		if testCase == step {
 			return true
 		}
-		// Dependencies
-		// 11 (Restore Fragmented) -> 10 (Very Big File)
-		if testCase == 11 && step == 10 {
+		// Legacy dependency mapping retained temporarily while the SPEC runner is rebuilt.
+		if testCase == "11" && step == "10" {
 			return true
 		}
-		// 7 (Restore Soft) -> 5
-		// 5 -> 4 -> 2
-		//   -> 3
-		if testCase == 7 {
-			if step == 5 || step == 4 || step == 3 || step == 2 {
-				return true
-			}
+		if testCase == "7" {
+			return step == "5" || step == "4" || step == "3" || step == "2"
 		}
-		// 5 -> 4 -> 2
-		//   -> 3
-		if testCase == 5 {
-			if step == 4 || step == 3 || step == 2 {
-				return true
-			}
+		if testCase == "5" {
+			return step == "4" || step == "3" || step == "2"
 		}
-		// 4 -> 2
-		if testCase == 4 && step == 2 {
+		if testCase == "4" && step == "2" {
 			return true
 		}
 		return false
 	}
 
 	// Dependency execution
-	if shouldRun(1) {
+	if shouldRun("1") {
 		t := time.Now()
 		if err := runTestCase1(runner, mainUser); err != nil {
 			return err
@@ -447,7 +443,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		testRuntimes[1] = time.Since(t)
 	}
-	if shouldRun(2) {
+	if shouldRun("2") {
 		t := time.Now()
 		if err := runTestCase2(runner, backups); err != nil {
 			return err
@@ -457,7 +453,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		testRuntimes[2] = time.Since(t)
 	}
-	if shouldRun(3) {
+	if shouldRun("3") {
 		t := time.Now()
 		if err := runTestCase3(runner, mainUser); err != nil {
 			return err
@@ -467,7 +463,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		testRuntimes[3] = time.Since(t)
 	}
-	if shouldRun(4) {
+	if shouldRun("4") {
 		t := time.Now()
 		if err := runTestCase4(runner, mainUser, backups); err != nil {
 			return err
@@ -478,7 +474,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		testRuntimes[4] = time.Since(t)
 	}
 
-	if shouldRun(5) {
+	if shouldRun("5") {
 		t := time.Now()
 		if err := runTestCase5(runner, mainUser, backups); err != nil {
 			return err
@@ -488,7 +484,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		testRuntimes[5] = time.Since(t)
 	}
-	if shouldRun(6) {
+	if shouldRun("6") {
 		t := time.Now()
 		if err := runTestCase6(runner, mainUser, backups); err != nil {
 			return err
@@ -498,7 +494,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		testRuntimes[6] = time.Since(t)
 	}
-	if shouldRun(7) {
+	if shouldRun("7") {
 		t := time.Now()
 		if err := runTestCase7(runner, mainUser, backups); err != nil {
 			return err
@@ -508,7 +504,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		testRuntimes[7] = time.Since(t)
 	}
-	if shouldRun(8) {
+	if shouldRun("8") {
 		t := time.Now()
 		if err := runTestCase8(runner, mainUser, backups); err != nil {
 			return err
@@ -518,7 +514,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		testRuntimes[8] = time.Since(t)
 	}
-	if shouldRun(9) {
+	if shouldRun("9") {
 		t := time.Now()
 		if err := runTestCase9(runner); err != nil {
 			return err
@@ -527,7 +523,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	// Run large file tests at the end
-	if shouldRun(10) {
+	if shouldRun("10") {
 		t := time.Now()
 		if err := runTestCase10(runner, mainUser); err != nil {
 			return err
@@ -537,7 +533,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		testRuntimes[10] = time.Since(t)
 	}
-	if shouldRun(11) {
+	if shouldRun("11") {
 		t := time.Now()
 		if err := runTestCase11(runner, mainUser, backups); err != nil {
 			return err
@@ -547,7 +543,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		}
 		testRuntimes[11] = time.Since(t)
 	}
-	if shouldRun(12) {
+	if shouldRun("12") {
 		t := time.Now()
 		if err := runTestCase12(runner, mainUser, backups); err != nil {
 			return err
@@ -628,23 +624,11 @@ func runGit(args ...string) (string, error) {
 }
 
 func runSetup(r *task.Runner) error {
-	// Phase 0: Cleanup (Unsafe Mode)
-	if !testSafe {
-		if !testForce {
-			prompt := promptui.Prompt{
-				Label: "Warning: This will delete ALL data in cloud sync folders and local metadata. Type 'yes' to continue",
-				Validate: func(input string) error {
-					if input != "yes" {
-						return fmt.Errorf("type 'yes' to continue")
-					}
-					return nil
-				},
-			}
-			if _, err := prompt.Run(); err != nil {
-				return fmt.Errorf("aborted")
-			}
-		}
-
+	// Phase 0: Cleanup policy (SPEC)
+	if testBackup {
+		logger.Warning("SPEC backup mode selected, but root rename backup flow is not implemented yet; using cleanup fallback for now")
+	}
+	if testUnsafe || testBackup {
 		logger.Info("Deleting cloud files...")
 		if err := cleanupCloudFiles(r); err != nil {
 			return err
@@ -1001,6 +985,54 @@ func getUserForReplica(db *database.DB, path string, provider model.Provider, us
 		return fallbackUser, nil
 	}
 	return nil, fmt.Errorf("no replica found for provider %s", provider)
+}
+
+func sanitizeTestCaseID(caseID string) string {
+	caseID = strings.TrimSpace(caseID)
+	caseID = strings.ReplaceAll(caseID, " ", "-")
+	caseID = strings.ReplaceAll(caseID, "/", "-")
+	caseID = strings.ReplaceAll(caseID, "\\", "-")
+	return caseID
+}
+
+func specTestCaseRegistry() map[string]string {
+	return map[string]string{
+		"1":      "Clean-slate setup",
+		"2":      "Create file on main",
+		"3":      "Create file on Google backup",
+		"4":      "Create folder on main",
+		"5":      "Create folder on Google backup",
+		"6":      "Create file on Microsoft backup",
+		"7":      "Create folder on Microsoft backup",
+		"8":      "Sync file from Telegram",
+		"9":      "Sync file from Microsoft",
+		"10":     "Move Google Drive files from backups roots",
+		"11":     "Google Drive nested folders",
+		"12":     "Microsoft OneDrive nested folders",
+		"13":     "Google Drive moved file",
+		"14":     "Google Drive files created directly in nested folders",
+		"15":     "Google Drive multiple moved files",
+		"16":     "Google Drive soft-delete and restore",
+		"17":     "Google Drive hard-delete",
+		"18":     "Telegram fragmentation and defragmentation restore",
+		"19":     "Idempotent sync",
+		"20":     "Quota check",
+		"21":     "Divergent content at the same logical path",
+		"22":     "Sync resumed after interruption",
+		"23":     "MS Placeholders",
+		"inner1": "Google Drive Transfer Ownership",
+		"inner2": "Microsoft OneDrive Real Shortcut",
+	}
+}
+
+func validateRequestedTestCase(caseID string) error {
+	if caseID == "" {
+		return nil
+	}
+	if _, ok := specTestCaseRegistry()[caseID]; ok {
+		return nil
+	}
+	return fmt.Errorf("unknown test case %q", caseID)
 }
 
 var testFileContents = map[string]string{
