@@ -436,7 +436,6 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	return nil
 }
 
-
 func specCaseInner1(r *task.Runner, main *model.User, backups []*model.User) error {
 	return legacyOwnershipTransferTest(r, main, backups)
 }
