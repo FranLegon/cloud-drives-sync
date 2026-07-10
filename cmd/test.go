@@ -499,6 +499,20 @@ func verifyFileOnAllProviders(r *task.Runner, mainUser *model.User, backups []*m
 			}
 			return fmt.Errorf("no nativeID for %s on %s", path, u.Email)
 		}
+		// Fragmented Telegram replicas cannot be downloaded as a whole via DownloadFile.
+		// Content was already verified by the sync restoring it to Google/Microsoft.
+		if u.Provider == model.ProviderTelegram {
+			fragmented := false
+			for _, rep := range f.Replicas {
+				if rep.Provider == model.ProviderTelegram && rep.Status == "active" && rep.Fragmented {
+					fragmented = true
+					break
+				}
+			}
+			if fragmented {
+				continue
+			}
+		}
 		var buf bytes.Buffer
 		if err := client.DownloadFile(nid, &buf); err != nil {
 			return fmt.Errorf("download from %s (%s) failed: %w", u.Email, u.Provider, err)
