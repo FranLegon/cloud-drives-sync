@@ -58,6 +58,9 @@ func performOAuthFlow(provider string, c *model.Config) (*oauth2.Token, string, 
 
 	logger.Info("Please visit the following URL to authorize:")
 	fmt.Println(authURL)
+	if err := auth.OpenBrowser(authURL); err != nil {
+		logger.Info("Could not open browser automatically. Please copy the URL above.")
+	}
 
 	code, err := server.WaitForCode(state, 120*time.Second)
 	if err != nil {

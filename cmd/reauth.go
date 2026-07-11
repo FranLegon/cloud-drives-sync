@@ -118,6 +118,9 @@ func reauthOAuth(user *model.User, oauthConfig *oauth2.Config, getEmail func(con
 
 	logger.Info("Please visit the following URL to authorize %s:", user.GetAccountID())
 	fmt.Println(authURL)
+	if err := auth.OpenBrowser(authURL); err != nil {
+		logger.Info("Could not open browser automatically. Please copy the URL above.")
+	}
 
 	code, err := server.WaitForCode(state, 120*time.Second)
 	if err != nil {

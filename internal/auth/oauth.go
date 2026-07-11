@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os/exec"
+	"runtime"
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
@@ -200,4 +202,20 @@ func GenerateStateToken() string {
 		panic("failed to generate random state token: " + err.Error())
 	}
 	return hex.EncodeToString(b)
+}
+
+// OpenBrowser attempts to open the given URL in the default browser.
+// It returns an error if it cannot launch the browser, but callers should
+// treat this as non-fatal and fall back to printing the URL manually.
+func OpenBrowser(url string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	case "darwin":
+		cmd = exec.Command("open", url)
+	default: // linux and others
+		cmd = exec.Command("xdg-open", url)
+	}
+	return cmd.Start()
 }
