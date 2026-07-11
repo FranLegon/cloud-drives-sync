@@ -10,7 +10,7 @@ try:
     import sqlcipher3 as sqlcipher
 except ImportError:  # pragma: no cover - fallback for pysqlcipher3
     try:
-        from pysqlcipher3 import dbapi2 as sqlcipher
+        from pysqlcipher3 import dbapi2 as sqlcipher # pyright: ignore[reportMissingImports]
     except ImportError:
         print(
             "Missing dependency: install a SQLCipher driver, e.g. `pip install pysqlcipher3` "

@@ -200,6 +200,23 @@ func (db *DB) GetMetadataHash() (string, error) {
 // GetContentChecksum computes a stable checksum of non-system table contents.
 // It ignores SQLite internal tables and transient bookkeeping columns like last_seen_at.
 func (db *DB) GetContentChecksum() (string, error) {
+	checksumInput, err := db.buildContentChecksumInput()
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(checksumInput))
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (db *DB) DumpContentChecksumInput(outputPath string) error {
+	checksumInput, err := db.buildContentChecksumInput()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(outputPath, []byte(checksumInput), 0644)
+}
+
+func (db *DB) buildContentChecksumInput() (string, error) {
 	tables := []string{
 		"files",
 		"replicas",
@@ -209,7 +226,7 @@ func (db *DB) GetContentChecksum() (string, error) {
 		"folder_replicas",
 	}
 
-	hasher := sha256.New()
+	var builder strings.Builder
 	for _, table := range tables {
 		columns, err := db.getComparableColumns(table)
 		if err != nil {
@@ -245,15 +262,15 @@ func (db *DB) GetContentChecksum() (string, error) {
 		rows.Close()
 
 		sort.Strings(serializedRows)
-		fmt.Fprintf(hasher, "table:%s\n", table)
-		fmt.Fprintf(hasher, "columns:%s\n", strings.Join(columns, ","))
+		fmt.Fprintf(&builder, "table:%s\n", table)
+		fmt.Fprintf(&builder, "columns:%s\n", strings.Join(columns, ","))
 		for _, row := range serializedRows {
-			fmt.Fprintf(hasher, "row:%s\n", row)
+			fmt.Fprintf(&builder, "row:%s\n", row)
 		}
-		fmt.Fprintln(hasher, "--")
+		fmt.Fprintln(&builder, "--")
 	}
 
-	return hex.EncodeToString(hasher.Sum(nil)), nil
+	return builder.String(), nil
 }
 
 func (db *DB) getComparableColumns(table string) ([]string, error) {
