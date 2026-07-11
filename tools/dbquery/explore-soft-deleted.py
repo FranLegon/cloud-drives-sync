@@ -1,37 +1,11 @@
 #!/usr/bin/env python3
-"""Query the encrypted SQLCipher metadata database and print a status report.
+"""Query the encrypted SQLCipher metadata database and print a status report."""
 
-Requires the master password in the CLOUD_DRIVES_SYNC_PASS environment variable
-and the `sqlcipher3` package (pip install sqlcipher3-binary).
-"""
-
-import os
-import sys
-
-try:
-    import sqlcipher3 as sqlcipher
-except ImportError:  # pragma: no cover - fallback for pysqlcipher3
-    try:
-        from pysqlcipher3 import dbapi2 as sqlcipher
-    except ImportError:
-        print("Missing dependency: install with `pip install sqlcipher3-binary`")
-        sys.exit(1)
-
-DB_FILE = "cloud-drives-sync-metadata.db"
+from common import connect_db
 
 
 def main():
-    pass_ = os.environ.get("CLOUD_DRIVES_SYNC_PASS")
-    if not pass_:
-        print("CLOUD_DRIVES_SYNC_PASS not set")
-        sys.exit(1)
-
-    conn = sqlcipher.connect(DB_FILE)
-    # Escape single quotes for the PRAGMA key literal.
-    conn.execute("PRAGMA key = '%s'" % pass_.replace("'", "''"))
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    conn.execute("PRAGMA busy_timeout = 5000")
+    conn = connect_db()
 
     try:
         print("=== FILES (logical) ===")
