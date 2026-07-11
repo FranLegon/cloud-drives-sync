@@ -629,8 +629,12 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 		}
 
 		if !resolved {
-			if targetUser.Provider == model.ProviderMicrosoft && (strings.Contains(err.Error(), "Invalid request") || strings.Contains(err.Error(), "invalidRequest")) {
-				logger.Warning("Shortcut creation failed path=%q native_id=%s (likely unsupported cross-account operation): %v. Falling back to placeholder creation.", sourceFile.Path, sourceReplica.NativeID, err)
+			if targetUser.Provider == model.ProviderMicrosoft {
+				if strings.Contains(err.Error(), "Invalid request") || strings.Contains(err.Error(), "invalidRequest") {
+					logger.Warning("Shortcut creation failed path=%q native_id=%s (likely unsupported cross-account operation): %v. Falling back to placeholder creation.", sourceFile.Path, sourceReplica.NativeID, err)
+				} else {
+					logger.Warning("Shortcut creation failed path=%q account=%s: %v. Falling back to placeholder creation.", sourceFile.Path, targetUser.Email, err)
+				}
 				if msClient, ok := targetClient.(*microsoft.Client); ok {
 					shortcut, err = msClient.CreateFakeShortcut(parentID, sourceFile.Name, sourceFile.Size, sourceFile.GoogleDriveMD5)
 					if err != nil {
