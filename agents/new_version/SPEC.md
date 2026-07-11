@@ -336,6 +336,7 @@ Unless a test explicitly overrides these expectations, apply the following valid
 - **Google Drive folder placement:** On Google Drive, the folder is owned by main and shared to all backup accounts.
 - **Microsoft OneDrive folder placement:** On Microsoft OneDrive, each backup account owns its own copy of the folder.
 - **Folder database validation:** In `cloud-drives-sync-metadata.db`, the logical_folder row exists and the folder_replica rows exist for every relevant provider.
+- **No duplicate sibling names validation:** At any given location, there are no duplicate names: no two files with the same name in the same folder and no two folders with the same name in the same parent folder. Validate this on Google Drive and Telegram only, because Microsoft OneDrive already enforces name uniqueness.
 
 #### Test cases
 
