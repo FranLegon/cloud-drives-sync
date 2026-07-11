@@ -11,6 +11,7 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/FranLegon/cloud-drives-sync/internal/microsoft"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
+	"github.com/google/uuid"
 )
 
 // getDestinationClient returns the best client for a provider to upload a file
@@ -435,10 +436,38 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 			calculatedID = masterFile.GoogleDriveMD5
 		}
 
+		// For conflict copies (targetName != masterFile.Name), create a new logical file so
+		// the conflict version is tracked independently and can be synced to all providers.
+		fileID := masterFile.ID
+		conflictPath := masterFile.Path
+		if finalName != masterFile.Name {
+			// This is a conflict-renamed copy. Give it its own logical file record so
+			// subsequent syncs treat it as a separate file that needs to be distributed.
+			dir := filepath.Dir(masterFile.Path)
+			if dir == "." {
+				dir = ""
+			}
+			conflictPath = model.NormalizePath(dir + "/" + finalName)
+			conflictFile := &model.File{
+				ID:           uuid.New().String(),
+				Path:         conflictPath,
+				Name:         finalName,
+				Size:         uploadedFile.Size,
+				CalculatedID: calculatedID,
+				ModTime:      modTime,
+				Status:       "active",
+			}
+			if dbErr := r.db.InsertFile(conflictFile); dbErr != nil {
+				logger.Warning("Failed to create logical file for conflict copy %s: %v", finalName, dbErr)
+			} else {
+				fileID = conflictFile.ID
+			}
+		}
+
 		newReplica := &model.Replica{
-			FileID:       masterFile.ID,
+			FileID:       fileID,
 			CalculatedID: calculatedID,
-			Path:         masterFile.Path,
+			Path:         conflictPath,
 			Name:         uploadedFile.Name,
 			Size:         uploadedFile.Size,
 			Status:       "active",
