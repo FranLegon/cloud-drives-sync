@@ -499,6 +499,19 @@ func verifyFileOnAllProviders(r *task.Runner, mainUser *model.User, backups []*m
 			}
 			return fmt.Errorf("no nativeID for %s on %s", path, u.Email)
 		}
+		// Microsoft placeholders are zero-byte files — skip content check.
+		if u.Provider == model.ProviderMicrosoft {
+			isPlaceholder := false
+			for _, rep := range f.Replicas {
+				if rep.Provider == model.ProviderMicrosoft && rep.AccountID == u.Email && rep.Status == "active" && rep.NativeHash == model.NativeHashShortcut {
+					isPlaceholder = true
+					break
+				}
+			}
+			if isPlaceholder {
+				continue
+			}
+		}
 		// Fragmented Telegram replicas cannot be downloaded as a whole via DownloadFile.
 		// Content was already verified by the sync restoring it to Google/Microsoft.
 		if u.Provider == model.ProviderTelegram {

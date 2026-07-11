@@ -670,6 +670,11 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 	if newReplica.CalculatedID == "" {
 		newReplica.CalculatedID = sourceFile.CalculatedID
 	}
+	// Copy NativeHash from the shortcut/placeholder replica so the DB reflects
+	// whether this is a real shortcut (NativeHashShortcut) or a real copy.
+	if len(shortcut.Replicas) > 0 {
+		newReplica.NativeHash = shortcut.Replicas[0].NativeHash
+	}
 
 	if err := r.db.InsertReplica(newReplica); err != nil {
 		logger.Error("DB insert shortcut replica failed path=%q provider=%s account=%s: %v", sourceFile.Path, targetUser.Provider, accountID, err)
