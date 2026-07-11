@@ -13,6 +13,9 @@ test.log
 logs/**
 !logs/tests_by_commit_summary.csv
 
+# Test files
+tmp/**
+
 # Output of the go coverage tool
 *.out
 
@@ -32,6 +35,9 @@ config.salt
 cloud-drives-sync-metadata.db
 cloud-drives-sync-metadata.db-shm
 cloud-drives-sync-metadata.db-wal
+*.db
+*.db-shm
+*.db-wal
 
 # Temporary files
 install_deps.sh
