@@ -338,7 +338,9 @@ func (db *DB) Initialize() error {
 		INSERT INTO _db_version (version) SELECT 0 WHERE NOT EXISTS (SELECT 1 FROM _db_version);
 
 		CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN UPDATE _db_version SET version = version + 1; END;
-		CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files
+		WHEN OLD.path IS NOT NEW.path OR OLD.name IS NOT NEW.name OR OLD.size IS NOT NEW.size OR OLD.calculated_id IS NOT NEW.calculated_id OR OLD.google_drive_md5 IS NOT NEW.google_drive_md5 OR OLD.mod_time IS NOT NEW.mod_time OR OLD.status IS NOT NEW.status
+		BEGIN UPDATE _db_version SET version = version + 1; END;
 		CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN UPDATE _db_version SET version = version + 1; END;
 
 		CREATE TRIGGER IF NOT EXISTS replicas_ai AFTER INSERT ON replicas BEGIN UPDATE _db_version SET version = version + 1; END;
@@ -348,7 +350,9 @@ func (db *DB) Initialize() error {
 		CREATE TRIGGER IF NOT EXISTS replicas_ad AFTER DELETE ON replicas BEGIN UPDATE _db_version SET version = version + 1; END;
 
 		CREATE TRIGGER IF NOT EXISTS folders_ai AFTER INSERT ON folders BEGIN UPDATE _db_version SET version = version + 1; END;
-		CREATE TRIGGER IF NOT EXISTS folders_au AFTER UPDATE ON folders BEGIN UPDATE _db_version SET version = version + 1; END;
+		CREATE TRIGGER IF NOT EXISTS folders_au AFTER UPDATE ON folders
+		WHEN OLD.name IS NOT NEW.name OR OLD.path IS NOT NEW.path OR OLD.provider IS NOT NEW.provider OR OLD.parent_folder_id IS NOT NEW.parent_folder_id OR OLD.owner_email IS NOT NEW.owner_email
+		BEGIN UPDATE _db_version SET version = version + 1; END;
 		CREATE TRIGGER IF NOT EXISTS folders_ad AFTER DELETE ON folders BEGIN UPDATE _db_version SET version = version + 1; END;
 
 		CREATE TRIGGER IF NOT EXISTS logical_folders_ai AFTER INSERT ON logical_folders BEGIN UPDATE _db_version SET version = version + 1; END;
@@ -371,6 +375,18 @@ func (db *DB) Initialize() error {
 		// Migrations
 		_, _ = tx.Exec("ALTER TABLE replicas ADD COLUMN last_seen_at INTEGER DEFAULT 0")
 		_, _ = tx.Exec("ALTER TABLE replicas ADD COLUMN owner TEXT DEFAULT ''")
+
+		// Rebuild folders_au trigger to add WHEN clause (idempotent: drop then create)
+		_, _ = tx.Exec("DROP TRIGGER IF EXISTS folders_au")
+		_, _ = tx.Exec(`CREATE TRIGGER IF NOT EXISTS folders_au AFTER UPDATE ON folders
+		WHEN OLD.name IS NOT NEW.name OR OLD.path IS NOT NEW.path OR OLD.provider IS NOT NEW.provider OR OLD.parent_folder_id IS NOT NEW.parent_folder_id OR OLD.owner_email IS NOT NEW.owner_email
+		BEGIN UPDATE _db_version SET version = version + 1; END`)
+
+		// Rebuild files_au trigger to add WHEN clause (idempotent: drop then create)
+		_, _ = tx.Exec("DROP TRIGGER IF EXISTS files_au")
+		_, _ = tx.Exec(`CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files
+		WHEN OLD.path IS NOT NEW.path OR OLD.name IS NOT NEW.name OR OLD.size IS NOT NEW.size OR OLD.calculated_id IS NOT NEW.calculated_id OR OLD.google_drive_md5 IS NOT NEW.google_drive_md5 OR OLD.mod_time IS NOT NEW.mod_time OR OLD.status IS NOT NEW.status
+		BEGIN UPDATE _db_version SET version = version + 1; END`)
 
 		return nil
 	})

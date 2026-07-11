@@ -474,7 +474,11 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 			// Update Replica struct with current message context
 			meta.Replica.NativeID = msgID
-			meta.Replica.ModTime = modTime
+			// Use caption-stored ModTime if available (keeps it stable across scans).
+			// Fall back to msg.Date for older messages that have no ModTime in caption.
+			if meta.Replica.ModTime.IsZero() {
+				meta.Replica.ModTime = modTime
+			}
 			meta.Replica.Provider = model.ProviderTelegram
 			meta.Replica.AccountID = c.user.Phone
 			meta.Replica.Owner = c.user.Phone
@@ -493,7 +497,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 					Path:         fullPath,
 					Size:         meta.Replica.Size,
 					CalculatedID: meta.Replica.CalculatedID,
-					ModTime:      modTime,
+					ModTime:      meta.Replica.ModTime,
 					Status:       meta.Replica.Status,
 				}
 
@@ -515,7 +519,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 						Path:         fullPath,
 						Size:         meta.Replica.Size, // Total size
 						CalculatedID: meta.Replica.CalculatedID,
-						ModTime:      modTime,
+						ModTime:      meta.Replica.ModTime,
 						Status:       meta.Replica.Status,
 					}
 					replicaFragmentMap[fullPath] = []*model.ReplicaFragment{}

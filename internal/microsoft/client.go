@@ -241,6 +241,8 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				hashes := fileFacet.GetHashes()
 				if hashes.GetSha1Hash() != nil {
 					nativeHash = *hashes.GetSha1Hash()
+				} else if hashes.GetQuickXorHash() != nil {
+					nativeHash = *hashes.GetQuickXorHash()
 				}
 			}
 		}
@@ -375,6 +377,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	uploadUrl := *uploadSession.GetUploadUrl()
 	chunkSize := int64(10 * 1024 * 1024) // 10MB
 	var offset int64 = 0
+	var finalHash string
 
 	for offset < size {
 		remaining := size - offset
@@ -409,12 +412,32 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		// Capture final response for ID update on completion
 		if resp.StatusCode == 201 || resp.StatusCode == 200 {
 			body, _ := io.ReadAll(resp.Body)
-			// Create a temporary struct to decode just the ID
+			// Decode the full DriveItem from the upload completion response
 			var item struct {
-				Id string `json:"id"`
+				Id                   string `json:"id"`
+				LastModifiedDateTime string `json:"lastModifiedDateTime"`
+				File                 *struct {
+					Hashes *struct {
+						QuickXorHash string `json:"quickXorHash"`
+						Sha1Hash     string `json:"sha1Hash"`
+					} `json:"hashes"`
+				} `json:"file"`
 			}
 			if jsonErr := json.Unmarshal(body, &item); jsonErr == nil && item.Id != "" {
 				createdItem.SetId(&item.Id)
+				if item.LastModifiedDateTime != "" {
+					if t, parseErr := time.Parse(time.RFC3339, item.LastModifiedDateTime); parseErr == nil {
+						createdItem.SetLastModifiedDateTime(&t)
+					}
+				}
+				if item.File != nil && item.File.Hashes != nil {
+					if item.File.Hashes.Sha1Hash != "" {
+						finalHash = item.File.Hashes.Sha1Hash
+					} else if item.File.Hashes.QuickXorHash != "" {
+						// Store hash for use below
+						finalHash = item.File.Hashes.QuickXorHash
+					}
+				}
 			}
 		} else {
 			// Discard the body to allow HTTP keep-alive connection reuse
@@ -454,7 +477,7 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		Provider:     model.ProviderMicrosoft,
 		AccountID:    c.user.Email,
 		NativeID:     *finalItem.GetId(),
-		NativeHash:   "", // Will be populated when we get the file metadata
+		NativeHash:   finalHash,
 		ModTime:      modTime,
 		Status:       "active",
 		Fragmented:   false,

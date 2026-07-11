@@ -410,9 +410,34 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 			nativeID = uploadedFile.Replicas[0].NativeID
 		}
 
+		// Determine ModTime: prefer the server-recorded time from the upload result
+		// over time.Now() to avoid a 1-second drift causing spurious replica updates.
+		modTime := time.Now()
+		if len(uploadedFile.Replicas) > 0 && !uploadedFile.Replicas[0].ModTime.IsZero() {
+			modTime = uploadedFile.Replicas[0].ModTime
+		} else if !uploadedFile.ModTime.IsZero() {
+			modTime = uploadedFile.ModTime
+		}
+
+		// Use the actual native hash reported by the provider (empty if provider doesn't supply one).
+		nativeHash := ""
+		if len(uploadedFile.Replicas) > 0 {
+			nativeHash = uploadedFile.Replicas[0].NativeHash
+		}
+
+		// Use the provider's own CalculatedID (GenerateCalculatedID(name,size)) so it matches
+		// what the metadata scan will return, keeping the replica idempotent across scans.
+		calculatedID := uploadedFile.CalculatedID
+		if calculatedID == "" {
+			calculatedID = masterFile.CalculatedID
+		}
+		if calculatedID == "" {
+			calculatedID = masterFile.GoogleDriveMD5
+		}
+
 		newReplica := &model.Replica{
 			FileID:       masterFile.ID,
-			CalculatedID: masterFile.GoogleDriveMD5,
+			CalculatedID: calculatedID,
 			Path:         masterFile.Path,
 			Name:         uploadedFile.Name,
 			Size:         uploadedFile.Size,
@@ -420,12 +445,10 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 			Provider:     targetProvider,
 			AccountID:    accountID,
 			NativeID:     nativeID,
-			NativeHash:   uploadedFile.CalculatedID,
-			ModTime:      time.Now(),
+			NativeHash:   nativeHash,
+			ModTime:      modTime,
 			Fragmented:   false,
-		}
-		if newReplica.CalculatedID == "" {
-			newReplica.CalculatedID = masterFile.CalculatedID
+			Owner:        accountID,
 		}
 
 		if len(uploadedFile.Replicas) > 0 {

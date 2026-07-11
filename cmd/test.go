@@ -1420,6 +1420,9 @@ func specCase19(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err != nil {
 		return fmt.Errorf("get db hash 2: %w", err)
 	}
+	if err != nil {
+		return fmt.Errorf("get db hash 2: %w", err)
+	}
 	if hash1 != hash2 {
 		return fmt.Errorf("idempotence violation: DB hash changed between syncs (%s → %s)", hash1, hash2)
 	}
