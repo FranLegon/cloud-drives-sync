@@ -506,10 +506,10 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 }
 
 // createShortcut shares the source file and creates a shortcut in the target account
-func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, syncRunID int64) error {
+func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, syncRunID int64) (*shortcutRefreshTarget, error) {
 	// 1. Find a compatible source replica
 	if len(sourceFile.Replicas) == 0 {
-		return fmt.Errorf("file has no replicas")
+		return nil, fmt.Errorf("file has no replicas")
 	}
 
 	var sourceReplica *model.Replica
@@ -524,7 +524,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 		// Fallback: Use first replica (might work for some providers or if cross-linking supported later)
 		// But for now, warn and return error if strictly required.
 		// Actually, logging a warning and returning error is better than using wrong provider.
-		return fmt.Errorf("no source replica found for provider %s", targetUser.Provider)
+		return nil, fmt.Errorf("no source replica found for provider %s", targetUser.Provider)
 	}
 
 	// Get Source Client
@@ -541,7 +541,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 		Phone:    phone,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to get source client: %w", err)
+		return nil, fmt.Errorf("failed to get source client: %w", err)
 	}
 
 	// 2. Share Source File with Target User (with cache check for Microsoft)
@@ -574,7 +574,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 	// 3. Get Target Client
 	targetClient, err := r.GetOrCreateClient(targetUser)
 	if err != nil {
-		return fmt.Errorf("failed to get target client: %w", err)
+		return nil, fmt.Errorf("failed to get target client: %w", err)
 	}
 
 	// Fetch source Drive ID (needed for MS OneDrive shortcuts)
@@ -593,7 +593,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 
 	parentID, err := r.ensureFolderStructure(targetClient, dir, targetUser.Provider)
 	if err != nil {
-		return fmt.Errorf("failed to ensure folder structure: %w", err)
+		return nil, fmt.Errorf("failed to ensure folder structure: %w", err)
 	}
 
 	// 5. Create Shortcut
@@ -638,14 +638,14 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 				if msClient, ok := targetClient.(*microsoft.Client); ok {
 					shortcut, err = msClient.CreateFakeShortcut(parentID, sourceFile.Name, sourceFile.Size, sourceFile.GoogleDriveMD5)
 					if err != nil {
-						return fmt.Errorf("failed to create fake shortcut: %w", err)
+						return nil, fmt.Errorf("failed to create fake shortcut: %w", err)
 					}
 					// Successfully created fake shortcut, proceed to DB update
 				} else {
-					return fmt.Errorf("failed to cast to Microsoft client for fake shortcut creation")
+					return nil, fmt.Errorf("failed to cast to Microsoft client for fake shortcut creation")
 				}
 			} else {
-				return fmt.Errorf("failed to create shortcut: %w", err)
+				return nil, fmt.Errorf("failed to create shortcut: %w", err)
 			}
 		}
 	}
@@ -688,5 +688,13 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 		}
 	}
 
-	return nil
+	return &shortcutRefreshTarget{
+		FileID:       sourceFile.ID,
+		Path:         sourceFile.Path,
+		Name:         sourceFile.Name,
+		AccountID:    accountID,
+		ParentID:     parentID,
+		ParentPath:   dir,
+		ExpectedName: shortcut.Name,
+	}, nil
 }

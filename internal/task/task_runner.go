@@ -370,7 +370,15 @@ func (r *Runner) GetMetadata() error {
 	close(folderChan)
 	dbWg.Wait()
 
-	// Post-processing: Link replicas to files
+	if err := r.runMetadataPostProcessing(startTime); err != nil {
+		return err
+	}
+
+	logger.Info("Metadata gathering complete")
+	return nil
+}
+
+func (r *Runner) runMetadataPostProcessing(startTime time.Time) error {
 	logger.Info("Linking replicas to logical files...")
 	if err := r.db.LinkOrphanedReplicas(); err != nil {
 		return fmt.Errorf("failed to link orphaned replicas: %w", err)
@@ -411,7 +419,6 @@ func (r *Runner) GetMetadata() error {
 		logger.Error("Failed to process hard-deleted folder: %v", err)
 	}
 
-	logger.Info("Metadata gathering complete")
 	return nil
 }
 
@@ -1227,6 +1234,15 @@ func (r *Runner) SyncProviders(syncRunID int64) error {
 		logger.Error("Failed to check soft deleted consistency: %v", err)
 	}
 
+	// Reload files before shortcut distribution: syncMissingAndConflicts inserts
+	// new replicas into the DB but does not update the in-memory map, so
+	// distributeShortcuts would miss Microsoft copies created in this run.
+	freshFiles, err := r.db.GetAllFilesAcrossProviders()
+	if err != nil {
+		return fmt.Errorf("failed to reload files for shortcut distribution: %w", err)
+	}
+	filesByPath = buildFilesByPath(freshFiles)
+
 	// Phase 3: Distribute Shortcuts for Microsoft OneDrive
 	if err := r.distributeShortcuts(filesByPath, syncRunID); err != nil {
 		logger.Error("Failed to distribute shortcuts: %v", err)
@@ -1600,6 +1616,49 @@ func getMasterFile(fileMap map[model.Provider]*model.File) *model.File {
 	return nil
 }
 
+func hasActiveMicrosoftReplicaForOtherAccount(file *model.File, targetAccountID string) bool {
+	if file == nil {
+		return false
+	}
+	for _, replica := range file.Replicas {
+		if replica == nil {
+			continue
+		}
+		if replica.Provider != model.ProviderMicrosoft || replica.Status != "active" {
+			continue
+		}
+		if replica.AccountID == targetAccountID {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func getMissingMicrosoftTargetAccount(file *model.File, users []model.User) string {
+	if file == nil {
+		return ""
+	}
+	activeAccounts := make(map[string]bool)
+	for _, replica := range file.Replicas {
+		if replica == nil || replica.Provider != model.ProviderMicrosoft || replica.Status != "active" {
+			continue
+		}
+		activeAccounts[replica.AccountID] = true
+	}
+	for _, user := range users {
+		if user.Provider != model.ProviderMicrosoft || user.IsMain {
+			continue
+		}
+		accountID := user.GetAccountID()
+		if activeAccounts[accountID] {
+			continue
+		}
+		return accountID
+	}
+	return ""
+}
+
 // sortFilesBySizeDesc sorts a slice of files by size in descending order
 func sortFilesBySizeDesc(files []*model.File) {
 	slices.SortFunc(files, func(a, b *model.File) int {
@@ -1666,6 +1725,14 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 
 			if _, exists := fileMap[provider]; !exists {
 				logger.Info("File %s missing in %s", path, provider)
+
+				if provider == model.ProviderMicrosoft {
+					targetAccountID := getMissingMicrosoftTargetAccount(masterFile, r.config.Users)
+					if targetAccountID != "" && hasActiveMicrosoftReplicaForOtherAccount(masterFile, targetAccountID) {
+						logger.Info("Deferring direct Microsoft copy for %s to same-run shortcut distribution (target=%s)", path, targetAccountID)
+						continue
+					}
+				}
 
 				if r.safeMode {
 					sourceProvider := ""
@@ -1813,6 +1880,16 @@ func (r *Runner) enforceSoftDeletedPlacement(masterFile *model.File, softDeleted
 	}
 }
 
+type shortcutRefreshTarget struct {
+	FileID       string
+	Path         string
+	Name         string
+	AccountID    string
+	ParentID     string
+	ParentPath   string
+	ExpectedName string
+}
+
 // distributeShortcuts ensures that for every file in Microsoft OneDrive,
 // all other OneDrive accounts have a shortcut to it.
 func (r *Runner) distributeShortcuts(filesByPath map[string]map[model.Provider]*model.File, syncRunID int64) error {
@@ -1826,8 +1903,15 @@ func (r *Runner) distributeShortcuts(filesByPath map[string]map[model.Provider]*
 		}
 	}
 
+	var refreshTargets []shortcutRefreshTarget
 	if len(msUsers) >= 2 {
-		r.distributeShortcutsAcrossMSAccounts(msUsers, filesByPath, syncRunID)
+		refreshTargets = r.distributeShortcutsAcrossMSAccounts(msUsers, filesByPath, syncRunID)
+	}
+
+	if len(refreshTargets) > 0 {
+		if err := r.refreshShortcutTargets(refreshTargets); err != nil {
+			return fmt.Errorf("refresh shortcut targets failed: %w", err)
+		}
 	}
 
 	// Distribute Folders (for empty folders)
@@ -1846,7 +1930,7 @@ type shortcutJob struct {
 	syncRunID  int64
 }
 
-func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, filesByPath map[string]map[model.Provider]*model.File, syncRunID int64) {
+func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, filesByPath map[string]map[model.Provider]*model.File, syncRunID int64) []shortcutRefreshTarget {
 	jobs := make([]shortcutJob, 0, len(filesByPath))
 
 	var doneCopies map[string]bool
@@ -1902,13 +1986,14 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 	}
 
 	if len(jobs) == 0 {
-		return
+		return nil
 	}
 
 	const maxWorkers = 4
 	logger.Info("Creating %d shortcuts with %d workers...", len(jobs), maxWorkers)
 
 	jobChan := make(chan shortcutJob, maxWorkers*2)
+	resultChan := make(chan shortcutRefreshTarget, len(jobs))
 	go func() {
 		for _, j := range jobs {
 			jobChan <- j
@@ -1922,17 +2007,100 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 		go func() {
 			defer wg.Done()
 			for job := range jobChan {
+				var refreshTarget *shortcutRefreshTarget
 				err := api.WithRetry(func() error {
-					return r.createShortcut(job.sourceFile, &job.user, job.syncRunID)
+					var err error
+					refreshTarget, err = r.createShortcut(job.sourceFile, &job.user, job.syncRunID)
+					return err
 				})
 				if err != nil {
 					logger.Error("Shortcut creation failed path=%q account=%s: %v", job.path, job.user.Email, err)
+					continue
+				}
+				if refreshTarget != nil {
+					resultChan <- *refreshTarget
 				}
 			}
 		}()
 	}
 
 	wg.Wait()
+	close(resultChan)
+
+	seen := make(map[string]bool)
+	results := make([]shortcutRefreshTarget, 0, len(jobs))
+	for target := range resultChan {
+		key := target.AccountID + "\x00" + target.ParentID + "\x00" + target.ExpectedName
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		results = append(results, target)
+	}
+	return results
+}
+
+func (r *Runner) refreshShortcutTargets(targets []shortcutRefreshTarget) error {
+	if len(targets) == 0 {
+		return nil
+	}
+
+	logger.Info("Refreshing metadata for %d modified Microsoft shortcut targets...", len(targets))
+	refreshStart := time.Now()
+	usersByAccount := make(map[string]*model.User)
+	for i := range r.config.Users {
+		user := &r.config.Users[i]
+		if user.Provider == model.ProviderMicrosoft {
+			usersByAccount[user.Email] = user
+		}
+	}
+
+	for _, target := range targets {
+		user := usersByAccount[target.AccountID]
+		if user == nil {
+			return fmt.Errorf("microsoft user not found for account %s", target.AccountID)
+		}
+		client, err := r.GetOrCreateClient(user)
+		if err != nil {
+			return fmt.Errorf("failed to get client for %s: %w", target.AccountID, err)
+		}
+		files, err := api.WithRetryT(func() ([]*model.File, error) {
+			return client.ListFiles(target.ParentID)
+		})
+		if err != nil {
+			return fmt.Errorf("failed to list files for %s in %s: %w", target.AccountID, target.ParentPath, err)
+		}
+
+		matched := false
+		for _, file := range files {
+			if file.Name != target.Name && file.Name != target.ExpectedName {
+				continue
+			}
+			matched = true
+			file.Path = target.Path
+			for _, replica := range file.Replicas {
+				replica.FileID = target.FileID
+				replica.Path = target.Path
+				replica.Name = file.Name
+				replica.AccountID = target.AccountID
+				if replica.CalculatedID == "" {
+					replica.CalculatedID = file.CalculatedID
+				}
+				if err := r.db.UpsertReplicaByNativeID(replica, refreshStart.Unix()); err != nil {
+					return fmt.Errorf("failed to upsert refreshed shortcut replica for %s: %w", target.Path, err)
+				}
+			}
+		}
+		if !matched {
+			logger.Warning("Targeted shortcut refresh did not find expected item path=%q account=%s folder=%s", target.Path, target.AccountID, target.ParentPath)
+		}
+	}
+
+	// Do not run full metadata post-processing here: it marks every replica not
+	// seen after refreshStart as deleted, which would wipe Google/Telegram
+	// replicas that were discovered earlier in the sync run. The targeted
+	// upserts above already persist the shortcut/placeholder replica.
+	return nil
 }
 
 // syncFolderStructures ensures empty folder structures are replicated across providers

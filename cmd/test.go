@@ -1419,6 +1419,16 @@ func specCase19(r *task.Runner, main *model.User, backups []*model.User) error {
 	if _, err := mainClient.UploadFile(sid, fileName, bytes.NewReader(content), int64(len(content))); err != nil {
 		return fmt.Errorf("upload: %w", err)
 	}
+	tmpDir := filepath.Join("tmp")
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return fmt.Errorf("create tmp directory: %w", err)
+	}
+	leftDBPath := filepath.Join(tmpDir, "left_db.db")
+	rightDBPath := filepath.Join(tmpDir, "right_db.db")
+	leftChecksumInputPath := filepath.Join(tmpDir, "left_db_checksum_input.txt")
+	rightChecksumInputPath := filepath.Join(tmpDir, "right_db_checksum_input.txt")
+	metadataDBPath := database.GetDBPath()
+
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("first sync failed: %w", err)
 	}
@@ -1426,6 +1436,13 @@ func specCase19(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err != nil {
 		return fmt.Errorf("get db checksum 1: %w", err)
 	}
+	if err := copyFile(metadataDBPath, leftDBPath); err != nil {
+		return fmt.Errorf("copy left database snapshot: %w", err)
+	}
+	if err := db.DumpContentChecksumInput(leftChecksumInputPath); err != nil {
+		return fmt.Errorf("dump left checksum input: %w", err)
+	}
+
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("second sync failed: %w", err)
 	}
@@ -1433,31 +1450,14 @@ func specCase19(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err != nil {
 		return fmt.Errorf("get db checksum 2: %w", err)
 	}
+	if err := copyFile(metadataDBPath, rightDBPath); err != nil {
+		return fmt.Errorf("copy right database snapshot: %w", err)
+	}
+	if err := db.DumpContentChecksumInput(rightChecksumInputPath); err != nil {
+		return fmt.Errorf("dump right checksum input: %w", err)
+	}
+
 	if hash1 != hash2 {
-		tmpDir := filepath.Join("tmp")
-		if err := os.MkdirAll(tmpDir, 0755); err != nil {
-			return fmt.Errorf("create tmp directory: %w", err)
-		}
-		leftDBPath := filepath.Join(tmpDir, "left_db.db")
-		rightDBPath := filepath.Join(tmpDir, "right_db.db")
-		metadataDBPath := database.GetDBPath()
-		if err := copyFile(metadataDBPath, leftDBPath); err != nil {
-			return fmt.Errorf("copy left database snapshot: %w", err)
-		}
-		leftChecksumInputPath := filepath.Join(tmpDir, "left_db_checksum_input.txt")
-		if err := db.DumpContentChecksumInput(leftChecksumInputPath); err != nil {
-			return fmt.Errorf("dump left checksum input: %w", err)
-		}
-		if err := runCLISync(r); err != nil {
-			return fmt.Errorf("third sync failed: %w", err)
-		}
-		if err := copyFile(metadataDBPath, rightDBPath); err != nil {
-			return fmt.Errorf("copy right database snapshot: %w", err)
-		}
-		rightChecksumInputPath := filepath.Join(tmpDir, "right_db_checksum_input.txt")
-		if err := db.DumpContentChecksumInput(rightChecksumInputPath); err != nil {
-			return fmt.Errorf("dump right checksum input: %w", err)
-		}
 		return fmt.Errorf("idempotence violation: DB content checksum changed between syncs. Compare DBs with 'python tools\\dbquery\\compare-databases.py --left-db tmp/left_db.db --right-db tmp/right_db.db' and checksum inputs in '%s' and '%s'.", leftChecksumInputPath, rightChecksumInputPath)
 	}
 	logger.Info("[VERIFICATION] Case 19 passed: DB content checksum identical after second sync (%s)", hash1)

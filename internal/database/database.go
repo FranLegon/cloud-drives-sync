@@ -840,6 +840,53 @@ func (db *DB) InsertReplica(replica *model.Replica) error {
 	})
 }
 
+// UpsertReplicaByNativeID inserts or updates a replica keyed by provider/account/native_id.
+func (db *DB) UpsertReplicaByNativeID(replica *model.Replica, lastSeenAt int64) error {
+	replica.Owner = normalizeReplicaOwner(replica)
+	return db.WithTx(func(tx *sql.Tx) error {
+		query := `
+		INSERT INTO replicas (
+			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner, last_seen_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(provider, account_id, native_id) DO UPDATE SET
+			file_id=CASE WHEN excluded.file_id != '' THEN excluded.file_id ELSE replicas.file_id END,
+			calculated_id=excluded.calculated_id,
+			path=excluded.path,
+			name=excluded.name,
+			size=excluded.size,
+			native_hash=excluded.native_hash,
+			mod_time=excluded.mod_time,
+			status=excluded.status,
+			fragmented=excluded.fragmented,
+			owner=excluded.owner,
+			last_seen_at=excluded.last_seen_at
+		`
+		stmt, err := db.txStmt(tx, query)
+		if err != nil {
+			return fmt.Errorf("failed to prepare upsert statement: %w", err)
+		}
+		defer stmt.Close()
+
+		if _, err := stmt.Exec(
+			replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
+			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner, lastSeenAt,
+		); err != nil {
+			return fmt.Errorf("failed to upsert replica by native id: %w", err)
+		}
+
+		idStmt, err := db.txStmt(tx, `SELECT id FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ?`)
+		if err != nil {
+			return fmt.Errorf("failed to prepare replica id lookup: %w", err)
+		}
+		defer idStmt.Close()
+		if err := idStmt.QueryRow(string(replica.Provider), replica.AccountID, replica.NativeID).Scan(&replica.ID); err != nil {
+			return fmt.Errorf("failed to load upserted replica id: %w", err)
+		}
+		return nil
+	})
+}
+
 // UpsertReplica inserts or updates a replica record
 func (db *DB) UpsertReplica(replica *model.Replica) error {
 	replica.Owner = normalizeReplicaOwner(replica)
