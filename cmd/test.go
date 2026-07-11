@@ -203,7 +203,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 		logger.Info("\n=== TEST RUNTIME SUMMARY ===")
 		logger.Info("  Finished running tests. Optimization applied: Replaced heavy LEFT JOIN in GetFilesByStatus with separate indexed queries.")
 		logger.Info("  Finished running tests. Optimization applied: Replaced heavy LEFT JOIN in GetFilesByCalculatedID with separate indexed queries.")
-		allIDs := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "inner1", "inner2"}
+		allIDs := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "soft1", "soft2"}
 		for _, step := range allIDs {
 			if d, ok := testRuntimesStr[step]; ok {
 				logger.Info("  Test Case %s: %s", step, d.Round(time.Millisecond))
@@ -441,12 +441,12 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	return nil
 }
 
-func specCaseInner1(r *task.Runner, main *model.User, backups []*model.User) error {
+func specCasesoft1(r *task.Runner, main *model.User, backups []*model.User) error {
 	return legacyOwnershipTransferTest(r, main, backups)
 }
 
-func specCaseInner2(r *task.Runner, main *model.User, backups []*model.User) error {
-	logger.Info("inner2: Microsoft OneDrive Real Shortcut — verifying shortcut creation (integrated into case 23)")
+func specCasesoft2(r *task.Runner, main *model.User, backups []*model.User) error {
+	logger.Info("soft2: Microsoft OneDrive Real Shortcut — verifying shortcut creation (integrated into case 23)")
 	return specCase23(r, main, backups)
 }
 
@@ -1627,11 +1627,11 @@ func specCase23(r *task.Runner, main *model.User, backups []*model.User) error {
 	return nil
 }
 
-// legacyOwnershipTransferTest is the inner1 SPEC case — verifies Google Drive transfer ownership API flow.
+// legacyOwnershipTransferTest is the soft1 SPEC case — verifies Google Drive transfer ownership API flow.
 func legacyOwnershipTransferTest(r *task.Runner, main *model.User, backups []*model.User) error {
 	googleBackups := filterUsers(backups, model.ProviderGoogle)
 	if len(googleBackups) == 0 {
-		logger.Warning("No Google backup accounts found, skipping inner1")
+		logger.Warning("No Google backup accounts found, skipping soft1")
 		return nil
 	}
 	targetBackup := googleBackups[0]
@@ -1648,7 +1648,7 @@ func legacyOwnershipTransferTest(r *task.Runner, main *model.User, backups []*mo
 		return err
 	}
 	testData := []byte("Testing ownership transfer with pending owner flow")
-	testFileName := "test-case-id-inner1.txt"
+	testFileName := "test-case-id-soft1.txt"
 	logger.Info("[MANUAL INTERACTION] [%s] Upload '%s' for ownership transfer test", main.Email, testFileName)
 	uploadedFile, err := mainClient.UploadFile(sid, testFileName, bytes.NewReader(testData), int64(len(testData)))
 	if err != nil {
@@ -1657,12 +1657,12 @@ func legacyOwnershipTransferTest(r *task.Runner, main *model.User, backups []*mo
 	fileID := uploadedFile.Replicas[0].NativeID
 	err = mainClient.TransferOwnership(fileID, targetBackup.Email)
 	if err == nil {
-		logger.Info("[inner1] Direct transfer succeeded")
+		logger.Info("[soft1] Direct transfer succeeded")
 		targetClient.DeleteFile(fileID)
 		return nil
 	}
 	if err == api.ErrOwnershipTransferPending {
-		logger.Info("[inner1] Got pending transfer signal — accepting ownership")
+		logger.Info("[soft1] Got pending transfer signal — accepting ownership")
 		if err := targetClient.AcceptOwnership(fileID); err != nil {
 			return fmt.Errorf("accept ownership: %w", err)
 		}
@@ -1678,7 +1678,7 @@ func legacyOwnershipTransferTest(r *task.Runner, main *model.User, backups []*mo
 		return nil
 	}
 	if strings.Contains(err.Error(), "Consent is required") || strings.Contains(err.Error(), "consentRequiredForOwnershipTransfer") {
-		logger.Info("[inner1] Consumer account requires consent for ownership transfer — fallback expected")
+		logger.Info("[soft1] Consumer account requires consent for ownership transfer — fallback expected")
 		mainClient.DeleteFile(fileID)
 		return nil
 	}
@@ -2101,8 +2101,8 @@ func specTestCases() []specTestCase {
 		{ID: "21", Name: "Divergent content at the same logical path", Run: specCase21},
 		{ID: "22", Name: "Sync resumed after interruption", Run: specCase22},
 		{ID: "23", Name: "MS Placeholders", Run: specCase23},
-		{ID: "inner1", Name: "Google Drive Transfer Ownership", Run: specCaseInner1},
-		{ID: "inner2", Name: "Microsoft OneDrive Real Shortcut", Run: specCaseInner2},
+		{ID: "soft1", Name: "Google Drive Transfer Ownership", Run: specCasesoft1},
+		{ID: "soft2", Name: "Microsoft OneDrive Real Shortcut", Run: specCasesoft2},
 	}
 }
 
