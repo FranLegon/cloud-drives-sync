@@ -1,11 +1,14 @@
 package database
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -192,6 +195,123 @@ func (db *DB) GetMetadataHash() (string, error) {
 		return "0", nil
 	}
 	return strconv.FormatInt(version, 10), nil
+}
+
+// GetContentChecksum computes a stable checksum of non-system table contents.
+// It ignores SQLite internal tables and transient bookkeeping columns like last_seen_at.
+func (db *DB) GetContentChecksum() (string, error) {
+	tables := []string{
+		"files",
+		"replicas",
+		"replica_fragments",
+		"folders",
+		"logical_folders",
+		"folder_replicas",
+	}
+
+	hasher := sha256.New()
+	for _, table := range tables {
+		columns, err := db.getComparableColumns(table)
+		if err != nil {
+			return "", err
+		}
+		if len(columns) == 0 {
+			continue
+		}
+
+		query := fmt.Sprintf("SELECT %s FROM %s", strings.Join(columns, ", "), quoteIdentifier(table))
+		rows, err := db.conn.Query(query)
+		if err != nil {
+			return "", fmt.Errorf("query %s: %w", table, err)
+		}
+
+		serializedRows := make([]string, 0)
+		for rows.Next() {
+			values := make([]interface{}, len(columns))
+			scanTargets := make([]interface{}, len(columns))
+			for i := range values {
+				scanTargets[i] = &values[i]
+			}
+			if err := rows.Scan(scanTargets...); err != nil {
+				rows.Close()
+				return "", fmt.Errorf("scan %s: %w", table, err)
+			}
+			serializedRows = append(serializedRows, serializeNamedRow(columns, values))
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return "", fmt.Errorf("iterate %s: %w", table, err)
+		}
+		rows.Close()
+
+		sort.Strings(serializedRows)
+		fmt.Fprintf(hasher, "table:%s\n", table)
+		fmt.Fprintf(hasher, "columns:%s\n", strings.Join(columns, ","))
+		for _, row := range serializedRows {
+			fmt.Fprintf(hasher, "row:%s\n", row)
+		}
+		fmt.Fprintln(hasher, "--")
+	}
+
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func (db *DB) getComparableColumns(table string) ([]string, error) {
+	rows, err := db.conn.Query(fmt.Sprintf("PRAGMA table_info(%s)", quoteIdentifier(table)))
+	if err != nil {
+		return nil, fmt.Errorf("table info %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	columns := make([]string, 0)
+	for rows.Next() {
+		var cid int
+		var name string
+		var colType string
+		var notNull int
+		var defaultValue interface{}
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
+			return nil, fmt.Errorf("scan table info %s: %w", table, err)
+		}
+		if name == "last_seen_at" {
+			continue
+		}
+		columns = append(columns, quoteIdentifier(name))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate table info %s: %w", table, err)
+	}
+	return columns, nil
+}
+
+func quoteIdentifier(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
+
+func serializeNamedRow(columns []string, values []interface{}) string {
+	parts := make([]string, len(values))
+	for i, value := range values {
+		parts[i] = fmt.Sprintf("%s:%s", strings.Trim(columns[i], `"`), normalizeChecksumValue(value))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "|")
+}
+
+func normalizeChecksumValue(value interface{}) string {
+	switch v := value.(type) {
+	case nil:
+		return "null"
+	case []byte:
+		return fmt.Sprintf(`{"__bytes__":"%s"}`, hex.EncodeToString(v))
+	case bool:
+		if v {
+			return "1"
+		}
+		return "0"
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 // Close closes the database connection

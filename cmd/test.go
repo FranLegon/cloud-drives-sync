@@ -1422,16 +1422,16 @@ func specCase19(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("first sync failed: %w", err)
 	}
-	hash1, err := db.GetMetadataHash()
+	hash1, err := db.GetContentChecksum()
 	if err != nil {
-		return fmt.Errorf("get db hash 1: %w", err)
+		return fmt.Errorf("get db checksum 1: %w", err)
 	}
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("second sync failed: %w", err)
 	}
-	hash2, err := db.GetMetadataHash()
+	hash2, err := db.GetContentChecksum()
 	if err != nil {
-		return fmt.Errorf("get db hash 2: %w", err)
+		return fmt.Errorf("get db checksum 2: %w", err)
 	}
 	if hash1 != hash2 {
 		tmpDir := filepath.Join("tmp")
@@ -1450,9 +1450,9 @@ func specCase19(r *task.Runner, main *model.User, backups []*model.User) error {
 		if err := copyFile(metadataDBPath, rightDBPath); err != nil {
 			return fmt.Errorf("copy right database snapshot: %w", err)
 		}
-		return fmt.Errorf("idempotence violation: DB hash changed between syncs. Run 'python tools\\dbquery\\compare-databases.py --left-db tmp/left_db.db --right-db tmp/right_db.db' to compare the two database states.")
+		return fmt.Errorf("idempotence violation: DB content checksum changed between syncs. Run 'python tools\\dbquery\\compare-databases.py --left-db tmp/left_db.db --right-db tmp/right_db.db' to compare the two database states.")
 	}
-	logger.Info("[VERIFICATION] Case 19 passed: DB hash identical after second sync (%s)", hash1)
+	logger.Info("[VERIFICATION] Case 19 passed: DB content checksum identical after second sync (%s)", hash1)
 	return nil
 }
 

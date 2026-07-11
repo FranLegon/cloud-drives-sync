@@ -164,8 +164,18 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Compare two encrypted SQLCipher metadata databases."
     )
-    parser.add_argument("left_db", help="Path to the first database file")
-    parser.add_argument("right_db", help="Path to the second database file")
+    parser.add_argument(
+        "--left-db",
+        dest="left_db",
+        required=True,
+        help="Path to the first database file",
+    )
+    parser.add_argument(
+        "--right-db",
+        dest="right_db",
+        required=True,
+        help="Path to the second database file",
+    )
     return parser.parse_args()
 
 
