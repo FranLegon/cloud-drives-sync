@@ -666,6 +666,7 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 		NativeID:     shortcut.ID,
 		ModTime:      time.Now(),
 		Status:       "active",
+		Owner:        accountID,
 	}
 	if newReplica.CalculatedID == "" {
 		newReplica.CalculatedID = sourceFile.CalculatedID

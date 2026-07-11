@@ -281,12 +281,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			replica.CalculatedID = googleDriveMD5
 		}
 
-		if isShortcut || nativeHash == model.NativeHashShortcut {
-			// Shortcuts don't consume quota for the user (usually) and represent shared files
-			replica.Owner = "SHARED"
-		} else {
-			replica.Owner = c.user.Email
-		}
+		replica.Owner = c.user.Email
 
 		file.Replicas = []*model.Replica{replica}
 		allFiles = append(allFiles, file)

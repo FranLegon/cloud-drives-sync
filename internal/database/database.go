@@ -253,7 +253,7 @@ func (db *DB) buildContentChecksumInput() (string, error) {
 				rows.Close()
 				return "", fmt.Errorf("scan %s: %w", table, err)
 			}
-			serializedRows = append(serializedRows, serializeNamedRow(columns, values))
+			serializedRows = append(serializedRows, serializeNamedRow(table, columns, values))
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
@@ -291,7 +291,7 @@ func (db *DB) getComparableColumns(table string) ([]string, error) {
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
 			return nil, fmt.Errorf("scan table info %s: %w", table, err)
 		}
-		if name == "last_seen_at" {
+		if shouldExcludeChecksumColumn(table, name) {
 			continue
 		}
 		columns = append(columns, quoteIdentifier(name))
@@ -302,17 +302,54 @@ func (db *DB) getComparableColumns(table string) ([]string, error) {
 	return columns, nil
 }
 
+func shouldExcludeChecksumColumn(table, column string) bool {
+	if column == "last_seen_at" {
+		return true
+	}
+	if table == "folders" && column == "user_email" {
+		return true
+	}
+	return false
+}
+
 func quoteIdentifier(name string) string {
 	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
 }
 
-func serializeNamedRow(columns []string, values []interface{}) string {
-	parts := make([]string, len(values))
-	for i, value := range values {
+func serializeNamedRow(table string, columns []string, values []interface{}) string {
+	normalizedValues := normalizeChecksumRow(table, columns, values)
+	parts := make([]string, len(normalizedValues))
+	for i, value := range normalizedValues {
 		parts[i] = fmt.Sprintf("%s:%s", strings.Trim(columns[i], `"`), normalizeChecksumValue(value))
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, "|")
+}
+
+func normalizeChecksumRow(table string, columns []string, values []interface{}) []interface{} {
+	normalized := append([]interface{}(nil), values...)
+	if table != "replicas" {
+		return normalized
+	}
+
+	columnIndex := make(map[string]int, len(columns))
+	for i, column := range columns {
+		columnIndex[strings.Trim(column, `"`)] = i
+	}
+
+	nativeHashIndex, ok := columnIndex["native_hash"]
+	if !ok {
+		return normalized
+	}
+	if fmt.Sprintf("%v", normalized[nativeHashIndex]) != model.NativeHashShortcut {
+		return normalized
+	}
+
+	if sizeIndex, ok := columnIndex["size"]; ok {
+		normalized[sizeIndex] = int64(0)
+	}
+
+	return normalized
 }
 
 func normalizeChecksumValue(value interface{}) string {
@@ -530,6 +567,16 @@ func (db *DB) Initialize() error {
 }
 
 // InsertFile inserts a file record into the database
+func normalizeReplicaOwner(replica *model.Replica) string {
+	if replica == nil {
+		return ""
+	}
+	if strings.TrimSpace(replica.Owner) != "" {
+		return replica.Owner
+	}
+	return replica.AccountID
+}
+
 func (db *DB) InsertFile(file *model.File) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		fileQuery := `
@@ -561,6 +608,7 @@ func (db *DB) InsertFile(file *model.File) error {
 			defer replicaStmt.Close()
 
 			for _, replica := range file.Replicas {
+				replica.Owner = normalizeReplicaOwner(replica)
 				if _, err := replicaStmt.Exec(
 					file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 					string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
@@ -636,6 +684,7 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 
 		for _, file := range files {
 			for _, replica := range file.Replicas {
+				replica.Owner = normalizeReplicaOwner(replica)
 				_, err := replicaStmt.Exec(
 					replica.CalculatedID, replica.Path, replica.Name, replica.Size,
 					string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
@@ -735,6 +784,7 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 
 // InsertReplica inserts a replica record and its fragments into the database within a transaction
 func (db *DB) InsertReplica(replica *model.Replica) error {
+	replica.Owner = normalizeReplicaOwner(replica)
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `
 		INSERT INTO replicas (
@@ -792,6 +842,7 @@ func (db *DB) InsertReplica(replica *model.Replica) error {
 
 // UpsertReplica inserts or updates a replica record
 func (db *DB) UpsertReplica(replica *model.Replica) error {
+	replica.Owner = normalizeReplicaOwner(replica)
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `
 		INSERT OR REPLACE INTO replicas (
