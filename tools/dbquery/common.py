@@ -12,7 +12,10 @@ except ImportError:  # pragma: no cover - fallback for pysqlcipher3
     try:
         from pysqlcipher3 import dbapi2 as sqlcipher
     except ImportError:
-        print("Missing dependency: install with `pip install sqlcipher3-binary`")
+        print(
+            "Missing dependency: install a SQLCipher driver, e.g. `pip install pysqlcipher3` "
+            "or a compatible `sqlcipher3` package for your Python version/platform."
+        )
         sys.exit(1)
 
 DB_FILE = "cloud-drives-sync-metadata.db"
