@@ -201,8 +201,7 @@ func runTest(cmd *cobra.Command, args []string) (retErr error) {
 	// Print runtime summary before archiving the log
 	defer func() {
 		logger.Info("\n=== TEST RUNTIME SUMMARY ===")
-		logger.Info("  Finished running tests. Optimization applied: Replaced heavy LEFT JOIN in GetFilesByStatus with separate indexed queries.")
-		logger.Info("  Finished running tests. Optimization applied: Replaced heavy LEFT JOIN in GetFilesByCalculatedID with separate indexed queries.")
+		logger.Info("  Finished running tests.")
 		allIDs := []string{"1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "soft1", "soft2"}
 		for _, step := range allIDs {
 			if d, ok := testRuntimesStr[step]; ok {
