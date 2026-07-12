@@ -291,7 +291,7 @@ func (db *DB) getComparableColumns(table string) ([]string, error) {
 		if err := rows.Scan(&cid, &name, &colType, &notNull, &defaultValue, &pk); err != nil {
 			return nil, fmt.Errorf("scan table info %s: %w", table, err)
 		}
-		if shouldExcludeChecksumColumn(table, name) {
+		if shouldExcludeChecksumColumn(table, name, colType, pk) {
 			continue
 		}
 		columns = append(columns, quoteIdentifier(name))
@@ -302,14 +302,22 @@ func (db *DB) getComparableColumns(table string) ([]string, error) {
 	return columns, nil
 }
 
-func shouldExcludeChecksumColumn(table, column string) bool {
+func shouldExcludeChecksumColumn(table, column, columnType string, pk int) bool {
 	if column == "last_seen_at" {
 		return true
 	}
 	if table == "folders" && column == "user_email" {
 		return true
 	}
+	if column == "id" && pk > 0 && isIntegerColumnType(columnType) {
+		return true
+	}
 	return false
+}
+
+func isIntegerColumnType(columnType string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(columnType))
+	return strings.Contains(normalized, "INT")
 }
 
 func quoteIdentifier(name string) string {
