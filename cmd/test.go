@@ -1667,6 +1667,406 @@ func specCase23(r *task.Runner, main *model.User, backups []*model.User) error {
 	return nil
 }
 
+// SPEC Case 24: Google Drive duplicate sibling folders merge
+func specCase24(r *task.Runner, main *model.User, backups []*model.User) error {
+	const (
+		grandparentName = "test-case-id-24-grandparent"
+		parentName      = "test-case-id-24-parent"
+		childName       = "test-case-id-24-child"
+	)
+	parentFileAName := "test-case-id-24-parent-A.txt"
+	parentFileBName := "test-case-id-24-parent-B.txt"
+	childFileAName := "test-case-id-24-child-A.txt"
+	childFileBName := "test-case-id-24-child-B.txt"
+	parentFileAContent := []byte("test-case-id = 24\nLocation: parent-A\n")
+	parentFileBContent := []byte("test-case-id = 24\nLocation: parent-B\n")
+	childFileAContent := []byte("test-case-id = 24\nLocation: child-A\n")
+	childFileBContent := []byte("test-case-id = 24\nLocation: child-B\n")
+
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	sid, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+
+	logger.Info("[MANUAL INTERACTION] [%s] Create duplicate sibling folders '%s/%s' in cloud-drives-sync-root", main.Email, grandparentName, parentName)
+	grandparent, err := getOrCreateFolder(mainClient, sid, grandparentName)
+	if err != nil {
+		return fmt.Errorf("create grandparent folder: %w", err)
+	}
+	parentA, err := mainClient.CreateFolder(grandparent.ID, parentName)
+	if err != nil {
+		return fmt.Errorf("create first duplicate parent folder: %w", err)
+	}
+	parentB, err := mainClient.CreateFolder(grandparent.ID, parentName)
+	if err != nil {
+		return fmt.Errorf("create second duplicate parent folder: %w", err)
+	}
+	if _, err := mainClient.UploadFile(parentA.ID, parentFileAName, bytes.NewReader(parentFileAContent), int64(len(parentFileAContent))); err != nil {
+		return fmt.Errorf("upload %s: %w", parentFileAName, err)
+	}
+	if _, err := mainClient.UploadFile(parentB.ID, parentFileBName, bytes.NewReader(parentFileBContent), int64(len(parentFileBContent))); err != nil {
+		return fmt.Errorf("upload %s: %w", parentFileBName, err)
+	}
+	childA, err := mainClient.CreateFolder(parentA.ID, childName)
+	if err != nil {
+		return fmt.Errorf("create first duplicate child folder: %w", err)
+	}
+	childB, err := mainClient.CreateFolder(parentB.ID, childName)
+	if err != nil {
+		return fmt.Errorf("create second duplicate child folder: %w", err)
+	}
+	if _, err := mainClient.UploadFile(childA.ID, childFileAName, bytes.NewReader(childFileAContent), int64(len(childFileAContent))); err != nil {
+		return fmt.Errorf("upload %s: %w", childFileAName, err)
+	}
+	if _, err := mainClient.UploadFile(childB.ID, childFileBName, bytes.NewReader(childFileBContent), int64(len(childFileBContent))); err != nil {
+		return fmt.Errorf("upload %s: %w", childFileBName, err)
+	}
+
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+
+	verifyMergedTree := func(client api.CloudClient, accountLabel string) error {
+		rootID, err := client.GetSyncFolderID()
+		if err != nil {
+			return fmt.Errorf("get sync folder for %s: %w", accountLabel, err)
+		}
+		rootFolders, err := client.ListFolders(rootID)
+		if err != nil {
+			return fmt.Errorf("list root folders for %s: %w", accountLabel, err)
+		}
+		var grandparentFolder *model.Folder
+		for _, f := range rootFolders {
+			if f.Name == grandparentName {
+				grandparentFolder = f
+				break
+			}
+		}
+		if grandparentFolder == nil {
+			return fmt.Errorf("grandparent folder %s missing for %s", grandparentName, accountLabel)
+		}
+
+		parentFolders, err := client.ListFolders(grandparentFolder.ID)
+		if err != nil {
+			return fmt.Errorf("list parent folders for %s: %w", accountLabel, err)
+		}
+		matchingParents := make([]*model.Folder, 0)
+		for _, f := range parentFolders {
+			if f.Name == parentName {
+				matchingParents = append(matchingParents, f)
+			}
+		}
+		if len(matchingParents) != 1 {
+			return fmt.Errorf("expected exactly 1 merged parent folder for %s, found %d", accountLabel, len(matchingParents))
+		}
+		mergedParent := matchingParents[0]
+
+		parentFiles, err := client.ListFiles(mergedParent.ID)
+		if err != nil {
+			return fmt.Errorf("list parent files for %s: %w", accountLabel, err)
+		}
+		parentFileNames := map[string]bool{}
+		for _, f := range parentFiles {
+			parentFileNames[f.Name] = true
+		}
+		if !parentFileNames[parentFileAName] || !parentFileNames[parentFileBName] {
+			return fmt.Errorf("merged parent folder for %s missing expected files: have %v", accountLabel, parentFileNames)
+		}
+
+		childFolders, err := client.ListFolders(mergedParent.ID)
+		if err != nil {
+			return fmt.Errorf("list child folders for %s: %w", accountLabel, err)
+		}
+		matchingChildren := make([]*model.Folder, 0)
+		for _, f := range childFolders {
+			if f.Name == childName {
+				matchingChildren = append(matchingChildren, f)
+			}
+		}
+		if len(matchingChildren) != 1 {
+			return fmt.Errorf("expected exactly 1 merged child folder for %s, found %d", accountLabel, len(matchingChildren))
+		}
+		mergedChild := matchingChildren[0]
+
+		childFiles, err := client.ListFiles(mergedChild.ID)
+		if err != nil {
+			return fmt.Errorf("list child files for %s: %w", accountLabel, err)
+		}
+		childFileNames := map[string]bool{}
+		for _, f := range childFiles {
+			childFileNames[f.Name] = true
+		}
+		if !childFileNames[childFileAName] || !childFileNames[childFileBName] {
+			return fmt.Errorf("merged child folder for %s missing expected files: have %v", accountLabel, childFileNames)
+		}
+		return nil
+	}
+
+	googleUsers := append([]*model.User{main}, filterUsers(backups, model.ProviderGoogle)...)
+	microsoftUsers := filterUsers(backups, model.ProviderMicrosoft)
+	for _, u := range append(googleUsers, microsoftUsers...) {
+		client, err := r.GetOrCreateClient(u)
+		if err != nil {
+			return err
+		}
+		accountLabel := u.GetAccountID()
+		if err := verifyMergedTree(client, accountLabel); err != nil {
+			return err
+		}
+	}
+
+	logicalFolders, err := db.GetAllLogicalFolders()
+	if err != nil {
+		return fmt.Errorf("load logical folders: %w", err)
+	}
+	parentPath := "/" + grandparentName + "/" + parentName
+	childPath := parentPath + "/" + childName
+	pathCounts := map[string]int{}
+	logicalByPath := map[string]*model.LogicalFolder{}
+	for _, lf := range logicalFolders {
+		if strings.HasPrefix(lf.Path, "/"+grandparentName) {
+			pathCounts[lf.Path]++
+			logicalByPath[lf.Path] = lf
+		}
+	}
+	if pathCounts[parentPath] != 1 {
+		return fmt.Errorf("expected exactly 1 logical_folder row for %s, found %d", parentPath, pathCounts[parentPath])
+	}
+	if pathCounts[childPath] != 1 {
+		return fmt.Errorf("expected exactly 1 logical_folder row for %s, found %d", childPath, pathCounts[childPath])
+	}
+	for _, path := range []string{parentPath, childPath} {
+		lf := logicalByPath[path]
+		if lf == nil {
+			return fmt.Errorf("logical_folder row missing for %s", path)
+		}
+		replicas, err := db.GetFolderReplicas(lf.ID)
+		if err != nil {
+			return fmt.Errorf("load folder replicas for %s: %w", path, err)
+		}
+		if len(replicas) == 0 {
+			return fmt.Errorf("expected folder replicas for %s, found none", path)
+		}
+		seenReplicaKeys := map[string]bool{}
+		for _, replica := range replicas {
+			key := string(replica.Provider) + ":" + replica.AccountID + ":" + replica.NativeFolderID
+			if seenReplicaKeys[key] {
+				return fmt.Errorf("duplicate folder_replica row for %s: %s", path, key)
+			}
+			seenReplicaKeys[key] = true
+		}
+	}
+
+	logger.Info("[VERIFICATION] Case 24 passed: duplicate sibling folders merged into one logical path with merged contents")
+	return nil
+}
+
+// SPEC Case 25: Cross-provider duplicate nested folders with file conflicts
+func specCase25(r *task.Runner, main *model.User, backups []*model.User) error {
+	const (
+		outerName = "test-case-id-25-outer"
+		innerName = "test-case-id-25-inner"
+	)
+	outerFileName := "test-case-id-25-outer.txt"
+	innerFileName := "test-case-id-25-inner.txt"
+	googleOuterContent := []byte("Uploaded to provider: Google Drive\n")
+	googleInnerContent := []byte("Uploaded to provider: Google Drive\n")
+	microsoftOuterContent := []byte("Uploaded to provider: Microsoft OneDrive\n")
+	microsoftInnerContent := []byte("Uploaded to provider: Microsoft OneDrive\n")
+
+	mainClient, err := r.GetOrCreateClient(main)
+	if err != nil {
+		return err
+	}
+	mainSID, err := mainClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	logger.Info("[MANUAL INTERACTION] [%s] Create '%s/%s' and Google-content files in cloud-drives-sync-root", main.Email, outerName, innerName)
+	googleOuter, err := getOrCreateFolder(mainClient, mainSID, outerName)
+	if err != nil {
+		return fmt.Errorf("create Google outer folder: %w", err)
+	}
+	googleInner, err := getOrCreateFolder(mainClient, googleOuter.ID, innerName)
+	if err != nil {
+		return fmt.Errorf("create Google inner folder: %w", err)
+	}
+	if _, err := mainClient.UploadFile(googleOuter.ID, outerFileName, bytes.NewReader(googleOuterContent), int64(len(googleOuterContent))); err != nil {
+		return fmt.Errorf("upload Google outer file: %w", err)
+	}
+	if _, err := mainClient.UploadFile(googleInner.ID, innerFileName, bytes.NewReader(googleInnerContent), int64(len(googleInnerContent))); err != nil {
+		return fmt.Errorf("upload Google inner file: %w", err)
+	}
+
+	msBackups := filterUsers(backups, model.ProviderMicrosoft)
+	if len(msBackups) == 0 {
+		return fmt.Errorf("case 25 requires at least 1 Microsoft OneDrive backup account")
+	}
+	msUser := msBackups[0]
+	msClient, err := r.GetOrCreateClient(msUser)
+	if err != nil {
+		return err
+	}
+	msSID, err := msClient.GetSyncFolderID()
+	if err != nil {
+		return err
+	}
+	logger.Info("[MANUAL INTERACTION] [%s] Create '%s/%s' and Microsoft-content files in cloud-drives-sync-root", msUser.Email, outerName, innerName)
+	msOuter, err := getOrCreateFolder(msClient, msSID, outerName)
+	if err != nil {
+		return fmt.Errorf("create Microsoft outer folder: %w", err)
+	}
+	msInner, err := getOrCreateFolder(msClient, msOuter.ID, innerName)
+	if err != nil {
+		return fmt.Errorf("create Microsoft inner folder: %w", err)
+	}
+	if _, err := msClient.UploadFile(msOuter.ID, outerFileName, bytes.NewReader(microsoftOuterContent), int64(len(microsoftOuterContent))); err != nil {
+		return fmt.Errorf("upload Microsoft outer file: %w", err)
+	}
+	if _, err := msClient.UploadFile(msInner.ID, innerFileName, bytes.NewReader(microsoftInnerContent), int64(len(microsoftInnerContent))); err != nil {
+		return fmt.Errorf("upload Microsoft inner file: %w", err)
+	}
+
+	if err := runCLISync(r); err != nil {
+		return fmt.Errorf("sync failed: %w", err)
+	}
+
+	verifyMergedConflictFolder := func(client api.CloudClient, syncFolderID string, accountLabel string) error {
+		rootFolders, err := client.ListFolders(syncFolderID)
+		if err != nil {
+			return fmt.Errorf("list root folders for %s: %w", accountLabel, err)
+		}
+		matchingOuter := make([]*model.Folder, 0)
+		for _, f := range rootFolders {
+			if f.Name == outerName {
+				matchingOuter = append(matchingOuter, f)
+			}
+		}
+		if len(matchingOuter) != 1 {
+			return fmt.Errorf("expected exactly 1 outer folder for %s, found %d", accountLabel, len(matchingOuter))
+		}
+		outerFolder := matchingOuter[0]
+
+		outerFiles, err := client.ListFiles(outerFolder.ID)
+		if err != nil {
+			return fmt.Errorf("list outer files for %s: %w", accountLabel, err)
+		}
+		outerMatches := 0
+		for _, f := range outerFiles {
+			if f.Name == outerFileName {
+				outerMatches++
+			}
+		}
+		if outerMatches < 1 {
+			return fmt.Errorf("expected at least 1 outer file for %s, found %d", accountLabel, outerMatches)
+		}
+
+		innerFolders, err := client.ListFolders(outerFolder.ID)
+		if err != nil {
+			return fmt.Errorf("list inner folders for %s: %w", accountLabel, err)
+		}
+		matchingInner := make([]*model.Folder, 0)
+		for _, f := range innerFolders {
+			if f.Name == innerName {
+				matchingInner = append(matchingInner, f)
+			}
+		}
+		if len(matchingInner) != 1 {
+			return fmt.Errorf("expected exactly 1 inner folder for %s, found %d", accountLabel, len(matchingInner))
+		}
+		innerFolder := matchingInner[0]
+
+		innerFiles, err := client.ListFiles(innerFolder.ID)
+		if err != nil {
+			return fmt.Errorf("list inner files for %s: %w", accountLabel, err)
+		}
+		innerMatches := 0
+		for _, f := range innerFiles {
+			if f.Name == innerFileName {
+				innerMatches++
+			}
+		}
+		if innerMatches < 1 {
+			return fmt.Errorf("expected at least 1 inner file for %s, found %d", accountLabel, innerMatches)
+		}
+		return nil
+	}
+
+	googleUsers := append([]*model.User{main}, filterUsers(backups, model.ProviderGoogle)...)
+	microsoftUsers := filterUsers(backups, model.ProviderMicrosoft)
+	for _, u := range append(googleUsers, microsoftUsers...) {
+		client, err := r.GetOrCreateClient(u)
+		if err != nil {
+			return err
+		}
+		syncFolderID, err := client.GetSyncFolderID()
+		if err != nil {
+			return err
+		}
+		if err := verifyMergedConflictFolder(client, syncFolderID, u.GetAccountID()); err != nil {
+			return err
+		}
+	}
+
+	logicalFolders, err := db.GetAllLogicalFolders()
+	if err != nil {
+		return fmt.Errorf("load logical folders: %w", err)
+	}
+	outerPath := "/" + outerName
+	innerPath := outerPath + "/" + innerName
+	logicalByPath := map[string]*model.LogicalFolder{}
+	pathCounts := map[string]int{}
+	for _, lf := range logicalFolders {
+		if lf.Path == outerPath || lf.Path == innerPath {
+			pathCounts[lf.Path]++
+			logicalByPath[lf.Path] = lf
+		}
+	}
+	if pathCounts[outerPath] != 1 {
+		return fmt.Errorf("expected exactly 1 logical_folder row for %s, found %d", outerPath, pathCounts[outerPath])
+	}
+	if pathCounts[innerPath] != 1 {
+		return fmt.Errorf("expected exactly 1 logical_folder row for %s, found %d", innerPath, pathCounts[innerPath])
+	}
+	for _, path := range []string{outerPath, innerPath} {
+		replicas, err := db.GetFolderReplicas(logicalByPath[path].ID)
+		if err != nil {
+			return fmt.Errorf("load folder replicas for %s: %w", path, err)
+		}
+		if len(replicas) == 0 {
+			return fmt.Errorf("expected folder replicas for %s, found none", path)
+		}
+	}
+
+	allFiles, err := db.GetAllFiles()
+	if err != nil {
+		return fmt.Errorf("load files: %w", err)
+	}
+	outerDBMatches := 0
+	innerDBMatches := 0
+	for _, f := range allFiles {
+		if f.Path == outerPath+"/"+outerFileName || (strings.HasPrefix(f.Path, outerPath+"/test-case-id-25-outer") && strings.Contains(f.Name, "_conflict_")) {
+			outerDBMatches++
+		}
+		if f.Path == innerPath+"/"+innerFileName || (strings.HasPrefix(f.Path, innerPath+"/test-case-id-25-inner") && strings.Contains(f.Name, "_conflict_")) {
+			innerDBMatches++
+		}
+	}
+	if outerDBMatches < 2 {
+		return fmt.Errorf("expected at least 2 logical_file rows for outer conflict set, found %d", outerDBMatches)
+	}
+	if innerDBMatches < 2 {
+		return fmt.Errorf("expected at least 2 logical_file rows for inner conflict set, found %d", innerDBMatches)
+	}
+
+	logger.Info("[VERIFICATION] Case 25 passed: merged nested folders preserved both conflicting file variants")
+	return nil
+}
+
 // legacyOwnershipTransferTest is the soft1 SPEC case — verifies Google Drive transfer ownership API flow.
 func legacyOwnershipTransferTest(r *task.Runner, main *model.User, backups []*model.User) error {
 	googleBackups := filterUsers(backups, model.ProviderGoogle)
@@ -2141,6 +2541,8 @@ func specTestCases() []specTestCase {
 		{ID: "21", Name: "Divergent content at the same logical path", Run: specCase21},
 		{ID: "22", Name: "Sync resumed after interruption", Run: specCase22},
 		{ID: "23", Name: "MS Placeholders", Run: specCase23},
+		{ID: "24", Name: "Google Drive duplicate sibling folders merge", Run: specCase24},
+		{ID: "25", Name: "Cross-provider duplicate nested folders with file conflicts", Run: specCase25},
 		{ID: "soft1", Name: "Google Drive Transfer Ownership", Run: specCasesoft1},
 		{ID: "soft2", Name: "Microsoft OneDrive Real Shortcut", Run: specCasesoft2},
 	}

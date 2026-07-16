@@ -14,6 +14,15 @@ import (
 	"github.com/google/uuid"
 )
 
+func logicalFolderIDForPath(path string) string {
+	path = model.NormalizePath(path)
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return ""
+	}
+	return "lf:path:/" + path
+}
+
 // getDestinationClient returns the best client for a provider to upload a file
 func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.CloudClient, *model.User, error) {
 	// Telegram has no quota limit, use fast path
@@ -199,11 +208,8 @@ func (r *Runner) ensureFolderStructure(client api.CloudClient, path string, prov
 			}
 		}
 
-		logicalFolderID := "lf:" + string(provider) + ":" + currentPath
-		parentLogicalFolderID := ""
-		if parentPath != "" {
-			parentLogicalFolderID = "lf:" + string(provider) + ":" + parentPath
-		}
+		logicalFolderID := logicalFolderIDForPath("/" + currentPath)
+		parentLogicalFolderID := logicalFolderIDForPath("/" + parentPath)
 		owner := client.GetUserIdentifier()
 
 		if foundID != "" {

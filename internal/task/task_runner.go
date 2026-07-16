@@ -379,6 +379,11 @@ func (r *Runner) GetMetadata() error {
 }
 
 func (r *Runner) runMetadataPostProcessing(startTime time.Time) error {
+	logger.Info("Converging duplicate sibling folders...")
+	if err := r.mergeDuplicateSiblingFolders(); err != nil {
+		return fmt.Errorf("failed to merge duplicate sibling folders: %w", err)
+	}
+
 	logger.Info("Linking replicas to logical files...")
 	if err := r.db.LinkOrphanedReplicas(); err != nil {
 		return fmt.Errorf("failed to link orphaned replicas: %w", err)
@@ -1593,6 +1598,212 @@ func (r *Runner) invalidateFolderCache(provider model.Provider, accountID, path 
 		}
 		r.folderCache.Delete(cachePrefix + current)
 	}
+}
+
+type duplicateFolderGroup struct {
+	provider       model.Provider
+	accountID      string
+	parentFolderID string
+	parentPath     string
+	name           string
+	folders        []*model.Folder
+}
+
+func (r *Runner) mergeDuplicateSiblingFolders() error {
+	allFolders, err := r.db.GetAllFolders()
+	if err != nil {
+		return err
+	}
+
+	groups := map[string]*duplicateFolderGroup{}
+	for _, folder := range allFolders {
+		if folder.Provider == model.ProviderTelegram {
+			continue
+		}
+		if folder.Name == "" || folder.Path == "" {
+			continue
+		}
+		accountID := folder.UserEmail
+		if folder.Provider == model.ProviderTelegram {
+			accountID = folder.UserPhone
+		}
+		parentPath := model.NormalizePath(filepath.Dir(folder.Path))
+		if parentPath == "." {
+			parentPath = "/"
+		}
+		key := string(folder.Provider) + "|" + accountID + "|" + folder.ParentFolderID + "|" + folder.Name
+		group := groups[key]
+		if group == nil {
+			group = &duplicateFolderGroup{provider: folder.Provider, accountID: accountID, parentFolderID: folder.ParentFolderID, parentPath: parentPath, name: folder.Name}
+			groups[key] = group
+		}
+		group.folders = append(group.folders, folder)
+	}
+
+	for _, group := range groups {
+		if len(group.folders) < 2 {
+			continue
+		}
+		if err := r.mergeDuplicateFolderGroup(group); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Runner) mergeDuplicateFolderGroup(group *duplicateFolderGroup) error {
+	user := r.getUser(group.provider, group.accountID)
+	if user == nil {
+		return nil
+	}
+	client, err := r.GetOrCreateClient(user)
+	if err != nil {
+		return err
+	}
+
+	if group.provider == model.ProviderGoogle {
+		googleMain := config.GetMainAccount(r.config, model.ProviderGoogle)
+		if googleMain != nil {
+			mainClient, mainErr := r.GetOrCreateClient(googleMain)
+			if mainErr == nil {
+				user = googleMain
+				client = mainClient
+			}
+		}
+	}
+
+	slices.SortFunc(group.folders, func(a, b *model.Folder) int {
+		return cmp.Compare(a.ID, b.ID)
+	})
+	canonical := group.folders[0]
+	for _, duplicate := range group.folders[1:] {
+		if err := r.mergeFolderInto(client, user, canonical, duplicate); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Runner) mergeFolderInto(client api.CloudClient, user *model.User, canonical, duplicate *model.Folder) error {
+	if canonical.ID == duplicate.ID {
+		return nil
+	}
+	logger.InfoTagged(user.LogTags(), "Merging duplicate folder %q into %q", duplicate.Path, canonical.Path)
+	if user.Provider == model.ProviderGoogle {
+		if err := r.ensureGoogleFolderOwnedByMain(client, duplicate); err != nil {
+			return err
+		}
+		if err := r.ensureGoogleFolderOwnedByMain(client, canonical); err != nil {
+			return err
+		}
+	}
+
+	files, err := client.ListFiles(duplicate.ID)
+	if err != nil {
+		return fmt.Errorf("list duplicate folder files %s: %w", duplicate.Path, err)
+	}
+	for _, file := range files {
+		if r.safeMode {
+			logger.DryRunTagged(user.LogTags(), "Would move file %q into %q", file.Name, canonical.Path)
+			continue
+		}
+		if err := client.MoveFile(file.ID, canonical.ID); err != nil {
+			return fmt.Errorf("move file %s into %s: %w", file.Name, canonical.Path, err)
+		}
+	}
+
+	childFolders, err := client.ListFolders(duplicate.ID)
+	if err != nil {
+		return fmt.Errorf("list duplicate child folders %s: %w", duplicate.Path, err)
+	}
+	canonicalChildren, err := client.ListFolders(canonical.ID)
+	if err != nil {
+		return fmt.Errorf("list canonical child folders %s: %w", canonical.Path, err)
+	}
+	canonicalByName := make(map[string]*model.Folder, len(canonicalChildren))
+	for _, child := range canonicalChildren {
+		canonicalByName[child.Name] = child
+	}
+	for _, child := range childFolders {
+		child.Path = duplicate.Path + "/" + child.Name
+		if existing := canonicalByName[child.Name]; existing != nil {
+			existing.Path = canonical.Path + "/" + existing.Name
+			if err := r.mergeFolderInto(client, user, existing, child); err != nil {
+				return err
+			}
+			continue
+		}
+		if r.safeMode {
+			logger.DryRunTagged(user.LogTags(), "Would move folder %q into %q", child.Path, canonical.Path)
+			continue
+		}
+		if err := client.MoveFile(child.ID, canonical.ID); err != nil {
+			return fmt.Errorf("move folder %s into %s: %w", child.Path, canonical.Path, err)
+		}
+	}
+
+	if !r.safeMode {
+		if err := client.DeleteFolder(duplicate.ID); err != nil {
+			return fmt.Errorf("delete duplicate folder %s: %w", duplicate.Path, err)
+		}
+	}
+
+	r.invalidateFolderCache(user.Provider, user.GetAccountID(), canonical.Path)
+	r.invalidateFolderCache(user.Provider, user.GetAccountID(), duplicate.Path)
+	if !r.safeMode {
+		if err := r.db.DeleteFolder(duplicate.ID); err != nil {
+			logger.Warning("Failed to delete duplicate folder %s from DB: %v", duplicate.Path, err)
+		}
+	}
+	return nil
+}
+
+func (r *Runner) ensureGoogleFolderOwnedByMain(client api.CloudClient, folder *model.Folder) error {
+	if folder == nil || folder.Provider != model.ProviderGoogle {
+		return nil
+	}
+	googleMain := config.GetMainAccount(r.config, model.ProviderGoogle)
+	if googleMain == nil {
+		return nil
+	}
+	if folder.OwnerEmail == "" || folder.OwnerEmail == googleMain.Email {
+		return nil
+	}
+	ownerUser := r.getUser(model.ProviderGoogle, folder.OwnerEmail)
+	if ownerUser == nil {
+		return nil
+	}
+	ownerClient, err := r.GetOrCreateClient(ownerUser)
+	if err != nil {
+		return err
+	}
+	mainClient, err := r.GetOrCreateClient(googleMain)
+	if err != nil {
+		return err
+	}
+	if r.safeMode {
+		logger.DryRunTagged(googleMain.LogTags(), "Would transfer duplicate folder %q ownership from %s", folder.Path, folder.OwnerEmail)
+		return nil
+	}
+	if err := ownerClient.TransferOwnership(folder.ID, googleMain.Email); err != nil {
+		if err == api.ErrOwnershipTransferPending || strings.Contains(err.Error(), "ONLY_PENDING_OWNER_CAN_BECOME_NEW_OWNER") {
+			if acceptErr := mainClient.AcceptOwnership(folder.ID); acceptErr != nil {
+				return fmt.Errorf("accept duplicate folder ownership %s: %w", folder.Path, acceptErr)
+			}
+		} else {
+			return fmt.Errorf("transfer duplicate folder ownership %s: %w", folder.Path, err)
+		}
+	} else {
+		if acceptErr := mainClient.AcceptOwnership(folder.ID); acceptErr != nil {
+			logger.Warning("Accept ownership for %s returned: %v", folder.Path, acceptErr)
+		}
+	}
+	folder.OwnerEmail = googleMain.Email
+	if err := r.db.InsertFolder(folder); err != nil {
+		logger.Warning("Failed to update folder owner for %s: %v", folder.Path, err)
+	}
+	_ = client
+	return nil
 }
 
 // copyJob represents a file copy operation to be executed by a worker
