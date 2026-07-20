@@ -1935,7 +1935,7 @@ func specCase25(r *task.Runner, main *model.User, backups []*model.User) error {
 		return fmt.Errorf("sync failed: %w", err)
 	}
 
-	verifyMergedConflictFolder := func(client api.CloudClient, syncFolderID string, accountLabel string) error {
+	verifyMergedConflictFolder := func(client api.CloudClient, provider model.Provider, syncFolderID string, accountLabel string) error {
 		rootFolders, err := client.ListFolders(syncFolderID)
 		if err != nil {
 			return fmt.Errorf("list root folders for %s: %w", accountLabel, err)
@@ -1956,13 +1956,22 @@ func specCase25(r *task.Runner, main *model.User, backups []*model.User) error {
 			return fmt.Errorf("list outer files for %s: %w", accountLabel, err)
 		}
 		outerMatches := 0
+		outerConflictMatches := 0
 		for _, f := range outerFiles {
 			if f.Name == outerFileName {
 				outerMatches++
+				continue
+			}
+			if strings.HasPrefix(f.Name, "test-case-id-25-outer") && strings.Contains(f.Name, "_conflict_") {
+				outerMatches++
+				outerConflictMatches++
 			}
 		}
-		if outerMatches < 1 {
-			return fmt.Errorf("expected at least 1 outer file for %s, found %d", accountLabel, outerMatches)
+		if outerMatches != 2 {
+			return fmt.Errorf("expected exactly 2 outer file variants for %s, found %d", accountLabel, outerMatches)
+		}
+		if outerConflictMatches != 1 {
+			return fmt.Errorf("expected exactly 1 outer conflict-renamed file for %s, found %d", accountLabel, outerConflictMatches)
 		}
 
 		innerFolders, err := client.ListFolders(outerFolder.ID)
@@ -1985,13 +1994,22 @@ func specCase25(r *task.Runner, main *model.User, backups []*model.User) error {
 			return fmt.Errorf("list inner files for %s: %w", accountLabel, err)
 		}
 		innerMatches := 0
+		innerConflictMatches := 0
 		for _, f := range innerFiles {
 			if f.Name == innerFileName {
 				innerMatches++
+				continue
+			}
+			if strings.HasPrefix(f.Name, "test-case-id-25-inner") && strings.Contains(f.Name, "_conflict_") {
+				innerMatches++
+				innerConflictMatches++
 			}
 		}
-		if innerMatches < 1 {
-			return fmt.Errorf("expected at least 1 inner file for %s, found %d", accountLabel, innerMatches)
+		if innerMatches != 2 {
+			return fmt.Errorf("expected exactly 2 inner file variants for %s, found %d", accountLabel, innerMatches)
+		}
+		if innerConflictMatches != 1 {
+			return fmt.Errorf("expected exactly 1 inner conflict-renamed file for %s, found %d", accountLabel, innerConflictMatches)
 		}
 		return nil
 	}
@@ -2007,7 +2025,7 @@ func specCase25(r *task.Runner, main *model.User, backups []*model.User) error {
 		if err != nil {
 			return err
 		}
-		if err := verifyMergedConflictFolder(client, syncFolderID, u.GetAccountID()); err != nil {
+		if err := verifyMergedConflictFolder(client, u.Provider, syncFolderID, u.GetAccountID()); err != nil {
 			return err
 		}
 	}

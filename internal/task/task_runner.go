@@ -1259,24 +1259,50 @@ func (r *Runner) SyncProviders(syncRunID int64) error {
 	return nil
 }
 
-// buildFilesByPath groups active files by path and provider
-func buildFilesByPath(all []*model.File) map[string]map[model.Provider]*model.File {
-	result := make(map[string]map[model.Provider]*model.File, len(all))
+// buildFilesByPath groups active files by path and provider, preserving multiple
+// logical files per provider when conflicts exist at the same logical path.
+func buildFilesByPath(all []*model.File) map[string]map[model.Provider][]*model.File {
+	result := make(map[string]map[model.Provider][]*model.File, len(all))
 	for _, f := range all {
 		if f.Status != "active" {
 			continue
 		}
 		if _, ok := result[f.Path]; !ok {
-			result[f.Path] = make(map[model.Provider]*model.File)
+			result[f.Path] = make(map[model.Provider][]*model.File)
 		}
+		seenProviders := make(map[model.Provider]bool)
 		for _, replica := range f.Replicas {
 			if replica.Status != "active" {
 				continue
 			}
-			result[f.Path][replica.Provider] = f
+			if seenProviders[replica.Provider] {
+				continue
+			}
+			result[f.Path][replica.Provider] = append(result[f.Path][replica.Provider], f)
+			seenProviders[replica.Provider] = true
 		}
 	}
 	return result
+}
+
+func getMasterFile(fileMap map[model.Provider][]*model.File) *model.File {
+	if files, ok := fileMap[model.ProviderGoogle]; ok && len(files) > 0 {
+		return files[0]
+	} else if files, ok := fileMap[model.ProviderMicrosoft]; ok && len(files) > 0 {
+		return files[0]
+	} else if files, ok := fileMap[model.ProviderTelegram]; ok && len(files) > 0 {
+		return files[0]
+	}
+	return nil
+}
+
+func providerHasCalculatedID(files []*model.File, calculatedID string) bool {
+	for _, f := range files {
+		if f != nil && f.CalculatedID == calculatedID {
+			return true
+		}
+	}
+	return false
 }
 
 // buildMainAccountSet returns a map of provider -> set of main account IDs
@@ -1815,18 +1841,6 @@ type copyJob struct {
 	syncRunID  int64  // for copy checkpointing (0 to disable)
 }
 
-// getMasterFile resolves the primary file from a file map using priority logic
-func getMasterFile(fileMap map[model.Provider]*model.File) *model.File {
-	if f, ok := fileMap[model.ProviderGoogle]; ok {
-		return f
-	} else if f, ok := fileMap[model.ProviderMicrosoft]; ok {
-		return f
-	} else if f, ok := fileMap[model.ProviderTelegram]; ok {
-		return f
-	}
-	return nil
-}
-
 func hasActiveMicrosoftReplicaForOtherAccount(file *model.File, targetAccountID string) bool {
 	if file == nil {
 		return false
@@ -1879,7 +1893,7 @@ func sortFilesBySizeDesc(files []*model.File) {
 
 // syncMissingAndConflicts copies missing files across providers, resolves conflicts, and enforces soft-delete placement.
 // syncRunID is used to skip files already copied in a previous attempt of this run (crash recovery).
-func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string, syncRunID int64, googleVerdict map[string]statusIntent) error {
+func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provider][]*model.File, softDeletedPath string, syncRunID int64, googleVerdict map[string]statusIntent) error {
 	// Determine active providers from config
 	activeProviders := make(map[model.Provider]bool)
 	for _, u := range r.config.Users {
@@ -1919,72 +1933,95 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 			continue
 		}
 
-		// Google is authoritative: if Google has soft-deleted this content, never
-		// re-create it at an active (root) location on any provider. The
-		// convergence phase is responsible for moving the stragglers into
-		// soft-deleted instead.
-		if v, ok := googleVerdict[masterFile.CalculatedID]; ok && v.Status == "soft-deleted" {
-			continue
+		for _, providerFiles := range fileMap {
+			for _, file := range providerFiles {
+				if file == nil {
+					continue
+				}
+				if v, ok := googleVerdict[file.CalculatedID]; ok && v.Status == "soft-deleted" {
+					goto nextPath
+				}
+			}
 		}
 
 		for _, provider := range providers {
-			// Skip if already processed in a previous attempt of this sync run
-			if doneCopies != nil && doneCopies[masterFile.ID+"\x00"+string(provider)] {
-				logger.Info("Skipping already-synced file %s to %s", path, provider)
-				continue
+			providerFiles := fileMap[provider]
+			for _, sourceFile := range fileMap {
+				_ = sourceFile
 			}
-
-			if _, exists := fileMap[provider]; !exists {
-				logger.Info("File %s missing in %s", path, provider)
-
-				if provider == model.ProviderMicrosoft {
-					targetAccountID := getMissingMicrosoftTargetAccount(masterFile, r.config.Users)
-					if targetAccountID != "" && hasActiveMicrosoftReplicaForOtherAccount(masterFile, targetAccountID) {
-						logger.Info("Deferring direct Microsoft copy for %s to same-run shortcut distribution (target=%s)", path, targetAccountID)
+			for _, sourceProviderFiles := range fileMap {
+				for _, sourceFile := range sourceProviderFiles {
+					if sourceFile == nil {
 						continue
 					}
-				}
 
-				if r.safeMode {
-					sourceProvider := ""
-					if len(masterFile.Replicas) > 0 {
-						sourceProvider = string(masterFile.Replicas[0].Provider)
+					// Skip if already processed in a previous attempt of this sync run
+					if doneCopies != nil && doneCopies[sourceFile.ID+"\x00"+string(provider)] {
+						logger.Info("Skipping already-synced file %s to %s", sourceFile.Path, provider)
+						continue
 					}
-					logger.DryRun("Would copy %s from %s to %s", path, sourceProvider, provider)
-				} else {
-					jobs = append(jobs, copyJob{
-						masterFile: masterFile,
-						provider:   provider,
-						targetName: "",
-						path:       path,
-						syncRunID:  syncRunID,
-					})
-				}
-			} else {
-				existingFile := fileMap[provider]
-				if existingFile.CalculatedID != masterFile.CalculatedID {
-					logger.Warning("Conflict detected for %s in %s (CalculatedID mismatch)", path, provider)
 
-					ext := filepath.Ext(masterFile.Name)
-					nameWithoutExt := strings.TrimSuffix(masterFile.Name, ext)
+					if providerHasCalculatedID(providerFiles, sourceFile.CalculatedID) {
+						continue
+					}
+
+					if len(providerFiles) == 0 {
+						logger.Info("File %s missing in %s", sourceFile.Path, provider)
+
+						if provider == model.ProviderMicrosoft {
+							targetAccountID := getMissingMicrosoftTargetAccount(sourceFile, r.config.Users)
+							if targetAccountID != "" && hasActiveMicrosoftReplicaForOtherAccount(sourceFile, targetAccountID) {
+								logger.Info("Deferring direct Microsoft copy for %s to same-run shortcut distribution (target=%s)", sourceFile.Path, targetAccountID)
+								continue
+							}
+						}
+
+						if r.safeMode {
+							sourceProvider := ""
+							if len(sourceFile.Replicas) > 0 {
+								sourceProvider = string(sourceFile.Replicas[0].Provider)
+							}
+							logger.DryRun("Would copy %s from %s to %s", sourceFile.Path, sourceProvider, provider)
+						} else {
+							jobs = append(jobs, copyJob{
+								masterFile: sourceFile,
+								provider:   provider,
+								targetName: "",
+								path:       sourceFile.Path,
+								syncRunID:  syncRunID,
+							})
+						}
+						continue
+					}
+
+					existingFile := providerFiles[0]
+					if existingFile.CalculatedID == sourceFile.CalculatedID {
+						continue
+					}
+
+					logger.Warning("Conflict detected for %s in %s (CalculatedID mismatch)", sourceFile.Path, provider)
+
+					ext := filepath.Ext(sourceFile.Name)
+					nameWithoutExt := strings.TrimSuffix(sourceFile.Name, ext)
 					timestamp := time.Now().Format("2006-01-02_15-04-05")
 					conflictName := fmt.Sprintf("%s_conflict_%s%s", nameWithoutExt, timestamp, ext)
 
 					if r.safeMode {
-						logger.DryRun("Would resolve conflict by uploading %s as %s to %s", path, conflictName, provider)
+						logger.DryRun("Would resolve conflict by uploading %s as %s to %s", sourceFile.Path, conflictName, provider)
 					} else {
 						logger.Info("Resolving conflict by uploading as %s", conflictName)
 						jobs = append(jobs, copyJob{
-							masterFile: masterFile,
+							masterFile: sourceFile,
 							provider:   provider,
 							targetName: conflictName,
-							path:       path,
+							path:       sourceFile.Path,
 							syncRunID:  syncRunID,
 						})
 					}
 				}
 			}
 		}
+	nextPath:
 	}
 
 	if len(jobs) == 0 {
@@ -2103,7 +2140,7 @@ type shortcutRefreshTarget struct {
 
 // distributeShortcuts ensures that for every file in Microsoft OneDrive,
 // all other OneDrive accounts have a shortcut to it.
-func (r *Runner) distributeShortcuts(filesByPath map[string]map[model.Provider]*model.File, syncRunID int64) error {
+func (r *Runner) distributeShortcuts(filesByPath map[string]map[model.Provider][]*model.File, syncRunID int64) error {
 	logger.Info("Distributing OneDrive shortcuts...")
 
 	// Identify all Microsoft accounts
@@ -2141,7 +2178,7 @@ type shortcutJob struct {
 	syncRunID  int64
 }
 
-func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, filesByPath map[string]map[model.Provider]*model.File, syncRunID int64) []shortcutRefreshTarget {
+func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, filesByPath map[string]map[model.Provider][]*model.File, syncRunID int64) []shortcutRefreshTarget {
 	jobs := make([]shortcutJob, 0, len(filesByPath))
 
 	var doneCopies map[string]bool
@@ -2155,42 +2192,44 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 
 	for path, fileMap := range filesByPath {
 		// Check if this path exists in Microsoft
-		msFile, hasMS := fileMap[model.ProviderMicrosoft]
-		if !hasMS {
+		msFiles, hasMS := fileMap[model.ProviderMicrosoft]
+		if !hasMS || len(msFiles) == 0 {
 			continue
 		}
 
-		for _, user := range msUsers {
-			hasIt := false
-			for _, replica := range msFile.Replicas {
-				if replica.Status == "active" && replica.Provider == model.ProviderMicrosoft && replica.AccountID == user.Email {
-					hasIt = true
-					break
-				}
-			}
-
-			if !hasIt {
-				if syncRunID > 0 && doneCopies != nil {
-					targetProviderKey := fmt.Sprintf("shortcut:%s", user.Email)
-					if doneCopies[msFile.ID+"\x00"+targetProviderKey] {
-						logger.Info("Skipping already-created shortcut for %s in %s (crash recovery)", path, user.Email)
-						continue
+		for _, msFile := range msFiles {
+			for _, user := range msUsers {
+				hasIt := false
+				for _, replica := range msFile.Replicas {
+					if replica.Status == "active" && replica.Provider == model.ProviderMicrosoft && replica.AccountID == user.Email {
+						hasIt = true
+						break
 					}
 				}
 
-				if r.safeMode {
-					sourceAccount := ""
-					if len(msFile.Replicas) > 0 {
-						sourceAccount = msFile.Replicas[0].AccountID
+				if !hasIt {
+					if syncRunID > 0 && doneCopies != nil {
+						targetProviderKey := fmt.Sprintf("shortcut:%s", user.Email)
+						if doneCopies[msFile.ID+"\x00"+targetProviderKey] {
+							logger.Info("Skipping already-created shortcut for %s in %s (crash recovery)", path, user.Email)
+							continue
+						}
 					}
-					logger.DryRun("Would create shortcut for %s in %s -> %s", path, user.Email, sourceAccount)
-				} else {
-					jobs = append(jobs, shortcutJob{
-						sourceFile: msFile,
-						user:       user,
-						path:       path,
-						syncRunID:  syncRunID,
-					})
+
+					if r.safeMode {
+						sourceAccount := ""
+						if len(msFile.Replicas) > 0 {
+							sourceAccount = msFile.Replicas[0].AccountID
+						}
+						logger.DryRun("Would create shortcut for %s in %s -> %s", path, user.Email, sourceAccount)
+					} else {
+						jobs = append(jobs, shortcutJob{
+							sourceFile: msFile,
+							user:       user,
+							path:       path,
+							syncRunID:  syncRunID,
+						})
+					}
 				}
 			}
 		}
@@ -2864,7 +2903,7 @@ func (r *Runner) getUser(provider model.Provider, accountID string) *model.User 
 }
 
 // checkSoftDeletedConsistency ensures that if a file is in soft-deleted in one provider, it moves it there for others.
-func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Provider]*model.File, softDeletedPath string, syncRunID int64) error {
+func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Provider][]*model.File, softDeletedPath string, syncRunID int64) error {
 	// Map CalculatedID -> SoftDeletedFile (if exists)
 	softDeletedIDs := make(map[string]*model.File)
 
@@ -2880,10 +2919,13 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 
 	for path, fileMap := range filesByPath {
 		if strings.Contains(path, softDeletedPath) {
-			// Find a representative file
-			for _, f := range fileMap {
-				softDeletedIDs[f.CalculatedID] = f
-				break
+			for _, files := range fileMap {
+				for _, f := range files {
+					if f != nil {
+						softDeletedIDs[f.CalculatedID] = f
+						break
+					}
+				}
 			}
 		}
 	}
@@ -2894,8 +2936,13 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 			continue
 		}
 
-		for provider, file := range fileMap {
-			if target, ok := softDeletedIDs[file.CalculatedID]; ok {
+		for provider, files := range fileMap {
+			for _, file := range files {
+				target, ok := softDeletedIDs[file.CalculatedID]
+				if !ok {
+					continue
+				}
+
 				// Found a file that should be soft deleted
 				logger.Info("File %s (CalculatedID: %s) found in %s but soft-deleted in another provider. Moving to soft-deleted.", path, file.CalculatedID, provider)
 
@@ -2904,7 +2951,6 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 				// target.Path includes the full path relative to sync root.
 				// We want to move 'file' to 'target.Path' (or construct if target is just representative)
 				// Ideally we move it to the path defined by the file in soft-deleted.
-
 				targetSoftPath := target.Path
 				targetFolder := model.NormalizePath(filepath.Dir(targetSoftPath))
 

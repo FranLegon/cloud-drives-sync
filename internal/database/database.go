@@ -2514,11 +2514,13 @@ func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
 
 // LinkOrphanedReplicas links orphaned replicas to existing files, preferring canonical Google Drive MD5
 // identity and only falling back to calculated_id when no Google identity has been established yet.
+// For the calculated_id fallback, path must also match so same-name/same-size conflicts at different
+// logical paths can still link, while same-path conflicts remain separate logical files.
 func (db *DB) LinkOrphanedReplicas() error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `
 		WITH FileMap AS (
-			SELECT id, google_drive_md5, calculated_id
+			SELECT id, google_drive_md5, calculated_id, path
 			FROM files
 		),
 		ReplicaMatch AS (
@@ -2552,6 +2554,7 @@ func (db *DB) LinkOrphanedReplicas() error {
 						FROM FileMap fm
 						WHERE (fm.google_drive_md5 IS NULL OR fm.google_drive_md5 = '')
 						AND fm.calculated_id = r.calculated_id
+						AND fm.path = r.path
 						LIMIT 1
 					)
 				) AS file_id
@@ -2579,8 +2582,8 @@ func (db *DB) LinkOrphanedReplicas() error {
 }
 
 // PromoteOrphanedReplicasToFiles creates new logical file records for replicas that still do not match any
-// existing file. Established Google identities are grouped by MD5; otherwise calculated_id remains a
-// temporary fallback until a Google replica exists.
+// existing file. Established Google identities are grouped by MD5; otherwise calculated_id+path is used
+// so same-path conflicts remain distinct logical files until a canonical Google identity exists.
 func (db *DB) PromoteOrphanedReplicasToFiles() error {
 	query := `
 	SELECT id, calculated_id, path, name, size, mod_time, status, provider, native_hash
@@ -2605,7 +2608,6 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 		NativeHash     string
 		GoogleDriveMD5 string
 		GroupingKey    string
-		GroupingIsMD5  bool
 	}
 
 	var orphans []Orphan
@@ -2617,9 +2619,8 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 		if strings.EqualFold(o.Provider, string(model.ProviderGoogle)) && o.NativeHash != "" {
 			o.GoogleDriveMD5 = o.NativeHash
 			o.GroupingKey = "md5:" + o.GoogleDriveMD5
-			o.GroupingIsMD5 = true
 		} else {
-			o.GroupingKey = "calc:" + o.CalculatedID
+			o.GroupingKey = "calcpath:" + o.CalculatedID + "\x00" + o.Path
 		}
 		orphans = append(orphans, o)
 	}
@@ -2652,13 +2653,13 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 		}
 		defer updateReplicaStmt.Close()
 
-		for _, group := range orphanGroups {
+		for groupingKey, group := range orphanGroups {
 			first := group[0]
 			newFileID := uuid.New().String()
 			googleDriveMD5 := first.GoogleDriveMD5
 			_, err := insertFileStmt.Exec(newFileID, first.Path, first.Name, first.Size, first.CalculatedID, googleDriveMD5, first.ModTime, first.Status)
 			if err != nil {
-				return fmt.Errorf("failed to promote replica group %s: %w", first.GroupingKey, err)
+				return fmt.Errorf("failed to promote replica group %s: %w", groupingKey, err)
 			}
 
 			for _, o := range group {
