@@ -8,7 +8,7 @@ $focusPrompts = @(
     @{ Weight = 4;  Prompt = "Look for possible refactors to avoid repeating code, simplify complex logic, improve naming, and remove redundancy.
                Make sure not to alter the behavior of the code unless it's to fix a bug. Focus on improving code quality and maintainability.
                If you think no refactor is necessary, don't do anything." }
-    @{ Weight = 4;  Prompt = "Unify duplicate path normalization and file identity logic. Consolidate repeated helpers for path cleaning, calculated_id handling, and provider naming consistency without changing outputs." }
+    @{ Weight = 4;  Prompt = "Unify duplicate path normalization and file identity logic. Consolidate repeated helpers for path cleaning, Google Drive MD5/path identity handling, and provider naming consistency without changing outputs." }
     @{ Weight = 4;  Prompt = "Strengthen database interaction safety. Focus on consistent transaction boundaries, prepared statements reuse, and clearer failure handling while preserving schema and command behavior." }
     @{ Weight = 4;  Prompt = "Improve logging signal-to-noise. Keep current log style, but make critical actions and failures more diagnosable with concise context (provider, account, path, native_id) and fewer redundant lines." }
     @{ Weight = 5;  Prompt = "Optimize memory and stream handling in upload/download paths. Remove avoidable buffering and ensure readers/writers are closed correctly in all branches, including error paths." }

@@ -77,7 +77,7 @@ rows, err := db.Query("SELECT * FROM files LIMIT 10")
 The database contains the following tables:
 
 ### files
-Stores logical metadata about files across all providers (path, name, size, calculated_id, google_drive_md5, status). `google_drive_md5` is the canonical cross-provider identity.
+Stores logical metadata about files across all providers (path, name, size, google_drive_md5, status). `google_drive_md5` is the canonical cross-provider identity; when it is unavailable, logical path is the fallback identity.
 
 ### replicas
 Stores physical copies on cloud providers (provider, account_id, native_id, native_hash, owner, fragmented, last_seen_at).

@@ -399,21 +399,18 @@ func (db *DB) Initialize() error {
 			path TEXT NOT NULL,
 			name TEXT NOT NULL,
 			size INTEGER NOT NULL,
-			calculated_id TEXT,
 			google_drive_md5 TEXT NOT NULL DEFAULT '',
 			mod_time INTEGER NOT NULL,
 			status TEXT NOT NULL
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_files_path ON files(path);
-		CREATE INDEX IF NOT EXISTS idx_files_calculated_id ON files(calculated_id);
 		CREATE INDEX IF NOT EXISTS idx_files_google_drive_md5 ON files(google_drive_md5);
 		CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
 
 		CREATE TABLE IF NOT EXISTS replicas (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			file_id TEXT,
-			calculated_id TEXT,
 			path TEXT NOT NULL,
 			name TEXT NOT NULL,
 			size INTEGER NOT NULL,
@@ -429,7 +426,6 @@ func (db *DB) Initialize() error {
 		);
 
 		CREATE INDEX IF NOT EXISTS idx_replicas_file_id ON replicas(file_id);
-		CREATE INDEX IF NOT EXISTS idx_replicas_calculated_id ON replicas(calculated_id);
 		CREATE INDEX IF NOT EXISTS idx_replicas_provider ON replicas(provider);
 		CREATE INDEX IF NOT EXISTS idx_replicas_account_id ON replicas(account_id);
 		CREATE INDEX IF NOT EXISTS idx_replicas_native_id_old ON replicas(native_id);
@@ -521,13 +517,13 @@ func (db *DB) Initialize() error {
 
 		CREATE TRIGGER IF NOT EXISTS files_ai AFTER INSERT ON files BEGIN UPDATE _db_version SET version = version + 1; END;
 		CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files
-		WHEN OLD.path IS NOT NEW.path OR OLD.name IS NOT NEW.name OR OLD.size IS NOT NEW.size OR OLD.calculated_id IS NOT NEW.calculated_id OR OLD.google_drive_md5 IS NOT NEW.google_drive_md5 OR OLD.mod_time IS NOT NEW.mod_time OR OLD.status IS NOT NEW.status
+		WHEN OLD.path IS NOT NEW.path OR OLD.name IS NOT NEW.name OR OLD.size IS NOT NEW.size OR OLD.google_drive_md5 IS NOT NEW.google_drive_md5 OR OLD.mod_time IS NOT NEW.mod_time OR OLD.status IS NOT NEW.status
 		BEGIN UPDATE _db_version SET version = version + 1; END;
 		CREATE TRIGGER IF NOT EXISTS files_ad AFTER DELETE ON files BEGIN UPDATE _db_version SET version = version + 1; END;
 
 		CREATE TRIGGER IF NOT EXISTS replicas_ai AFTER INSERT ON replicas BEGIN UPDATE _db_version SET version = version + 1; END;
 		CREATE TRIGGER IF NOT EXISTS replicas_au AFTER UPDATE ON replicas 
-		WHEN OLD.file_id IS NOT NEW.file_id OR OLD.calculated_id IS NOT NEW.calculated_id OR OLD.path IS NOT NEW.path OR OLD.name IS NOT NEW.name OR OLD.size IS NOT NEW.size OR OLD.provider IS NOT NEW.provider OR OLD.account_id IS NOT NEW.account_id OR OLD.native_id IS NOT NEW.native_id OR OLD.native_hash IS NOT NEW.native_hash OR OLD.mod_time IS NOT NEW.mod_time OR OLD.status IS NOT NEW.status OR OLD.fragmented IS NOT NEW.fragmented OR OLD.owner IS NOT NEW.owner
+		WHEN OLD.file_id IS NOT NEW.file_id OR OLD.path IS NOT NEW.path OR OLD.name IS NOT NEW.name OR OLD.size IS NOT NEW.size OR OLD.provider IS NOT NEW.provider OR OLD.account_id IS NOT NEW.account_id OR OLD.native_id IS NOT NEW.native_id OR OLD.native_hash IS NOT NEW.native_hash OR OLD.mod_time IS NOT NEW.mod_time OR OLD.status IS NOT NEW.status OR OLD.fragmented IS NOT NEW.fragmented OR OLD.owner IS NOT NEW.owner
 		BEGIN UPDATE _db_version SET version = version + 1; END;
 		CREATE TRIGGER IF NOT EXISTS replicas_ad AFTER DELETE ON replicas BEGIN UPDATE _db_version SET version = version + 1; END;
 
@@ -567,7 +563,7 @@ func (db *DB) Initialize() error {
 		// Rebuild files_au trigger to add WHEN clause (idempotent: drop then create)
 		_, _ = tx.Exec("DROP TRIGGER IF EXISTS files_au")
 		_, _ = tx.Exec(`CREATE TRIGGER IF NOT EXISTS files_au AFTER UPDATE ON files
-		WHEN OLD.path IS NOT NEW.path OR OLD.name IS NOT NEW.name OR OLD.size IS NOT NEW.size OR OLD.calculated_id IS NOT NEW.calculated_id OR OLD.google_drive_md5 IS NOT NEW.google_drive_md5 OR OLD.mod_time IS NOT NEW.mod_time OR OLD.status IS NOT NEW.status
+		WHEN OLD.path IS NOT NEW.path OR OLD.name IS NOT NEW.name OR OLD.size IS NOT NEW.size OR OLD.google_drive_md5 IS NOT NEW.google_drive_md5 OR OLD.mod_time IS NOT NEW.mod_time OR OLD.status IS NOT NEW.status
 		BEGIN UPDATE _db_version SET version = version + 1; END`)
 
 		return nil
@@ -589,8 +585,8 @@ func (db *DB) InsertFile(file *model.File) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		fileQuery := `
 		INSERT OR REPLACE INTO files (
-			id, path, name, size, calculated_id, google_drive_md5, mod_time, status
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			id, path, name, size, google_drive_md5, mod_time, status
+		) VALUES (?, ?, ?, ?, ?, ?, ?)
 		`
 		fileStmt, err := db.txStmt(tx, fileQuery)
 		if err != nil {
@@ -599,15 +595,15 @@ func (db *DB) InsertFile(file *model.File) error {
 		defer fileStmt.Close()
 
 		if _, err := fileStmt.Exec(
-			file.ID, file.Path, file.Name, file.Size, file.CalculatedID, file.GoogleDriveMD5, file.ModTime.Unix(), file.Status); err != nil {
+			file.ID, file.Path, file.Name, file.Size, file.GoogleDriveMD5, file.ModTime.Unix(), file.Status); err != nil {
 			return fmt.Errorf("failed to insert file: %w", err)
 		}
 
 		if len(file.Replicas) > 0 {
 			replicaQuery := `
 			INSERT OR REPLACE INTO replicas (
-				file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				file_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`
 			replicaStmt, err := db.txStmt(tx, replicaQuery)
 			if err != nil {
@@ -618,7 +614,7 @@ func (db *DB) InsertFile(file *model.File) error {
 			for _, replica := range file.Replicas {
 				replica.Owner = normalizeReplicaOwner(replica)
 				if _, err := replicaStmt.Exec(
-					file.ID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+					file.ID, replica.Path, replica.Name, replica.Size,
 					string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 					replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner); err != nil {
 					return fmt.Errorf("failed to insert replica: %w", err)
@@ -643,10 +639,9 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 		now := time.Now().Unix()
 		replicaQuery := `
 			INSERT INTO replicas (
-				calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, file_id, last_seen_at, owner
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+				path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, file_id, last_seen_at, owner
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
 			ON CONFLICT(provider, account_id, native_id) DO UPDATE SET
-				calculated_id=excluded.calculated_id,
 				path=excluded.path,
 				name=excluded.name,
 				size=excluded.size,
@@ -694,7 +689,7 @@ func (db *DB) BatchInsertFiles(files []*model.File) error {
 			for _, replica := range file.Replicas {
 				replica.Owner = normalizeReplicaOwner(replica)
 				_, err := replicaStmt.Exec(
-					replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+					replica.Path, replica.Name, replica.Size,
 					string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 					replica.ModTime.Unix(), replica.Status, replica.Fragmented, now, replica.Owner)
 
@@ -796,8 +791,8 @@ func (db *DB) InsertReplica(replica *model.Replica) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `
 		INSERT INTO replicas (
-			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			file_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
 		stmt, err := db.txStmt(tx, query)
 		if err != nil {
@@ -806,7 +801,7 @@ func (db *DB) InsertReplica(replica *model.Replica) error {
 		defer stmt.Close()
 
 		res, err := stmt.Exec(
-			replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+			replica.FileID, replica.Path, replica.Name, replica.Size,
 			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
 		if err != nil {
@@ -854,11 +849,10 @@ func (db *DB) UpsertReplicaByNativeID(replica *model.Replica, lastSeenAt int64) 
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `
 		INSERT INTO replicas (
-			file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner, last_seen_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			file_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner, last_seen_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(provider, account_id, native_id) DO UPDATE SET
 			file_id=CASE WHEN excluded.file_id != '' THEN excluded.file_id ELSE replicas.file_id END,
-			calculated_id=excluded.calculated_id,
 			path=excluded.path,
 			name=excluded.name,
 			size=excluded.size,
@@ -876,7 +870,7 @@ func (db *DB) UpsertReplicaByNativeID(replica *model.Replica, lastSeenAt int64) 
 		defer stmt.Close()
 
 		if _, err := stmt.Exec(
-			replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+			replica.FileID, replica.Path, replica.Name, replica.Size,
 			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner, lastSeenAt,
 		); err != nil {
@@ -901,8 +895,8 @@ func (db *DB) UpsertReplica(replica *model.Replica) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `
 		INSERT OR REPLACE INTO replicas (
-			id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			id, file_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`
 		stmt, err := db.txStmt(tx, query)
 		if err != nil {
@@ -911,7 +905,7 @@ func (db *DB) UpsertReplica(replica *model.Replica) error {
 		defer stmt.Close()
 
 		_, err = stmt.Exec(
-			replica.ID, replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+			replica.ID, replica.FileID, replica.Path, replica.Name, replica.Size,
 			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner)
 		if err != nil {
@@ -1242,116 +1236,10 @@ func (db *DB) UpdateLogicalFilesGoogleMD5() error {
 	})
 }
 
-// GetFilesByCalculatedID returns all files with a specific calculated_id
-func (db *DB) GetFilesByCalculatedID(calculatedID string) ([]*model.File, error) {
-	queryFiles := `
-	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
-	FROM files
-	WHERE calculated_id = ?
-	ORDER BY mod_time ASC
-	`
-
-	rows, err := db.query(queryFiles, calculatedID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	fileMap := make(map[string]*model.File)
-	var files []*model.File
-
-	for rows.Next() {
-		file := &model.File{}
-		var modTime int64
-		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status); err != nil {
-			return nil, err
-		}
-		file.ModTime = time.Unix(modTime, 0)
-		fileMap[file.ID] = file
-		files = append(files, file)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	if len(files) == 0 {
-		return files, nil
-	}
-
-	queryReplicas := `
-	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
-	FROM replicas
-	WHERE calculated_id = ?
-	ORDER BY id ASC
-	`
-
-	repRows, err := db.query(queryReplicas, calculatedID)
-	if err != nil {
-		return nil, err
-	}
-	defer repRows.Close()
-
-	var allReplicas []*model.Replica
-	for repRows.Next() {
-		r := &model.Replica{}
-		var rFileID, rCalcID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus string
-		var rSize, rModTime int64
-		var rFragmented bool
-		var rOwner sql.NullString
-
-		if err := repRows.Scan(
-			&r.ID, &rFileID, &rCalcID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner,
-		); err != nil {
-			return nil, err
-		}
-
-		r.FileID = rFileID
-		r.CalculatedID = rCalcID
-		r.Path = rPath
-		r.Name = rName
-		r.Size = rSize
-		r.Provider = model.Provider(rProvider)
-		r.AccountID = rAccountID
-		r.NativeID = rNativeID
-		r.NativeHash = rNativeHash
-		r.ModTime = time.Unix(rModTime, 0)
-		r.Status = rStatus
-		r.Fragmented = rFragmented
-		if rOwner.Valid {
-			r.Owner = rOwner.String
-		}
-
-		if file, ok := fileMap[r.FileID]; ok {
-			file.Replicas = append(file.Replicas, r)
-			allReplicas = append(allReplicas, r)
-		}
-	}
-
-	if err := repRows.Err(); err != nil {
-		return nil, err
-	}
-
-	// Load fragments for fragmented replicas in batch
-	fragmented := make([]*model.Replica, 0, len(allReplicas))
-	for _, r := range allReplicas {
-		if r.Fragmented {
-			fragmented = append(fragmented, r)
-		}
-	}
-	if len(fragmented) > 0 {
-		if err := db.batchLoadFragments(fragmented); err != nil {
-			return nil, err
-		}
-	}
-
-	return files, nil
-}
-
 // GetAllFiles returns all files with replicas loaded in a single batch query
 func (db *DB) GetAllFiles() ([]*model.File, error) {
 	query := `
-	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
+	SELECT id, path, name, size, google_drive_md5, mod_time, status
 	FROM files
 	`
 
@@ -1367,7 +1255,7 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 		file := &model.File{}
 		var modTime int64
 		err := rows.Scan(
-			&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status,
+			&file.ID, &file.Path, &file.Name, &file.Size, &file.GoogleDriveMD5, &modTime, &file.Status,
 		)
 		if err != nil {
 			return nil, err
@@ -1416,7 +1304,7 @@ func (db *DB) GetAllFiles() ([]*model.File, error) {
 // getAllReplicas loads all replicas from the database in one query
 func (db *DB) getAllReplicas() ([]*model.Replica, error) {
 	query := `
-	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+	SELECT id, file_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	FROM replicas
 	WHERE file_id IS NOT NULL
 	`
@@ -1432,7 +1320,7 @@ func (db *DB) getAllReplicas() ([]*model.Replica, error) {
 		var providerStr string
 		var modTime int64
 		var owner sql.NullString
-		err := rows.Scan(&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
+		err := rows.Scan(&r.ID, &r.FileID, &r.Path, &r.Name, &r.Size,
 			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner)
 		if err != nil {
 			return nil, err
@@ -1523,7 +1411,7 @@ func (db *DB) batchLoadFragments(replicas []*model.Replica) error {
 func (db *DB) GetActiveFilesByPathPrefix(prefix string) ([]*model.File, error) {
 	pattern := prefix + "%"
 	queryFiles := `
-	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
+	SELECT id, path, name, size, google_drive_md5, mod_time, status
 	FROM files
 	WHERE status = 'active' AND (path LIKE ? OR path LIKE ?)
 	`
@@ -1539,7 +1427,7 @@ func (db *DB) GetActiveFilesByPathPrefix(prefix string) ([]*model.File, error) {
 	for rows.Next() {
 		file := &model.File{}
 		var modTime int64
-		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status); err != nil {
+		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.GoogleDriveMD5, &modTime, &file.Status); err != nil {
 			return nil, err
 		}
 		file.ModTime = time.Unix(modTime, 0)
@@ -1561,7 +1449,7 @@ func (db *DB) GetActiveFilesByPathPrefix(prefix string) ([]*model.File, error) {
 		args[i] = f.ID
 	}
 	repQuery := `
-	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+	SELECT id, file_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	FROM replicas
 	WHERE file_id IN (` + strings.Join(placeholders, ",") + `)`
 
@@ -1572,15 +1460,14 @@ func (db *DB) GetActiveFilesByPathPrefix(prefix string) ([]*model.File, error) {
 	defer repRows.Close()
 	for repRows.Next() {
 		r := &model.Replica{}
-		var rFileID, rCalcID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus string
+		var rFileID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus string
 		var rSize, rModTime int64
 		var rFragmented bool
 		var rOwner sql.NullString
-		if err := repRows.Scan(&r.ID, &rFileID, &rCalcID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner); err != nil {
+		if err := repRows.Scan(&r.ID, &rFileID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner); err != nil {
 			return nil, err
 		}
 		r.FileID = rFileID
-		r.CalculatedID = rCalcID
 		r.Path = rPath
 		r.Name = rName
 		r.Size = rSize
@@ -1604,7 +1491,7 @@ func (db *DB) GetActiveFilesByPathPrefix(prefix string) ([]*model.File, error) {
 // GetFilesByStatus returns all files with a specific status
 func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	queryFiles := `
-	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
+	SELECT id, path, name, size, google_drive_md5, mod_time, status
 	FROM files
 	WHERE status = ?
 	`
@@ -1621,7 +1508,7 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	for rows.Next() {
 		file := &model.File{}
 		var modTime int64
-		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status); err != nil {
+		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.GoogleDriveMD5, &modTime, &file.Status); err != nil {
 			return nil, err
 		}
 		file.ModTime = time.Unix(modTime, 0)
@@ -1640,7 +1527,7 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 	var allReplicas []*model.Replica
 
 	queryReplicas := `
-	SELECT r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
+	SELECT r.id, r.file_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
 	FROM replicas r
 	JOIN files f ON r.file_id = f.id
 	WHERE f.status = ?
@@ -1652,20 +1539,19 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 
 	for repRows.Next() {
 		r := &model.Replica{}
-		var rFileID, rCalcID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus string
+		var rFileID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus string
 		var rSize, rModTime int64
 		var rFragmented bool
 		var rOwner sql.NullString
 
 		if err := repRows.Scan(
-			&r.ID, &rFileID, &rCalcID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner,
+			&r.ID, &rFileID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner,
 		); err != nil {
 			repRows.Close()
 			return nil, err
 		}
 
 		r.FileID = rFileID
-		r.CalculatedID = rCalcID
 		r.Path = rPath
 		r.Name = rName
 		r.Size = rSize
@@ -1711,7 +1597,7 @@ func (db *DB) GetFilesByStatus(status string) ([]*model.File, error) {
 // GetAllFilesAcrossProviders returns all active files with their active replicas
 func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 	queryFiles := `
-	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
+	SELECT id, path, name, size, google_drive_md5, mod_time, status
 	FROM files
 	WHERE status = 'active'
 	`
@@ -1728,7 +1614,7 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 	for rows.Next() {
 		file := &model.File{}
 		var modTime int64
-		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status); err != nil {
+		if err := rows.Scan(&file.ID, &file.Path, &file.Name, &file.Size, &file.GoogleDriveMD5, &modTime, &file.Status); err != nil {
 			return nil, err
 		}
 		file.ModTime = time.Unix(modTime, 0)
@@ -1747,7 +1633,7 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 	var allReplicas []*model.Replica
 
 	queryReplicas := `
-	SELECT r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
+	SELECT r.id, r.file_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
 	FROM replicas r
 	JOIN files f ON r.file_id = f.id
 	WHERE f.status = 'active' AND r.status = 'active'
@@ -1759,20 +1645,19 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 
 	for repRows.Next() {
 		r := &model.Replica{}
-		var rFileID, rCalcID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus string
+		var rFileID, rPath, rName, rProvider, rAccountID, rNativeID, rNativeHash, rStatus string
 		var rSize, rModTime int64
 		var rFragmented bool
 		var rOwner sql.NullString
 
 		if err := repRows.Scan(
-			&r.ID, &rFileID, &rCalcID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner,
+			&r.ID, &rFileID, &rPath, &rName, &rSize, &rProvider, &rAccountID, &rNativeID, &rNativeHash, &rModTime, &rStatus, &rFragmented, &rOwner,
 		); err != nil {
 			repRows.Close()
 			return nil, err
 		}
 
 		r.FileID = rFileID
-		r.CalculatedID = rCalcID
 		r.Path = rPath
 		r.Name = rName
 		r.Size = rSize
@@ -1818,7 +1703,7 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 // GetReplicas returns all replicas for a file
 func (db *DB) GetReplicas(fileID string) ([]*model.Replica, error) {
 	query := `
-	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+	SELECT id, file_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	FROM replicas
 	WHERE file_id = ?
 	`
@@ -1834,7 +1719,7 @@ func (db *DB) GetReplicas(fileID string) ([]*model.Replica, error) {
 		var providerStr string
 		var modTime int64
 		var owner sql.NullString
-		err := rows.Scan(&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
+		err := rows.Scan(&r.ID, &r.FileID, &r.Path, &r.Name, &r.Size,
 			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner)
 		if err != nil {
 			return nil, err
@@ -1892,7 +1777,7 @@ func (db *DB) GetReplicaFragments(replicaID int64) ([]*model.ReplicaFragment, er
 // GetReplicasByAccount returns all replicas for a specific account
 func (db *DB) GetReplicasByAccount(provider model.Provider, accountID string) ([]*model.Replica, error) {
 	query := `
-	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+	SELECT id, file_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	FROM replicas
 	WHERE provider = ? AND account_id = ?
 	`
@@ -1908,7 +1793,7 @@ func (db *DB) GetReplicasByAccount(provider model.Provider, accountID string) ([
 		var providerStr string
 		var modTime int64
 		var owner sql.NullString
-		err := rows.Scan(&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
+		err := rows.Scan(&r.ID, &r.FileID, &r.Path, &r.Name, &r.Size,
 			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner)
 		if err != nil {
 			return nil, err
@@ -1926,7 +1811,7 @@ func (db *DB) GetReplicasByAccount(provider model.Provider, accountID string) ([
 // GetReplicaByNativeID returns a replica by its native ID and provider
 func (db *DB) GetReplicaByNativeID(provider model.Provider, nativeID string) (*model.Replica, error) {
 	query := `
-	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+	SELECT id, file_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	FROM replicas
 	WHERE provider = ? AND native_id = ?
 	`
@@ -1935,7 +1820,7 @@ func (db *DB) GetReplicaByNativeID(provider model.Provider, nativeID string) (*m
 	var modTime int64
 	var owner sql.NullString
 	err := db.queryRow(query, string(provider), nativeID).Scan(
-		&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
+		&r.ID, &r.FileID, &r.Path, &r.Name, &r.Size,
 		&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner,
 	)
 	if err == sql.ErrNoRows {
@@ -1968,7 +1853,7 @@ func (db *DB) HasActiveReplicaByNativeID(provider model.Provider, nativeID strin
 func (db *DB) GetReplicaByNativeFragmentID(nativeFragmentID string) (*model.Replica, error) {
 	// Join with fragments
 	query := `
-	SELECT r.id, r.file_id, r.calculated_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
+	SELECT r.id, r.file_id, r.path, r.name, r.size, r.provider, r.account_id, r.native_id, r.native_hash, r.mod_time, r.status, r.fragmented, r.owner
 	FROM replicas r
 	JOIN replica_fragments f ON r.id = f.replica_id
 	WHERE f.native_fragment_id = ?
@@ -1978,7 +1863,7 @@ func (db *DB) GetReplicaByNativeFragmentID(nativeFragmentID string) (*model.Repl
 	var modTime int64
 	var owner sql.NullString
 	err := db.queryRow(query, nativeFragmentID).Scan(
-		&r.ID, &r.FileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
+		&r.ID, &r.FileID, &r.Path, &r.Name, &r.Size,
 		&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner,
 	)
 	if err == sql.ErrNoRows {
@@ -2027,32 +1912,6 @@ func (db *DB) DeleteFolder(id string) error {
 		}
 		return nil
 	})
-}
-
-// GetDuplicateCalculatedIDs returns calculated_ids that appear more than once
-func (db *DB) GetDuplicateCalculatedIDs() ([]string, error) {
-	query := `
-	SELECT calculated_id
-	FROM files
-	WHERE calculated_id IS NOT NULL
-	GROUP BY calculated_id
-	HAVING COUNT(*) > 1
-	`
-	rows, err := db.query(query)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, nil
 }
 
 // ClearProvider is removed/refactored.
@@ -2116,66 +1975,7 @@ func (db *DB) DeleteStaleReplicasByNativeID(provider model.Provider, oldNativeID
 	})
 }
 
-// HasActiveGoogleReplicaOutsideSoftDeleted checks if there's any active Google replica
-// with the given calculated_id that is NOT in the soft-deleted folder path.
-// This is used as a safety check during hard-delete to catch file_id linkage issues.
-func (db *DB) HasActiveGoogleReplicaOutsideSoftDeleted(calculatedID string) (bool, error) {
-	query := fmt.Sprintf(`
-	SELECT EXISTS(
-		SELECT 1 FROM replicas
-		WHERE calculated_id = ?
-		AND provider = 'google'
-		AND status = 'active'
-		AND path NOT LIKE '%%%s/soft-deleted%%'
-		AND path NOT LIKE '%%%s\soft-deleted%%'
-	)
-	`, auxFolderName, auxFolderName)
-	var exists bool
-	err := db.queryRow(query, calculatedID).Scan(&exists)
-	return exists, err
-}
-
-// GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk returns a map of all calculated_ids that have an active Google replica
-// outside the soft-deleted folder. This is used to optimize ProcessHardDeletes.
-func (db *DB) GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calculatedIDs []string) (map[string]bool, error) {
-	result := make(map[string]bool, len(calculatedIDs))
-	if len(calculatedIDs) == 0 {
-		return result, nil
-	}
-
-	// Chunk the query if needed, SQLite limit is 999 variables usually,
-	// but we can just fetch all matching ones without an IN clause if we want,
-	// or chunk the IN clause.
-	// Since this table could be huge, chunking the IN clause is safer.
-	chunkSize := 900
-	for i := 0; i < len(calculatedIDs); i += chunkSize {
-		end := i + chunkSize
-		if end > len(calculatedIDs) {
-			end = len(calculatedIDs)
-		}
-		chunk := calculatedIDs[i:end]
-
-		args := make([]interface{}, len(chunk))
-		for j, id := range chunk {
-			args[j] = id
-		}
-
-		// Avoid allocating a string slice and joining it for placeholders
-		placeholders := strings.Repeat("?,", len(chunk))
-		if len(placeholders) > 0 {
-			placeholders = placeholders[:len(placeholders)-1]
-		}
-
-		query := fmt.Sprintf(`
-		SELECT DISTINCT calculated_id FROM replicas
-		WHERE calculated_id IN (%s)
-		AND provider = 'google'
-		AND status = 'active'
-		AND path NOT LIKE '%%%s/soft-deleted%%'
-		AND path NOT LIKE '%%%s\soft-deleted%%'
-		`, placeholders, auxFolderName, auxFolderName)
-
-		// Use db.conn.Query directly to avoid caching dynamic queries in db.stmtCache, preventing a prepared statement memory leak.
+// Use db.conn.Query directly to avoid caching dynamic queries in db.stmtCache, preventing a prepared statement memory leak.
 		rows, err := db.conn.Query(query, args...)
 		if err != nil {
 			return nil, err
@@ -2317,7 +2117,7 @@ func CreateDB(masterPassword string) error {
 // GetFileByPath retrieves a file by its path
 func (db *DB) GetFileByPath(path string) (*model.File, error) {
 	query := `
-	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
+	SELECT id, path, name, size, google_drive_md5, mod_time, status
 	FROM files
 	WHERE path = ?
 	`
@@ -2327,7 +2127,7 @@ func (db *DB) GetFileByPath(path string) (*model.File, error) {
 	var modTime int64
 	err := row.Scan(
 		&file.ID, &file.Path, &file.Name, &file.Size,
-		&file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status,
+		&file.GoogleDriveMD5, &modTime, &file.Status,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil // Return nil if not found
@@ -2350,7 +2150,7 @@ func (db *DB) GetFileByPath(path string) (*model.File, error) {
 // GetFileByID retrieves a file by its ID
 func (db *DB) GetFileByID(id string) (*model.File, error) {
 	query := `
-	SELECT id, path, name, size, calculated_id, google_drive_md5, mod_time, status
+	SELECT id, path, name, size, google_drive_md5, mod_time, status
 	FROM files
 	WHERE id = ?
 	`
@@ -2358,7 +2158,7 @@ func (db *DB) GetFileByID(id string) (*model.File, error) {
 	file := &model.File{}
 	var modTime int64
 	err := db.queryRow(query, id).Scan(
-		&file.ID, &file.Path, &file.Name, &file.Size, &file.CalculatedID, &file.GoogleDriveMD5, &modTime, &file.Status,
+		&file.ID, &file.Path, &file.Name, &file.Size, &file.GoogleDriveMD5, &modTime, &file.Status,
 	)
 	if err != nil {
 		return nil, err
@@ -2380,7 +2180,7 @@ func (db *DB) UpdateFile(file *model.File) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `
 		UPDATE files 
-		SET path = ?, name = ?, size = ?, calculated_id = ?, mod_time = ?, status = ?
+		SET path = ?, name = ?, size = ?, google_drive_md5 = ?, mod_time = ?, status = ?
 		WHERE id = ?
 		`
 		stmt, err := db.txStmt(tx, query)
@@ -2389,7 +2189,7 @@ func (db *DB) UpdateFile(file *model.File) error {
 		}
 		defer stmt.Close()
 		_, err = stmt.Exec(
-			file.Path, file.Name, file.Size, file.CalculatedID, file.ModTime.Unix(), file.Status, file.ID)
+			file.Path, file.Name, file.Size, file.GoogleDriveMD5, file.ModTime.Unix(), file.Status, file.ID)
 		if err != nil {
 			return fmt.Errorf("failed to update file: %w", err)
 		}
@@ -2402,7 +2202,7 @@ func (db *DB) UpdateReplica(replica *model.Replica) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `
 		UPDATE replicas SET
-			file_id = ?, calculated_id = ?, path = ?, name = ?, size = ?,
+			file_id = ?, path = ?, name = ?, size = ?,
 			provider = ?, account_id = ?, native_id = ?, native_hash = ?,
 			mod_time = ?, status = ?, fragmented = ?, owner = ?
 		WHERE id = ?
@@ -2413,7 +2213,7 @@ func (db *DB) UpdateReplica(replica *model.Replica) error {
 		}
 		defer stmt.Close()
 		_, err = stmt.Exec(
-			replica.FileID, replica.CalculatedID, replica.Path, replica.Name, replica.Size,
+			replica.FileID, replica.Path, replica.Name, replica.Size,
 			string(replica.Provider), replica.AccountID, replica.NativeID, replica.NativeHash,
 			replica.ModTime.Unix(), replica.Status, replica.Fragmented, replica.Owner, replica.ID)
 		if err != nil {
@@ -2477,7 +2277,7 @@ func (db *DB) UpdateReplicaFileID(replicaID int64, fileID string) error {
 // GetReplicasWithNullFileID returns all replicas without a file_id
 func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
 	query := `
-	SELECT id, file_id, calculated_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
+	SELECT id, file_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	FROM replicas
 	WHERE file_id IS NULL
 	`
@@ -2494,7 +2294,7 @@ func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
 		var modTime int64
 		var fileID sql.NullString
 		var owner sql.NullString
-		err := rows.Scan(&r.ID, &fileID, &r.CalculatedID, &r.Path, &r.Name, &r.Size,
+		err := rows.Scan(&r.ID, &fileID, &r.Path, &r.Name, &r.Size,
 			&providerStr, &r.AccountID, &r.NativeID, &r.NativeHash, &modTime, &r.Status, &r.Fragmented, &owner)
 		if err != nil {
 			return nil, err
@@ -2513,14 +2313,12 @@ func (db *DB) GetReplicasWithNullFileID() ([]*model.Replica, error) {
 }
 
 // LinkOrphanedReplicas links orphaned replicas to existing files, preferring canonical Google Drive MD5
-// identity and only falling back to calculated_id when no Google identity has been established yet.
-// For the calculated_id fallback, path must also match so same-name/same-size conflicts at different
-// logical paths can still link, while same-path conflicts remain separate logical files.
+// identity and otherwise falling back to logical path.
 func (db *DB) LinkOrphanedReplicas() error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `
 		WITH FileMap AS (
-			SELECT id, google_drive_md5, calculated_id, path
+			SELECT id, google_drive_md5, path
 			FROM files
 		),
 		ReplicaMatch AS (
@@ -2530,30 +2328,14 @@ func (db *DB) LinkOrphanedReplicas() error {
 						SELECT fm.id
 						FROM FileMap fm
 						WHERE fm.google_drive_md5 != ''
-						AND r.provider = 'Google'
+						AND LOWER(r.provider) = 'google'
 						AND r.native_hash = fm.google_drive_md5
 						LIMIT 1
 					),
 					(
 						SELECT fm.id
 						FROM FileMap fm
-						WHERE fm.google_drive_md5 != ''
-						AND EXISTS (
-							SELECT 1
-							FROM replicas rg
-							WHERE rg.file_id = fm.id
-							AND rg.provider = 'Google'
-							AND rg.status = 'active'
-							AND rg.native_hash = fm.google_drive_md5
-							AND rg.calculated_id = r.calculated_id
-						)
-						LIMIT 1
-					),
-					(
-						SELECT fm.id
-						FROM FileMap fm
 						WHERE (fm.google_drive_md5 IS NULL OR fm.google_drive_md5 = '')
-						AND fm.calculated_id = r.calculated_id
 						AND fm.path = r.path
 						LIMIT 1
 					)
@@ -2582,11 +2364,10 @@ func (db *DB) LinkOrphanedReplicas() error {
 }
 
 // PromoteOrphanedReplicasToFiles creates new logical file records for replicas that still do not match any
-// existing file. Established Google identities are grouped by MD5; otherwise calculated_id+path is used
-// so same-path conflicts remain distinct logical files until a canonical Google identity exists.
+// existing file. Established Google identities are grouped by MD5; otherwise path is used.
 func (db *DB) PromoteOrphanedReplicasToFiles() error {
 	query := `
-	SELECT id, calculated_id, path, name, size, mod_time, status, provider, native_hash
+	SELECT id, path, name, size, mod_time, status, provider, native_hash
 	FROM replicas
 	WHERE file_id IS NULL OR file_id = ''
 	`
@@ -2598,7 +2379,6 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 
 	type Orphan struct {
 		ReplicaID      int64
-		CalculatedID   string
 		Path           string
 		Name           string
 		Size           int64
@@ -2613,14 +2393,14 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 	var orphans []Orphan
 	for rows.Next() {
 		var o Orphan
-		if err := rows.Scan(&o.ReplicaID, &o.CalculatedID, &o.Path, &o.Name, &o.Size, &o.ModTime, &o.Status, &o.Provider, &o.NativeHash); err != nil {
+		if err := rows.Scan(&o.ReplicaID, &o.Path, &o.Name, &o.Size, &o.ModTime, &o.Status, &o.Provider, &o.NativeHash); err != nil {
 			return err
 		}
 		if strings.EqualFold(o.Provider, string(model.ProviderGoogle)) && o.NativeHash != "" {
 			o.GoogleDriveMD5 = o.NativeHash
 			o.GroupingKey = "md5:" + o.GoogleDriveMD5
 		} else {
-			o.GroupingKey = "calcpath:" + o.CalculatedID + "\x00" + o.Path
+			o.GroupingKey = "path:" + o.Path
 		}
 		orphans = append(orphans, o)
 	}
@@ -2637,8 +2417,8 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 
 	return db.WithTx(func(tx *sql.Tx) error {
 		insertFileStmt, err := db.txStmt(tx, `
-			INSERT OR IGNORE INTO files (id, path, name, size, calculated_id, google_drive_md5, mod_time, status)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT OR IGNORE INTO files (id, path, name, size, google_drive_md5, mod_time, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
 		`)
 		if err != nil {
 			return err
@@ -2657,7 +2437,7 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 			first := group[0]
 			newFileID := uuid.New().String()
 			googleDriveMD5 := first.GoogleDriveMD5
-			_, err := insertFileStmt.Exec(newFileID, first.Path, first.Name, first.Size, first.CalculatedID, googleDriveMD5, first.ModTime, first.Status)
+			_, err := insertFileStmt.Exec(newFileID, first.Path, first.Name, first.Size, googleDriveMD5, first.ModTime, first.Status)
 			if err != nil {
 				return fmt.Errorf("failed to promote replica group %s: %w", groupingKey, err)
 			}
@@ -2684,7 +2464,6 @@ func (db *DB) UpdateLogicalFilesFromReplicas() error {
 			SELECT r.file_id,
 				r.size,
 				r.mod_time,
-				r.calculated_id,
 				r.name,
 				r.path,
 				r.native_hash,
@@ -2695,8 +2474,7 @@ func (db *DB) UpdateLogicalFilesFromReplicas() error {
 						CASE WHEN LOWER(r.provider) = 'google' AND r.native_hash != ? THEN 0 ELSE 1 END,
 						CASE WHEN r.native_hash = ? THEN 1 ELSE 0 END,
 						r.mod_time DESC,
-						CASE WHEN r.path != f.path THEN 0 ELSE 1 END,
-						CASE WHEN r.calculated_id = f.calculated_id THEN 0 ELSE 1 END
+						CASE WHEN r.path != f.path THEN 0 ELSE 1 END
 				) AS rn
 			FROM replicas r
 			JOIN files f ON f.id = r.file_id
@@ -2706,7 +2484,6 @@ func (db *DB) UpdateLogicalFilesFromReplicas() error {
 			SELECT file_id,
 				size,
 				mod_time,
-				calculated_id,
 				name,
 				path,
 				CASE WHEN LOWER(provider) = 'google' AND native_hash != ? THEN native_hash ELSE NULL END AS google_drive_md5
@@ -2717,7 +2494,6 @@ func (db *DB) UpdateLogicalFilesFromReplicas() error {
 		SET
 			size = cr.size,
 			mod_time = cr.mod_time,
-			calculated_id = cr.calculated_id,
 			name = cr.name,
 			path = cr.path,
 			google_drive_md5 = COALESCE(cr.google_drive_md5, files.google_drive_md5)
@@ -2726,7 +2502,6 @@ func (db *DB) UpdateLogicalFilesFromReplicas() error {
 		AND (
 			files.size IS NOT cr.size OR
 			files.mod_time IS NOT cr.mod_time OR
-			files.calculated_id IS NOT cr.calculated_id OR
 			files.name IS NOT cr.name OR
 			files.path IS NOT cr.path OR
 			(COALESCE(cr.google_drive_md5, files.google_drive_md5) IS NOT files.google_drive_md5)

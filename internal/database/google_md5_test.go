@@ -30,9 +30,9 @@ func TestUpdateLogicalFilesGoogleMD5(t *testing.T) {
 
 	f := &model.File{
 		ID: "file-1", Path: "/a.txt", Name: "a.txt", Size: 3,
-		CalculatedID: "a.txt-3", ModTime: time.Unix(1000, 0), Status: "active",
+		ModTime: time.Unix(1000, 0), Status: "active",
 		Replicas: []*model.Replica{{
-			FileID: "file-1", CalculatedID: "a.txt-3", Path: "/a.txt", Name: "a.txt", Size: 3,
+			FileID: "file-1", Path: "/a.txt", Name: "a.txt", Size: 3,
 			Provider: model.ProviderGoogle, AccountID: "b@x.com", NativeID: "gid1",
 			NativeHash: "md5abc", ModTime: time.Unix(1000, 0), Status: "active", Owner: "b@x.com",
 		}},

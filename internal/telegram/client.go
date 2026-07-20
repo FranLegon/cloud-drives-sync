@@ -492,19 +492,13 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				// Single file - create File with Replica
 
 				file := &model.File{
-					ID:           meta.Replica.FileID,
-					Name:         meta.Replica.Name,
-					Path:         fullPath,
-					Size:         meta.Replica.Size,
-					CalculatedID: meta.Replica.CalculatedID,
-					ModTime:      meta.Replica.ModTime,
-					Status:       meta.Replica.Status,
-				}
-
-				// Ensure CalculatedID is set if missing (backward compatibility or correction)
-				if file.CalculatedID == "" {
-					file.CalculatedID = model.GenerateCalculatedID(file.Name, file.Size)
-					meta.Replica.CalculatedID = file.CalculatedID
+					ID:             meta.Replica.FileID,
+					Name:           meta.Replica.Name,
+					Path:           fullPath,
+					Size:           meta.Replica.Size,
+					GoogleDriveMD5: "",
+					ModTime:        meta.Replica.ModTime,
+					Status:         meta.Replica.Status,
 				}
 
 				file.Replicas = []*model.Replica{meta.Replica}
@@ -514,13 +508,13 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				if _, exists := fileMap[fullPath]; !exists {
 					// Create file structure
 					fileMap[fullPath] = &model.File{
-						ID:           meta.Replica.FileID,
-						Name:         meta.Replica.Name,
-						Path:         fullPath,
-						Size:         meta.Replica.Size, // Total size
-						CalculatedID: meta.Replica.CalculatedID,
-						ModTime:      meta.Replica.ModTime,
-						Status:       meta.Replica.Status,
+						ID:             meta.Replica.FileID,
+						Name:           meta.Replica.Name,
+						Path:           fullPath,
+						Size:           meta.Replica.Size, // Total size
+						GoogleDriveMD5: "",
+						ModTime:        meta.Replica.ModTime,
+						Status:         meta.Replica.Status,
 					}
 					replicaFragmentMap[fullPath] = []*model.ReplicaFragment{}
 				}
@@ -544,14 +538,12 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 	for fullPath, file := range fileMap {
 		if fragments, isFragmented := replicaFragmentMap[fullPath]; isFragmented && len(fragments) > 0 {
 			// This is a fragmented file
-			calculatedID := model.GenerateCalculatedID(file.Name, file.Size)
 
 			// Ensure ID is set (use first fragment if part 1 was missing)
 			if file.ID == "" {
 				file.ID = fragments[0].NativeFragmentID
 			}
 
-			file.CalculatedID = calculatedID
 			if file.ModTime.IsZero() {
 				file.ModTime = time.Now()
 			}
@@ -570,20 +562,19 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 			// Create replica for the fragmented file
 			replica := &model.Replica{
-				FileID:       file.ID,
-				CalculatedID: file.CalculatedID,
-				Path:         fullPath,
-				Name:         file.Name,
-				Size:         file.Size,
-				Provider:     model.ProviderTelegram,
-				AccountID:    c.user.Phone,
-				Owner:        c.user.Phone,
-				NativeID:     nativeID,
-				NativeHash:   "", // Telegram doesn't provide hashes
-				ModTime:      file.ModTime,
-				Status:       file.Status,
-				Fragmented:   true,
-				Fragments:    fragments,
+				FileID:     file.ID,
+				Path:       fullPath,
+				Name:       file.Name,
+				Size:       file.Size,
+				Provider:   model.ProviderTelegram,
+				AccountID:  c.user.Phone,
+				Owner:      c.user.Phone,
+				NativeID:   nativeID,
+				NativeHash: "", // Telegram doesn't provide hashes
+				ModTime:    file.ModTime,
+				Status:     file.Status,
+				Fragmented: true,
+				Fragments:  fragments,
 			}
 
 			file.Replicas = []*model.Replica{replica}
@@ -605,26 +596,23 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		return nil, fmt.Errorf("channel not initialized")
 	}
 
-	generatedID := model.GenerateCalculatedID(name, size)
-	calculatedID := generatedID
 	modTime := time.Now()
 	fullPath := folderID + "/" + name
 
 	// Prepare common Replica data
 	replica := &model.Replica{
-		ID:           0,                   // DB ID
-		FileID:       uuid.New().String(), // Generate new UUID for File
-		CalculatedID: calculatedID,
-		Path:         fullPath,
-		Name:         name,
-		Size:         size,
-		Provider:     model.ProviderTelegram,
-		AccountID:    c.user.Phone,
-		NativeID:     "", // To be filled
-		NativeHash:   "",
-		ModTime:      modTime,
-		Status:       "active",
-		Fragmented:   size > c.maxPartSize,
+		ID:         0,                   // DB ID
+		FileID:     uuid.New().String(), // Generate new UUID for File
+		Path:       fullPath,
+		Name:       name,
+		Size:       size,
+		Provider:   model.ProviderTelegram,
+		AccountID:  c.user.Phone,
+		NativeID:   "", // To be filled
+		NativeHash: "",
+		ModTime:    modTime,
+		Status:     "active",
+		Fragmented: size > c.maxPartSize,
 	}
 
 	if size <= c.maxPartSize {
@@ -636,14 +624,13 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		replica.NativeID = msgID
 
 		file := &model.File{
-			ID:           replica.FileID,
-			Name:         name,
-			Path:         fullPath,
-			Size:         size,
-			CalculatedID: calculatedID,
-			ModTime:      modTime,
-			Status:       "active",
-			Replicas:     []*model.Replica{replica},
+			ID:       replica.FileID,
+			Name:     name,
+			Path:     fullPath,
+			Size:     size,
+			ModTime:  modTime,
+			Status:   "active",
+			Replicas: []*model.Replica{replica},
 		}
 		return file, nil
 	}
@@ -681,14 +668,13 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	replica.Fragments = fragments
 
 	file := &model.File{
-		ID:           replica.FileID,
-		Name:         name,
-		Path:         fullPath,
-		Size:         size,
-		CalculatedID: calculatedID,
-		ModTime:      modTime,
-		Status:       "active",
-		Replicas:     []*model.Replica{replica},
+		ID:       replica.FileID,
+		Name:     name,
+		Path:     fullPath,
+		Size:     size,
+		ModTime:  modTime,
+		Status:   "active",
+		Replicas: []*model.Replica{replica},
 	}
 
 	return file, nil

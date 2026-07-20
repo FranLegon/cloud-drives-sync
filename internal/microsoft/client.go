@@ -247,38 +247,28 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			}
 		}
 
-		calculatedID := model.GenerateCalculatedID(itemName, itemSize)
-		if googleDriveMD5 != "" {
-			calculatedID = googleDriveMD5
-		}
-
 		file := &model.File{
 			ID:             *item.GetId(), // Will be replaced with UUID in database layer
 			Name:           itemName,
 			Size:           itemSize,
 			Path:           "", // Path will be set by caller
-			CalculatedID:   calculatedID,
 			GoogleDriveMD5: googleDriveMD5,
 			ModTime:        modTime,
 			Status:         "active",
 		}
 
 		replica := &model.Replica{
-			FileID:       "", // Will be set when linking to logical file
-			CalculatedID: calculatedID,
-			Path:         "", // Path will be set by caller
-			Name:         itemName,
-			Size:         itemSize,
-			Provider:     model.ProviderMicrosoft,
-			AccountID:    c.user.Email,
-			NativeID:     *item.GetId(),
-			NativeHash:   nativeHash,
-			ModTime:      modTime,
-			Status:       "active",
-			Fragmented:   false,
-		}
-		if googleDriveMD5 != "" {
-			replica.CalculatedID = googleDriveMD5
+			FileID:     "", // Will be set when linking to logical file
+			Path:       "", // Path will be set by caller
+			Name:       itemName,
+			Size:       itemSize,
+			Provider:   model.ProviderMicrosoft,
+			AccountID:  c.user.Email,
+			NativeID:   *item.GetId(),
+			NativeHash: nativeHash,
+			ModTime:    modTime,
+			Status:     "active",
+			Fragmented: false,
 		}
 
 		replica.Owner = c.user.Email
@@ -451,32 +441,28 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 		modTime = *finalItem.GetLastModifiedDateTime()
 	}
 
-	calculatedID := model.GenerateCalculatedID(*finalItem.GetName(), size)
-
 	file := &model.File{
-		ID:           *finalItem.GetId(), // Will be replaced with UUID in database layer
-		Name:         *finalItem.GetName(),
-		Size:         size,
-		Path:         "", // Path will be set by caller
-		CalculatedID: calculatedID,
-		ModTime:      modTime,
-		Status:       "active",
+		ID:      *finalItem.GetId(), // Will be replaced with UUID in database layer
+		Name:    *finalItem.GetName(),
+		Size:    size,
+		Path:    "", // Path will be set by caller
+		ModTime: modTime,
+		Status:  "active",
 	}
 
 	replica := &model.Replica{
-		FileID:       "", // Will be set when linking to logical file
-		CalculatedID: calculatedID,
-		Path:         "", // Path will be set by caller
-		Name:         *finalItem.GetName(),
-		Size:         size,
-		Provider:     model.ProviderMicrosoft,
-		AccountID:    c.user.Email,
-		NativeID:     *finalItem.GetId(),
-		NativeHash:   finalHash,
-		ModTime:      modTime,
-		Status:       "active",
-		Fragmented:   false,
-		Owner:        c.user.Email,
+		FileID:     "", // Will be set when linking to logical file
+		Path:       "", // Path will be set by caller
+		Name:       *finalItem.GetName(),
+		Size:       size,
+		Provider:   model.ProviderMicrosoft,
+		AccountID:  c.user.Email,
+		NativeID:   *finalItem.GetId(),
+		NativeHash: finalHash,
+		ModTime:    modTime,
+		Status:     "active",
+		Fragmented: false,
+		Owner:      c.user.Email,
 	}
 
 	file.Replicas = []*model.Replica{replica}
@@ -840,16 +826,13 @@ func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
 		modTime = *item.GetLastModifiedDateTime()
 	}
 
-	calculatedID := model.GenerateCalculatedID(*item.GetName(), *item.GetSize())
-
 	file := &model.File{
-		ID:           *item.GetId(), // Will be replaced with UUID in database layer
-		Name:         *item.GetName(),
-		Size:         *item.GetSize(),
-		Path:         "", // Path will be set by caller
-		CalculatedID: calculatedID,
-		ModTime:      modTime,
-		Status:       "active",
+		ID:      *item.GetId(), // Will be replaced with UUID in database layer
+		Name:    *item.GetName(),
+		Size:    *item.GetSize(),
+		Path:    "", // Path will be set by caller
+		ModTime: modTime,
+		Status:  "active",
 	}
 
 	var nativeHash string
@@ -863,18 +846,17 @@ func (c *Client) GetFileMetadata(fileID string) (*model.File, error) {
 	}
 
 	replica := &model.Replica{
-		FileID:       "", // Will be set when linking to logical file
-		CalculatedID: calculatedID,
-		Path:         "", // Path will be set by caller
-		Name:         *item.GetName(),
-		Size:         *item.GetSize(),
-		Provider:     model.ProviderMicrosoft,
-		AccountID:    c.user.Email,
-		NativeID:     *item.GetId(),
-		NativeHash:   nativeHash,
-		ModTime:      modTime,
-		Status:       "active",
-		Fragmented:   false,
+		FileID:     "", // Will be set when linking to logical file
+		Path:       "", // Path will be set by caller
+		Name:       *item.GetName(),
+		Size:       *item.GetSize(),
+		Provider:   model.ProviderMicrosoft,
+		AccountID:  c.user.Email,
+		NativeID:   *item.GetId(),
+		NativeHash: nativeHash,
+		ModTime:    modTime,
+		Status:     "active",
+		Fragmented: false,
 	}
 
 	file.Replicas = []*model.Replica{replica}
@@ -1013,17 +995,14 @@ func (c *Client) CreateShortcut(parentID, name, targetID, targetDriveID string) 
 		size = *item.GetRemoteItem().GetSize()
 	}
 
-	calculatedID := model.GenerateCalculatedID(*item.GetName(), size)
-
 	file := &model.File{
-		ID:           *item.GetId(),
-		Name:         *item.GetName(),
-		Size:         size,
-		Path:         "",
-		CalculatedID: calculatedID,
-		ModTime:      time.Now(),
-		Status:       "active",
-		Replicas:     nil, // Shortcuts don't have physical replicas
+		ID:       *item.GetId(),
+		Name:     *item.GetName(),
+		Size:     size,
+		Path:     "",
+		ModTime:  time.Now(),
+		Status:   "active",
+		Replicas: nil, // Shortcuts don't have physical replicas
 	}
 
 	return file, nil
@@ -1043,16 +1022,11 @@ func (c *Client) CreateFakeShortcut(parentID, name string, size int64, googleDri
 	uploadedFile.Name = name
 	uploadedFile.Size = size
 	uploadedFile.GoogleDriveMD5 = googleDriveMD5
-	uploadedFile.CalculatedID = googleDriveMD5
-	if uploadedFile.CalculatedID == "" {
-		uploadedFile.CalculatedID = model.GenerateCalculatedID(name, size)
-	}
 
 	// Make sure Replicas are also updated
 	if len(uploadedFile.Replicas) > 0 {
 		uploadedFile.Replicas[0].Name = name
 		uploadedFile.Replicas[0].Size = size
-		uploadedFile.Replicas[0].CalculatedID = uploadedFile.CalculatedID
 		uploadedFile.Replicas[0].NativeHash = model.NativeHashShortcut
 	}
 

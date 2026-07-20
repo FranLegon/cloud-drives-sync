@@ -542,52 +542,9 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 	return nil
 }
 
-// CheckForDuplicates finds duplicate files within each provider
+// CheckForDuplicates is no longer supported because calculated_id-based duplicate detection was removed.
 func (r *Runner) CheckForDuplicates() error {
-	logger.Info("Checking for duplicate files...")
-
-	// Note: In the normalized schema, duplicates are at the file level, not provider level
-	// Each file can have multiple replicas across providers
-	ids, err := r.db.GetDuplicateCalculatedIDs()
-	if err != nil {
-		logger.Error("Failed to query duplicates: %v", err)
-		return err
-	}
-
-	if len(ids) == 0 {
-		logger.Info("No duplicates found")
-		return nil
-	}
-
-	foundDuplicates := false
-
-	for _, calculatedID := range ids {
-		files, err := r.db.GetFilesByCalculatedID(calculatedID)
-		if err != nil {
-			logger.Error("Failed to get files for calculated_id %s: %v", calculatedID, err)
-			continue
-		}
-
-		if len(files) > 1 {
-			foundDuplicates = true
-			fmt.Printf("\nDuplicate files (CalculatedID: %s):\n", calculatedID)
-			for i, file := range files {
-				// Show replicas for each file
-				providerList := []string{}
-				for _, replica := range file.Replicas {
-					providerList = append(providerList, fmt.Sprintf("%s(%s)", replica.Provider, replica.AccountID))
-				}
-				fmt.Printf("  %d. %s (ID: %s, Size: %d, ModTime: %s, Providers: %v)\n",
-					i+1, file.Path, file.ID, file.Size, file.ModTime.Format("2006-01-02"), providerList)
-			}
-		}
-	}
-
-	if !foundDuplicates {
-		logger.Info("No duplicates found")
-	}
-
-	return nil
+	return fmt.Errorf("duplicate checking is no longer supported: calculated_id has been removed")
 }
 
 // CheckTokens validates all tokens
@@ -1296,9 +1253,15 @@ func getMasterFile(fileMap map[model.Provider][]*model.File) *model.File {
 	return nil
 }
 
-func providerHasCalculatedID(files []*model.File, calculatedID string) bool {
+func providerHasMatchingIdentity(files []*model.File, sourceFile *model.File) bool {
 	for _, f := range files {
-		if f != nil && f.CalculatedID == calculatedID {
+		if f == nil || sourceFile == nil {
+			continue
+		}
+		if sourceFile.GoogleDriveMD5 != "" && f.GoogleDriveMD5 == sourceFile.GoogleDriveMD5 {
+			return true
+		}
+		if sourceFile.GoogleDriveMD5 == "" && f.Path == sourceFile.Path {
 			return true
 		}
 	}
@@ -1336,34 +1299,38 @@ type statusIntent struct {
 	SoftPath   string
 }
 
-// computeGoogleVerdict returns Google's authoritative status per content
-// (calculated_id). Google is the source of truth: when providers disagree,
-// Google's state wins.
-//   - If Google has an active replica outside the soft-deleted folder, the
-//     content is "active" (located at that path).
-//   - If Google only has active replica(s) inside the soft-deleted folder, the
-//     content is "soft-deleted".
-//
-// Contents where Google has no active replica are absent from the map, meaning
-// Google has no opinion and callers should fall back to other providers.
+// computeGoogleVerdict returns Google's authoritative status per identity.
+// Google Drive MD5 is canonical when present; otherwise path is used.
 func computeGoogleVerdict(files []*model.File, softDeletedPath string) map[string]statusIntent {
 	softPathWin := strings.ReplaceAll(softDeletedPath, "/", "\\")
 	inSoft := func(p string) bool {
 		return strings.Contains(p, softDeletedPath) || strings.Contains(p, softPathWin)
 	}
+	identityKey := func(f *model.File) string {
+		if f == nil {
+			return ""
+		}
+		if f.GoogleDriveMD5 != "" {
+			return "md5:" + f.GoogleDriveMD5
+		}
+		if f.Path != "" {
+			return "path:" + f.Path
+		}
+		return ""
+	}
 
 	verdict := make(map[string]statusIntent)
 	for _, f := range files {
-		if f.CalculatedID == "" {
+		key := identityKey(f)
+		if key == "" {
 			continue
 		}
 		for _, replica := range f.Replicas {
 			if replica.Provider != model.ProviderGoogle || replica.Status != "active" {
 				continue
 			}
-			v := verdict[f.CalculatedID]
+			v := verdict[key]
 			if inSoft(replica.Path) {
-				// An active root replica always wins over a soft-deleted one.
 				if v.Status != "active" {
 					v.Status = "soft-deleted"
 					v.SoftPath = replica.Path
@@ -1372,7 +1339,7 @@ func computeGoogleVerdict(files []*model.File, softDeletedPath string) map[strin
 				v.Status = "active"
 				v.ActivePath = replica.Path
 			}
-			verdict[f.CalculatedID] = v
+			verdict[key] = v
 		}
 	}
 	return verdict
@@ -1394,14 +1361,27 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 		}
 	}
 
-	// Index every file by content id, regardless of logical status, so that
+	// Index every file by identity, regardless of logical status, so that
 	// soft-deleted contents are converged too (not only active ones).
-	filesByCalculatedID := make(map[string][]*model.File, len(files))
+	identityKey := func(f *model.File) string {
+		if f == nil {
+			return ""
+		}
+		if f.GoogleDriveMD5 != "" {
+			return "md5:" + f.GoogleDriveMD5
+		}
+		if f.Path != "" {
+			return "path:" + f.Path
+		}
+		return ""
+	}
+	filesByIdentity := make(map[string][]*model.File, len(files))
 	for _, f := range files {
-		if f.CalculatedID == "" {
+		key := identityKey(f)
+		if key == "" {
 			continue
 		}
-		filesByCalculatedID[f.CalculatedID] = append(filesByCalculatedID[f.CalculatedID], f)
+		filesByIdentity[key] = append(filesByIdentity[key], f)
 	}
 
 	softPathWin := strings.ReplaceAll(softDeletedPath, "/", "\\")
@@ -1410,18 +1390,19 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 	}
 
 	// Seed intents with Google's authoritative verdict. Google always wins.
-	intents := make(map[string]statusIntent, len(filesByCalculatedID))
-	for cid, v := range googleVerdict {
-		intents[cid] = v
+	intents := make(map[string]statusIntent, len(filesByIdentity))
+	for key, v := range googleVerdict {
+		intents[key] = v
 	}
 
 	// Fallback only for contents where Google has no opinion: derive the intent
 	// from the main account replica / logical path as before.
 	for _, f := range files {
-		if f.Status != "active" || f.CalculatedID == "" {
+		key := identityKey(f)
+		if f.Status != "active" || key == "" {
 			continue
 		}
-		if _, decided := googleVerdict[f.CalculatedID]; decided {
+		if _, decided := googleVerdict[key]; decided {
 			continue
 		}
 
@@ -1432,7 +1413,7 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 				continue
 			}
 
-			intent := intents[f.CalculatedID]
+			intent := intents[key]
 
 			if inSoftDeleted {
 				intent.Status = "soft-deleted"
@@ -1444,7 +1425,7 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 				}
 			}
 
-			intents[f.CalculatedID] = intent
+			intents[key] = intent
 		}
 	}
 
@@ -1452,8 +1433,8 @@ func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath stri
 	// Use bounded concurrency to avoid flooding network
 	sem := make(chan struct{}, 4)
 
-	for calculatedID, intent := range intents {
-		fileSet := filesByCalculatedID[calculatedID]
+	for key, intent := range intents {
+		fileSet := filesByIdentity[key]
 		for _, f := range fileSet {
 			for _, replica := range f.Replicas {
 				if replica.Status != "active" || isMainReplica(replica, mainAccounts) {
@@ -1938,7 +1919,13 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 				if file == nil {
 					continue
 				}
-				if v, ok := googleVerdict[file.CalculatedID]; ok && v.Status == "soft-deleted" {
+				identityKey := ""
+				if file.GoogleDriveMD5 != "" {
+					identityKey = "md5:" + file.GoogleDriveMD5
+				} else if file.Path != "" {
+					identityKey = "path:" + file.Path
+				}
+				if v, ok := googleVerdict[identityKey]; ok && v.Status == "soft-deleted" {
 					goto nextPath
 				}
 			}
@@ -1961,7 +1948,7 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 						continue
 					}
 
-					if providerHasCalculatedID(providerFiles, sourceFile.CalculatedID) {
+					if providerHasMatchingIdentity(providerFiles, sourceFile) {
 						continue
 					}
 
@@ -1995,11 +1982,11 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 					}
 
 					existingFile := providerFiles[0]
-					if existingFile.CalculatedID == sourceFile.CalculatedID {
+					if providerHasMatchingIdentity([]*model.File{existingFile}, sourceFile) {
 						continue
 					}
 
-					logger.Warning("Conflict detected for %s in %s (CalculatedID mismatch)", sourceFile.Path, provider)
+					logger.Warning("Conflict detected for %s in %s (identity mismatch)", sourceFile.Path, provider)
 
 					ext := filepath.Ext(sourceFile.Name)
 					nameWithoutExt := strings.TrimSuffix(sourceFile.Name, ext)
@@ -2333,9 +2320,6 @@ func (r *Runner) refreshShortcutTargets(targets []shortcutRefreshTarget) error {
 				replica.Path = target.Path
 				replica.Name = file.Name
 				replica.AccountID = target.AccountID
-				if replica.CalculatedID == "" {
-					replica.CalculatedID = file.CalculatedID
-				}
 				if err := r.db.UpsertReplicaByNativeID(replica, refreshStart.Unix()); err != nil {
 					return fmt.Errorf("failed to upsert refreshed shortcut replica for %s: %w", target.Path, err)
 				}
@@ -2691,23 +2675,14 @@ func (r *Runner) ProcessHardDeletes() error {
 
 	logger.Info("Checking %d soft-deleted files for hard deletion...", len(files))
 
-	// Pre-fetch active Google replica statuses for all calculated_ids to avoid N+1 queries
-	calcIDs := make([]string, 0, len(files))
 	for _, file := range files {
-		if file.CalculatedID != "" {
-			calcIDs = append(calcIDs, file.CalculatedID)
+		identity := file.GoogleDriveMD5
+		if identity == "" {
+			identity = file.Path
 		}
-	}
-
-	activeGoogleMap, err := r.db.GetActiveGoogleCalculatedIDsOutsideSoftDeletedBulk(calcIDs)
-	if err != nil {
-		logger.Warning("Failed to bulk fetch active Google replicas, falling back to individual queries: %v", err)
-	}
-
-	for _, file := range files {
 		// DEBUG: Log file state for hard delete analysis
-		logger.Info("[DEBUG-HD] File ID=%s, Path=%s, CalcID=%s, Status=%s, Replicas=%d",
-			file.ID, file.Path, file.CalculatedID, file.Status, len(file.Replicas))
+		logger.Info("[DEBUG-HD] File ID=%s, Path=%s, Identity=%s, Status=%s, Replicas=%d",
+			file.ID, file.Path, identity, file.Status, len(file.Replicas))
 		for _, rep := range file.Replicas {
 			logger.Info("[DEBUG-HD]   Replica ID=%d, Provider=%s, Account=%s, NativeID=%s, Status=%s, Path=%s, FileID=%s",
 				rep.ID, rep.Provider, rep.AccountID, rep.NativeID, rep.Status, rep.Path, rep.FileID)
@@ -2724,33 +2699,8 @@ func (r *Runner) ProcessHardDeletes() error {
 
 		logger.Info("[DEBUG-HD] hasGoogleReplica=%v for %s", hasGoogleReplica, file.Path)
 
-		// Safety check: query DB directly by calculated_id to catch cases where
-		// replicas may not be linked to this file record (file_id mismatch after moves)
-		if !hasGoogleReplica && file.CalculatedID != "" {
-			var found bool
-			var err error
-			if activeGoogleMap != nil {
-				found = activeGoogleMap[file.CalculatedID]
-			} else {
-				found, err = r.db.HasActiveGoogleReplicaOutsideSoftDeleted(file.CalculatedID)
-			}
-			logger.Info("[DEBUG-HD] Safety check HasActiveGoogleReplicaOutsideSoftDeleted(%s) = %v, err=%v", file.CalculatedID, found, err)
-			if err != nil {
-				logger.Warning("Failed safety check for %s: %v", file.Path, err)
-			} else if found {
-				// There's an active Google replica for this content outside soft-deleted.
-				// The file was likely restored; mark as active instead of hard-deleting.
-				logger.Info("Skipping hard delete for %s: active Google replica found by calculated_id (likely restored)", file.Path)
-				file.Status = "active"
-				if err := r.db.UpdateFile(file); err != nil {
-					logger.Error("Failed to update file status for %s: %v", file.Path, err)
-				}
-				continue
-			}
-		}
-
 		if !hasGoogleReplica {
-			logger.Info("Detected Hard Delete for %s (CalculatedID: %s). Propagating...", file.Path, file.CalculatedID)
+			logger.Info("Detected Hard Delete for %s (Identity: %s). Propagating...", file.Path, identity)
 
 			// 1. Mark as deleted in DB
 			file.Status = "deleted"
@@ -2904,7 +2854,7 @@ func (r *Runner) getUser(provider model.Provider, accountID string) *model.User 
 
 // checkSoftDeletedConsistency ensures that if a file is in soft-deleted in one provider, it moves it there for others.
 func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Provider][]*model.File, softDeletedPath string, syncRunID int64) error {
-	// Map CalculatedID -> SoftDeletedFile (if exists)
+	// Map identity -> soft-deleted file (if exists)
 	softDeletedIDs := make(map[string]*model.File)
 
 	var doneCopies map[string]bool
@@ -2922,7 +2872,13 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 			for _, files := range fileMap {
 				for _, f := range files {
 					if f != nil {
-						softDeletedIDs[f.CalculatedID] = f
+						identity := f.GoogleDriveMD5
+						if identity == "" {
+							identity = f.Path
+						}
+						if identity != "" {
+							softDeletedIDs[identity] = f
+						}
 						break
 					}
 				}
@@ -2938,13 +2894,17 @@ func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Pr
 
 		for provider, files := range fileMap {
 			for _, file := range files {
-				target, ok := softDeletedIDs[file.CalculatedID]
+				identity := file.GoogleDriveMD5
+				if identity == "" {
+					identity = file.Path
+				}
+				target, ok := softDeletedIDs[identity]
 				if !ok {
 					continue
 				}
 
 				// Found a file that should be soft deleted
-				logger.Info("File %s (CalculatedID: %s) found in %s but soft-deleted in another provider. Moving to soft-deleted.", path, file.CalculatedID, provider)
+				logger.Info("File %s (Identity: %s) found in %s but soft-deleted in another provider. Moving to soft-deleted.", path, identity, provider)
 
 				// Calculate target path
 				// "cloud-drives-sync-aux/soft-deleted" is relative to sync root.

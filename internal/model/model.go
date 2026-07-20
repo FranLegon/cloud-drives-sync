@@ -1,15 +1,9 @@
 package model
 
 import (
-	"strconv"
 	"strings"
 	"time"
 )
-
-// GenerateCalculatedID creates a standard deduplication ID
-func GenerateCalculatedID(name string, size int64) string {
-	return name + "-" + strconv.FormatInt(size, 10)
-}
 
 // NormalizePath ensures standard forward-slash separators
 func NormalizePath(p string) string {
@@ -106,7 +100,6 @@ type File struct {
 	Path           string     // Logical relative path
 	Name           string     // Filename
 	Size           int64      // File size in bytes
-	CalculatedID   string     // CONCAT(name, '-', size) for deduplication
 	GoogleDriveMD5 string     // Canonical cross-provider identity (SPEC): Google Drive MD5
 	ModTime        time.Time  // Modification timestamp
 	Status         string     // active, soft-deleted, deleted
@@ -115,21 +108,20 @@ type File struct {
 
 // Replica represents a physical copy of a file on a cloud provider
 type Replica struct {
-	ID           int64              `json:"id"`
-	FileID       string             `json:"file_id"`
-	CalculatedID string             `json:"calculated_id"`
-	Path         string             `json:"path"`
-	Name         string             `json:"name"`
-	Size         int64              `json:"size"`
-	Provider     Provider           `json:"provider"`
-	AccountID    string             `json:"account_id"`
-	NativeID     string             `json:"native_id"`
-	NativeHash   string             `json:"native_hash"`
-	ModTime      time.Time          `json:"mod_time"`
-	Status       string             `json:"status"`
-	Fragmented   bool               `json:"fragmented"`
-	Owner        string             `json:"owner"`
-	Fragments    []*ReplicaFragment `json:"-"`
+	ID         int64              `json:"id"`
+	FileID     string             `json:"file_id"`
+	Path       string             `json:"path"`
+	Name       string             `json:"name"`
+	Size       int64              `json:"size"`
+	Provider   Provider           `json:"provider"`
+	AccountID  string             `json:"account_id"`
+	NativeID   string             `json:"native_id"`
+	NativeHash string             `json:"native_hash"`
+	ModTime    time.Time          `json:"mod_time"`
+	Status     string             `json:"status"`
+	Fragmented bool               `json:"fragmented"`
+	Owner      string             `json:"owner"`
+	Fragments  []*ReplicaFragment `json:"-"`
 }
 
 // ReplicaFragment represents a part of a split file (Telegram)

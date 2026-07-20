@@ -65,10 +65,10 @@ func TestConfigModel(t *testing.T) {
 
 func TestFileModel(t *testing.T) {
 	file := File{
-		ID:           "file-123",
-		Name:         "test.txt",
-		Size:         1024,
-		CalculatedID: "test.txt-1024",
+		ID:             "file-123",
+		Name:           "test.txt",
+		Size:           1024,
+		GoogleDriveMD5: "md5-123",
 	}
 
 	if file.ID != "file-123" {
@@ -77,8 +77,8 @@ func TestFileModel(t *testing.T) {
 	if file.Size != 1024 {
 		t.Error("File size not set correctly")
 	}
-	if file.CalculatedID != "test.txt-1024" {
-		t.Error("File CalculatedID not set correctly")
+	if file.GoogleDriveMD5 != "md5-123" {
+		t.Error("File GoogleDriveMD5 not set correctly")
 	}
 }
 

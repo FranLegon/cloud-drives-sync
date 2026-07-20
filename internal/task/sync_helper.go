@@ -432,14 +432,9 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 			nativeHash = uploadedFile.Replicas[0].NativeHash
 		}
 
-		// Use the provider's own CalculatedID (GenerateCalculatedID(name,size)) so it matches
-		// what the metadata scan will return, keeping the replica idempotent across scans.
-		calculatedID := uploadedFile.CalculatedID
-		if calculatedID == "" {
-			calculatedID = masterFile.CalculatedID
-		}
-		if calculatedID == "" {
-			calculatedID = masterFile.GoogleDriveMD5
+		googleDriveMD5 := masterFile.GoogleDriveMD5
+		if googleDriveMD5 == "" && uploadedFile.GoogleDriveMD5 != "" {
+			googleDriveMD5 = uploadedFile.GoogleDriveMD5
 		}
 
 		// For conflict copies (targetName != masterFile.Name), create a new logical file so
@@ -455,13 +450,13 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 			}
 			conflictPath = model.NormalizePath(dir + "/" + finalName)
 			conflictFile := &model.File{
-				ID:           uuid.New().String(),
-				Path:         conflictPath,
-				Name:         finalName,
-				Size:         uploadedFile.Size,
-				CalculatedID: calculatedID,
-				ModTime:      modTime,
-				Status:       "active",
+				ID:             uuid.New().String(),
+				Path:           conflictPath,
+				Name:           finalName,
+				Size:           uploadedFile.Size,
+				GoogleDriveMD5: googleDriveMD5,
+				ModTime:        modTime,
+				Status:         "active",
 			}
 			if dbErr := r.db.InsertFile(conflictFile); dbErr != nil {
 				logger.Warning("Failed to create logical file for conflict copy %s: %v", finalName, dbErr)
@@ -471,19 +466,18 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		}
 
 		newReplica := &model.Replica{
-			FileID:       fileID,
-			CalculatedID: calculatedID,
-			Path:         conflictPath,
-			Name:         uploadedFile.Name,
-			Size:         uploadedFile.Size,
-			Status:       "active",
-			Provider:     targetProvider,
-			AccountID:    accountID,
-			NativeID:     nativeID,
-			NativeHash:   nativeHash,
-			ModTime:      modTime,
-			Fragmented:   false,
-			Owner:        accountID,
+			FileID:     fileID,
+			Path:       conflictPath,
+			Name:       uploadedFile.Name,
+			Size:       uploadedFile.Size,
+			Status:     "active",
+			Provider:   targetProvider,
+			AccountID:  accountID,
+			NativeID:   nativeID,
+			NativeHash: nativeHash,
+			ModTime:    modTime,
+			Fragmented: false,
+			Owner:      accountID,
 		}
 
 		if len(uploadedFile.Replicas) > 0 {
@@ -662,20 +656,16 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 	// Microsoft shortcut usually has size 0 in our model unless we fetched it.
 
 	newReplica := &model.Replica{
-		FileID:       sourceFile.ID,
-		CalculatedID: sourceFile.GoogleDriveMD5,
-		Path:         sourceFile.Path,
-		Name:         shortcut.Name,
-		Size:         shortcut.Size,
-		Provider:     targetUser.Provider,
-		AccountID:    accountID,
-		NativeID:     shortcut.ID,
-		ModTime:      time.Now(),
-		Status:       "active",
-		Owner:        accountID,
-	}
-	if newReplica.CalculatedID == "" {
-		newReplica.CalculatedID = sourceFile.CalculatedID
+		FileID:    sourceFile.ID,
+		Path:      sourceFile.Path,
+		Name:      shortcut.Name,
+		Size:      shortcut.Size,
+		Provider:  targetUser.Provider,
+		AccountID: accountID,
+		NativeID:  shortcut.ID,
+		ModTime:   time.Now(),
+		Status:    "active",
+		Owner:     accountID,
 	}
 	// Copy NativeHash from the shortcut/placeholder replica so the DB reflects
 	// whether this is a real shortcut (NativeHashShortcut) or a real copy.
