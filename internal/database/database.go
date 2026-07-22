@@ -760,8 +760,9 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 
 		query := `
 			UPDATE replicas
-			SET account_id = ?
+			SET account_id = ?, owner = ?
 			WHERE provider = ? AND account_id = ? AND native_id = ?
+			  AND (account_id IS NOT ? OR owner IS NOT ?)
 		`
 		updateStmt, err := db.txStmt(tx, query)
 		if err != nil {
@@ -769,7 +770,7 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 		}
 		defer updateStmt.Close()
 
-		res, err := updateStmt.Exec(newAccountID, provider, oldAccountID, nativeID)
+		res, err := updateStmt.Exec(newAccountID, newAccountID, provider, oldAccountID, nativeID, newAccountID, newAccountID)
 		if err != nil {
 			return fmt.Errorf("failed to update replica owner: %w", err)
 		}
@@ -779,6 +780,21 @@ func (db *DB) UpdateReplicaOwner(provider string, oldAccountID, nativeID, newAcc
 			return fmt.Errorf("failed to get rows affected: %w", err)
 		}
 		if rows == 0 {
+			var alreadyUpdated int
+			alreadyUpdatedQuery := `SELECT 1 FROM replicas WHERE provider = ? AND account_id = ? AND native_id = ? AND owner = ?`
+			alreadyUpdatedStmt, stmtErr := db.txStmt(tx, alreadyUpdatedQuery)
+			if stmtErr != nil {
+				return fmt.Errorf("failed to prepare already-updated check statement: %w", stmtErr)
+			}
+			defer alreadyUpdatedStmt.Close()
+
+			checkErr := alreadyUpdatedStmt.QueryRow(provider, newAccountID, nativeID, newAccountID).Scan(&alreadyUpdated)
+			if checkErr == nil && alreadyUpdated == 1 {
+				return nil
+			}
+			if checkErr != nil && checkErr != sql.ErrNoRows {
+				return fmt.Errorf("failed to verify already-updated replica: %w", checkErr)
+			}
 			return fmt.Errorf("no replica found to update (prov=%s, acc=%s, id=%s)", provider, oldAccountID, nativeID)
 		}
 		return nil

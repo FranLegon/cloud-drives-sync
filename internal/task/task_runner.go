@@ -707,6 +707,7 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 			logger.InfoTagged(source.User.LogTags(), "Account is over quota, looking for files to move...")
 
 			// Filter files owned by user and sort by size (descending)
+			sourceAccountID := source.User.GetAccountID()
 			candidates := make([]*model.File, 0, len(files))
 			for _, f := range files {
 				if f.Status != "active" {
@@ -714,7 +715,7 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				}
 				// Check if any active replica belongs to the source user's account
 				for _, replica := range f.Replicas {
-					if replica.Status == "active" && (replica.AccountID == source.User.Email || replica.AccountID == source.User.Phone) {
+					if replica.Status == "active" && replica.AccountID == sourceAccountID {
 						candidates = append(candidates, f)
 						break
 					}
@@ -773,20 +774,21 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				// Find the active replica for this source account
 				var sourceReplica *model.Replica
 				for _, replica := range file.Replicas {
-					if replica.Status == "active" && (replica.AccountID == source.User.Email || replica.AccountID == source.User.Phone) {
+					if replica.Status == "active" && replica.AccountID == sourceAccountID {
 						sourceReplica = replica
 						break
 					}
 				}
 
 				if sourceReplica == nil {
-					logger.Warning("Replica not found path=%q provider=%s account=%s", file.Path, provider, source.User.Email)
+					logger.Warning("Replica not found path=%q provider=%s account=%s", file.Path, provider, sourceAccountID)
 					continue
 				}
 
 				// Move file (Transfer Ownership)
 				if !r.safeMode {
-					logger.InfoTagged(source.User.LogTags(), "Transferring path=%q (%d bytes) to target=%s", file.Path, file.Size, target.User.Email)
+					targetAccountID := target.User.GetAccountID()
+					logger.InfoTagged(source.User.LogTags(), "Transferring path=%q (%d bytes) to target=%s", file.Path, file.Size, targetAccountID)
 					err := r.transferOwnershipWithFallback(source.Client, target.Client, target, file, sourceReplica.NativeID, source.User.LogTags())
 					if err != nil {
 						logger.Error("Failed to transfer ownership: %v", err)
@@ -794,8 +796,8 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 					}
 
 					// Update database to reflect ownership change
-					if err := r.db.UpdateReplicaOwner(string(provider), source.User.Email, sourceReplica.NativeID, target.User.Email); err != nil {
-						logger.Warning("DB update owner failed path=%q provider=%s account=%s native_id=%s: %v", file.Path, provider, source.User.Email, sourceReplica.NativeID, err)
+					if err := r.db.UpdateReplicaOwner(string(provider), sourceAccountID, sourceReplica.NativeID, targetAccountID); err != nil {
+						logger.Warning("DB update owner failed path=%q provider=%s account=%s native_id=%s: %v", file.Path, provider, sourceAccountID, sourceReplica.NativeID, err)
 					}
 				} else {
 					logger.DryRunTagged(source.User.LogTags(), "Would transfer path=%q (%d bytes) to target=%s", file.Path, file.Size, target.User.Email)
@@ -978,7 +980,9 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 		}
 
 		if !r.safeMode {
-			logger.InfoTagged([]string{"Google", mainUser.Email}, "Transferring path=%q (%d bytes) to target=%s", file.Path, file.Size, target.User.Email)
+			targetAccountID := target.User.GetAccountID()
+			mainAccountID := mainUser.GetAccountID()
+			logger.InfoTagged([]string{"Google", mainUser.Email}, "Transferring path=%q (%d bytes) to target=%s", file.Path, file.Size, targetAccountID)
 			err := r.transferOwnershipWithFallback(mainClient, target.Client, target, file, mainReplica.NativeID, []string{"Google", mainUser.Email})
 
 			fallbackUsed := false
@@ -1001,8 +1005,8 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 
 			if err == nil && !fallbackUsed {
 				// Update database to reflect ownership change for standard transfer
-				if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainUser.Email, mainReplica.NativeID, target.User.Email); dbErr != nil {
-					logger.Warning("DB update owner failed path=%q provider=Google account=%s native_id=%s target=%s: %v", file.Path, mainUser.Email, mainReplica.NativeID, target.User.Email, dbErr)
+				if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainAccountID, mainReplica.NativeID, targetAccountID); dbErr != nil {
+					logger.Warning("DB update owner failed path=%q provider=Google account=%s native_id=%s target=%s: %v", file.Path, mainAccountID, mainReplica.NativeID, targetAccountID, dbErr)
 				}
 				filesMoved = true
 			}

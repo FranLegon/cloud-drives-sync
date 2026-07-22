@@ -192,26 +192,27 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				Status:         "active",
 			}
 
-			// Create the replica for this file
+			ownerEmail := c.user.Email
+			if len(f.Owners) > 0 && strings.TrimSpace(f.Owners[0].EmailAddress) != "" {
+				ownerEmail = f.Owners[0].EmailAddress
+			}
+
+			// Create the replica for this file. For Google, track the canonical owner
+			// account rather than the viewing/shared account so ownership transfers do
+			// not oscillate between scans when the same native file is visible to many users.
 			replica := &model.Replica{
 				FileID:     "", // Will be set when linking to logical file
 				Path:       "", // Path will be set by caller
 				Name:       f.Name,
 				Size:       f.Size,
 				Provider:   model.ProviderGoogle,
-				AccountID:  c.user.Email,
+				AccountID:  ownerEmail,
 				NativeID:   f.Id,
 				NativeHash: f.Md5Checksum,
 				ModTime:    modTime,
 				Status:     "active",
 				Fragmented: false,
-			}
-
-			if len(f.Owners) > 0 {
-				replica.Owner = f.Owners[0].EmailAddress
-			} else {
-				// Fallback, assume account is owner if not specified (unlikely for Google)
-				replica.Owner = c.user.Email
+				Owner:      ownerEmail,
 			}
 
 			file.Replicas = []*model.Replica{replica}
