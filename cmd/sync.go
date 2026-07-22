@@ -99,18 +99,9 @@ func SyncAction(runner *task.Runner, isSafeMode bool) error {
 		logger.Info("[Step 3/6] Skipping Free Main (already completed)")
 	}
 
-	// 4. Remove Duplicates
+	// 4. Remove Duplicates (legacy step removed)
 	if startStep <= 4 {
-		logger.Info("[Step 4/6] Removing Duplicates...")
-		if isSafeMode {
-			if err := RemoveDuplicatesAction(runner, false); err != nil {
-				return err
-			}
-		} else {
-			if err := RemoveDuplicatesUnsafeAction(runner, false); err != nil {
-				return err
-			}
-		}
+		logger.Info("[Step 4/6] Skipping Remove Duplicates (legacy step removed)")
 		if err := db.MarkStepCompleted(syncRunID, 4); err != nil {
 			logger.Warning("Failed to checkpoint step 4: %v", err)
 		}
