@@ -485,12 +485,52 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 			newReplica.Fragments = uploadedFile.Replicas[0].Fragments
 		}
 
-		if err := r.db.InsertReplica(newReplica); err != nil {
-			logger.Error("Failed to insert new replica to DB path=%q provider=%s native_id=%s: %v", masterFile.Path, targetProvider, nativeID, err)
-		} else {
-			// Update in-memory masterFile to include new replica
-			masterFile.Replicas = append(masterFile.Replicas, newReplica)
+		reusedReplica := false
+		if targetProvider == model.ProviderTelegram && finalName == masterFile.Name {
+			replicas, repErr := r.db.GetReplicas(fileID)
+			if repErr != nil {
+				logger.Warning("Failed to load replicas for Telegram restore reuse path=%q: %v", masterFile.Path, repErr)
+			} else {
+				for _, existingReplica := range replicas {
+					if existingReplica.Provider != targetProvider || existingReplica.AccountID != accountID || existingReplica.Status != "deleted" {
+						continue
+					}
+					existingReplica.Path = conflictPath
+					existingReplica.Name = uploadedFile.Name
+					existingReplica.Size = uploadedFile.Size
+					existingReplica.Status = "active"
+					existingReplica.NativeID = nativeID
+					existingReplica.NativeHash = nativeHash
+					existingReplica.ModTime = modTime
+					existingReplica.Fragmented = newReplica.Fragmented
+					existingReplica.Fragments = newReplica.Fragments
+					existingReplica.Owner = accountID
+					if err := r.db.UpdateReplica(existingReplica); err != nil {
+						logger.Warning("Failed to reuse deleted Telegram replica path=%q provider=%s native_id=%s: %v", masterFile.Path, targetProvider, nativeID, err)
+					} else {
+						for i, rep := range masterFile.Replicas {
+							if rep.ID == existingReplica.ID {
+								masterFile.Replicas[i] = existingReplica
+								break
+							}
+						}
+						reusedReplica = true
+						break
+					}
+				}
+			}
+		}
 
+		if !reusedReplica {
+			if err := r.db.InsertReplica(newReplica); err != nil {
+				logger.Error("Failed to insert new replica to DB path=%q provider=%s native_id=%s: %v", masterFile.Path, targetProvider, nativeID, err)
+			} else {
+				// Update in-memory masterFile to include new replica
+				masterFile.Replicas = append(masterFile.Replicas, newReplica)
+			}
+		}
+
+		if reusedReplica || newReplica.ID != 0 {
 			// Checkpoint successful copy for crash recovery
 			if syncRunID > 0 {
 				if err := r.db.LogSyncCopy(syncRunID, masterFile.ID, string(targetProvider)); err != nil {

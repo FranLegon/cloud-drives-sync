@@ -1900,6 +1900,7 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 
 	// Phase 1 and 2: Handle soft-deleted placements and collect copy jobs
 	jobs := make([]copyJob, 0, len(filesByPath))
+	scheduledJobs := make(map[string]struct{})
 
 	for path, fileMap := range filesByPath {
 		if strings.Contains(path, softDeletedPath) {
@@ -1970,6 +1971,11 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 							}
 							logger.DryRun("Would copy %s from %s to %s", sourceFile.Path, sourceProvider, provider)
 						} else {
+							jobKey := sourceFile.ID + "\x00" + string(provider) + "\x00"
+							if _, exists := scheduledJobs[jobKey]; exists {
+								continue
+							}
+							scheduledJobs[jobKey] = struct{}{}
 							jobs = append(jobs, copyJob{
 								masterFile: sourceFile,
 								provider:   provider,
@@ -1997,6 +2003,11 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 						logger.DryRun("Would resolve conflict by uploading %s as %s to %s", sourceFile.Path, conflictName, provider)
 					} else {
 						logger.Info("Resolving conflict by uploading as %s", conflictName)
+						jobKey := sourceFile.ID + "\x00" + string(provider) + "\x00" + conflictName
+						if _, exists := scheduledJobs[jobKey]; exists {
+							continue
+						}
+						scheduledJobs[jobKey] = struct{}{}
 						jobs = append(jobs, copyJob{
 							masterFile: sourceFile,
 							provider:   provider,
