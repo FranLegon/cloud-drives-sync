@@ -713,9 +713,20 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				if f.Status != "active" {
 					continue
 				}
-				// Check if any active replica belongs to the source user's account
+				// For Google, use canonical owner to avoid rebalancing the same shared file on every sync.
+				// Other providers still use the account-local replica identity.
 				for _, replica := range f.Replicas {
-					if replica.Status == "active" && replica.AccountID == sourceAccountID {
+					if replica.Status != "active" {
+						continue
+					}
+					if provider == model.ProviderGoogle {
+						if replica.Owner == source.User.Email {
+							candidates = append(candidates, f)
+							break
+						}
+						continue
+					}
+					if replica.AccountID == sourceAccountID {
 						candidates = append(candidates, f)
 						break
 					}
@@ -774,7 +785,17 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				// Find the active replica for this source account
 				var sourceReplica *model.Replica
 				for _, replica := range file.Replicas {
-					if replica.Status == "active" && replica.AccountID == sourceAccountID {
+					if replica.Status != "active" {
+						continue
+					}
+					if provider == model.ProviderGoogle {
+						if replica.Owner == source.User.Email {
+							sourceReplica = replica
+							break
+						}
+						continue
+					}
+					if replica.AccountID == sourceAccountID {
 						sourceReplica = replica
 						break
 					}
