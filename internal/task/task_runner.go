@@ -542,9 +542,9 @@ func (r *Runner) scanFolder(client api.CloudClient, user *model.User, folderID, 
 	return nil
 }
 
-// CheckForDuplicates is no longer supported because calculated_id-based duplicate detection was removed.
+// CheckForDuplicates is no longer supported because the legacy duplicate detection flow was removed.
 func (r *Runner) CheckForDuplicates() error {
-	return fmt.Errorf("duplicate checking is no longer supported: calculated_id has been removed")
+	return fmt.Errorf("duplicate checking is no longer supported: legacy duplicate detection has been removed")
 }
 
 // CheckTokens validates all tokens

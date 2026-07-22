@@ -1975,24 +1975,6 @@ func (db *DB) DeleteStaleReplicasByNativeID(provider model.Provider, oldNativeID
 	})
 }
 
-// Use db.conn.Query directly to avoid caching dynamic queries in db.stmtCache, preventing a prepared statement memory leak.
-		rows, err := db.conn.Query(query, args...)
-		if err != nil {
-			return nil, err
-		}
-
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err == nil {
-				result[id] = true
-			}
-		}
-		rows.Close()
-	}
-
-	return result, nil
-}
-
 // UpdateSoftDeletedFileStatus marks files as softdeleted or active based on replica locations
 // Priority: Google provider state takes precedence when replicas disagree
 // Only considers recently scanned replicas (last_seen_at >= query start time)
@@ -2044,26 +2026,32 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 		}
 
 		// Second pass: catch files that remain 'soft-deleted' due to file_id linkage issues
-		// by checking replicas via calculated_id (content-based match)
+		// by checking Google replicas against canonical file identity.
 		fallbackQuery := fmt.Sprintf(`
 		WITH LatestActive AS (
-			SELECT calculated_id, path,
-				ROW_NUMBER() OVER(PARTITION BY calculated_id ORDER BY mod_time DESC) as rn
-			FROM replicas
-			WHERE status = 'active'
-			AND provider = 'google'
-			AND last_seen_at >= ?
-			AND path NOT LIKE '%%%s%%'
-			AND path NOT LIKE '%%%s%%'
+			SELECT
+				r.file_id,
+				r.path,
+				ROW_NUMBER() OVER(
+					PARTITION BY r.file_id
+					ORDER BY r.mod_time DESC
+				) as rn
+			FROM replicas r
+			WHERE r.status = 'active'
+			AND r.provider = 'google'
+			AND r.file_id IS NOT NULL
+			AND r.file_id != ''
+			AND r.last_seen_at >= ?
+			AND r.path NOT LIKE '%%%s%%'
+			AND r.path NOT LIKE '%%%s%%'
 		)
 		UPDATE files
 		SET status = 'active',
 			path = COALESCE(la.path, files.path)
 		FROM LatestActive la
-		WHERE files.calculated_id = la.calculated_id
+		WHERE files.id = la.file_id
 		AND la.rn = 1
 		AND files.status = 'soft-deleted'
-		AND (files.calculated_id != '' AND files.calculated_id IS NOT NULL)
 		`, softDeletedPattern, softDeletedPatternWin)
 
 		fallbackStmt, err := db.txStmt(tx, fallbackQuery)

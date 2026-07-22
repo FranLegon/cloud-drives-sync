@@ -12,7 +12,7 @@ func runRemoveDuplicates(cmd *cobra.Command, args []string) error {
 }
 
 func RemoveDuplicatesAction(runner *task.Runner, updateMetadata bool) error {
-	return fmt.Errorf("remove-duplicates is no longer supported: calculated_id has been removed")
+	return fmt.Errorf("remove-duplicates is no longer supported: legacy duplicate detection has been removed")
 }
 
 func runRemoveDuplicatesUnsafe(cmd *cobra.Command, args []string) error {
@@ -20,5 +20,5 @@ func runRemoveDuplicatesUnsafe(cmd *cobra.Command, args []string) error {
 }
 
 func RemoveDuplicatesUnsafeAction(runner *task.Runner, updateMetadata bool) error {
-	return fmt.Errorf("remove-duplicates-unsafe is no longer supported: calculated_id has been removed")
+	return fmt.Errorf("remove-duplicates-unsafe is no longer supported: legacy duplicate detection has been removed")
 }
