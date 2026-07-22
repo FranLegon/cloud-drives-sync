@@ -97,8 +97,7 @@ func (c *Client) PreFlightCheck() error {
 	// Check if folder is in root, if not move it
 	if len(folder.Parents) > 0 {
 		logger.InfoTagged([]string{"Google", c.user.Email}, "Moving sync folder to root")
-		_, err := c.service.Files.Update(folder.Id, &drive.File{}).AddParents("root").RemoveParents(folder.Parents[0]).Do()
-		if err != nil {
+		if _, err := c.service.Files.Update(folder.Id, &drive.File{}).AddParents("root").RemoveParents(folder.Parents[0]).Do(); err != nil {
 			logger.WarningTagged([]string{"Google", c.user.Email}, "Failed to move folder to root: %v", err)
 		}
 	}
@@ -192,27 +191,26 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				Status:         "active",
 			}
 
-			ownerEmail := c.user.Email
-			if len(f.Owners) > 0 && strings.TrimSpace(f.Owners[0].EmailAddress) != "" {
-				ownerEmail = f.Owners[0].EmailAddress
-			}
-
-			// Create the replica for this file. For Google, track the canonical owner
-			// account rather than the viewing/shared account so ownership transfers do
-			// not oscillate between scans when the same native file is visible to many users.
+			// Create the replica for this file
 			replica := &model.Replica{
 				FileID:     "", // Will be set when linking to logical file
 				Path:       "", // Path will be set by caller
 				Name:       f.Name,
 				Size:       f.Size,
 				Provider:   model.ProviderGoogle,
-				AccountID:  ownerEmail,
+				AccountID:  c.user.Email,
 				NativeID:   f.Id,
 				NativeHash: f.Md5Checksum,
 				ModTime:    modTime,
 				Status:     "active",
 				Fragmented: false,
-				Owner:      ownerEmail,
+			}
+
+			if len(f.Owners) > 0 {
+				replica.Owner = f.Owners[0].EmailAddress
+			} else {
+				// Fallback, assume account is owner if not specified (unlikely for Google)
+				replica.Owner = c.user.Email
 			}
 
 			file.Replicas = []*model.Replica{replica}
