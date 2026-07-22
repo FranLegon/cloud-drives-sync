@@ -281,18 +281,13 @@ Exactly one action flag must be provided per invocation (action flags are mutual
 
 ### `sync` — operate and maintain the pool
 
-With no flags, runs the full workflow in order: sync-unsynced-files → quota check → free-main → remove-duplicates-unsafe
-(or interactive with `--safe`) → sync-providers → balance-storage. Individual flags run only that
-one operation.
+With no flags, runs the full workflow in order: sync-unsynced-files → quota check → free-main → sync-providers → balance-storage. Individual flags run only that one operation.
 
 | Flag | What it must accomplish |
 |---|---|
 | `--share-with-main` | Verify and repair access permissions so all backup accounts have the correct access to the shared structure. |
 | `--get-metadata` | Recursively scan every account's managed area and update the local database to match reality: all files, replicas, fragments, folders, shortcuts, and placeholders. **Google Drive is authoritative for paths:** when the same logical_file (matched by Google Drive MD5 or content fingerprint) exists at different paths across providers, the Google Drive replica's path becomes the canonical path in logical_files; all other replicas' paths in the replica table reflect their actual locations, but will be corrected on the next sync. |
 | `--quota` | Report used/available space per provider (aggregated), cross-check that usage fits within other providers' capacity. |
-| `--check-for-duplicates` | Refresh metadata, then report byte-identical files within the same provider, grouped. |
-| `--remove-duplicates` | Interactive: for each duplicate set, let the user choose which to delete. |
-| `--remove-duplicates-unsafe` | Automatic: keep the oldest copy per set, delete the rest without prompting. |
 | `--free-main` | Move all file content off the main account to the backup accounts with the most free space. Error if backups lack combined capacity. Never delete source before destination is confirmed. |
 | `--balance-storage` | When any backup account exceeds ~95% full, move its largest files to the emptiest backup account on the same provider until it drops below ~90%. Same provider only; Telegram (no quota) is exempt as a pressure source. |
 | `--sync-providers` | Apply all synchronization rules: fill gaps, resolve conflicts, propagate soft-deletions, restore lost replicas, mirror folder structure. |

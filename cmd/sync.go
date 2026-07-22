@@ -10,8 +10,8 @@ var syncCmd = &cobra.Command{
 	Use:   "sync",
 	Short: "Operate and maintain the pool",
 	Long: `With no action flag, runs the full synchronization workflow in order:
-  sync-unsynced-files -> quota -> free-main -> remove-duplicates
-  -> sync-providers -> balance-storage
+  sync-unsynced-files -> quota -> free-main -> sync-providers
+  -> balance-storage
 
 Provide exactly one action flag to run only that operation.`,
 	Annotations: map[string]string{

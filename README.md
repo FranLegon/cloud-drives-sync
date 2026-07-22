@@ -67,7 +67,7 @@ The tool exposes four top-level commands: `config`, `sync`, `test`, and `help`. 
 
 ### `sync` — operate and maintain the pool
 
-With no flag, runs the full workflow: `sync-unsynced-files → quota → free-main → remove-duplicates → sync-providers → balance-storage`.
+With no flag, runs the full workflow: `sync-unsynced-files → quota → free-main → sync-providers → balance-storage`.
 
 | Flag | Description | Standard | Auto |
 |---|---|:---:|:---:|
@@ -75,9 +75,6 @@ With no flag, runs the full workflow: `sync-unsynced-files → quota → free-ma
 | `--share-with-main` | Verify and repair share permissions with main accounts | ✓ | ✗ |
 | `--get-metadata` | Scan all providers and update the local metadata database | ✓ | ✗ |
 | `--quota` | Report used/available quota per provider | ✓ | ✗ |
-| `--check-for-duplicates` | Report duplicate files within each provider | ✓ | ✗ |
-| `--remove-duplicates` | Interactively remove duplicate files | ✓ | ✗ |
-| `--remove-duplicates-unsafe` | Automatically remove duplicates (keeps the oldest) | ✓ | ✗ |
 | `--free-main` | Move all file content off the main account to backups | ✓ | ✗ |
 | `--balance-storage` | Balance storage usage across backup accounts | ✓ | ✗ |
 | `--sync-providers` | Synchronize files across all providers | ✓ | ✗ |

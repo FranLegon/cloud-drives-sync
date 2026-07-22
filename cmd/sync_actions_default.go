@@ -9,16 +9,13 @@ import (
 )
 
 var (
-	syncShareWithMain       bool
-	syncGetMetadata         bool
-	syncQuota               bool
-	syncCheckForDuplicates  bool
-	syncRemoveDuplicates    bool
-	syncRemoveDuplicatesUns bool
-	syncFreeMain            bool
-	syncBalanceStorage      bool
-	syncSyncProviders       bool
-	syncUnsyncedFiles       bool
+	syncShareWithMain  bool
+	syncGetMetadata    bool
+	syncQuota          bool
+	syncFreeMain       bool
+	syncBalanceStorage bool
+	syncSyncProviders  bool
+	syncUnsyncedFiles  bool
 )
 
 // registerSyncActionFlags registers the mutually-exclusive sync action flags and the
@@ -29,9 +26,6 @@ func registerSyncActionFlags(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&syncShareWithMain, "share-with-main", false, "Verify and repair backup access to the shared structure")
 	cmd.Flags().BoolVar(&syncGetMetadata, "get-metadata", false, "Scan every account and update the local database")
 	cmd.Flags().BoolVar(&syncQuota, "quota", false, "Report used/available space per provider")
-	cmd.Flags().BoolVar(&syncCheckForDuplicates, "check-for-duplicates", false, "Report byte-identical files within the same provider")
-	cmd.Flags().BoolVar(&syncRemoveDuplicates, "remove-duplicates", false, "Interactively delete duplicates")
-	cmd.Flags().BoolVar(&syncRemoveDuplicatesUns, "remove-duplicates-unsafe", false, "Automatically keep the oldest copy and delete the rest")
 	cmd.Flags().BoolVar(&syncFreeMain, "free-main", false, "Move all file content off the main account to backups")
 	cmd.Flags().BoolVar(&syncBalanceStorage, "balance-storage", false, "Rebalance nearly-full backup accounts within a provider")
 	cmd.Flags().BoolVar(&syncSyncProviders, "sync-providers", false, "Apply all synchronization rules across providers")
@@ -50,9 +44,6 @@ func dispatchSyncAction(cmd *cobra.Command) (bool, error) {
 		{syncShareWithMain, runShareWithMain},
 		{syncGetMetadata, runGetMetadata},
 		{syncQuota, runQuota},
-		{syncCheckForDuplicates, runCheckForDuplicates},
-		{syncRemoveDuplicates, runRemoveDuplicates},
-		{syncRemoveDuplicatesUns, runRemoveDuplicatesUnsafe},
 		{syncFreeMain, runFreeMain},
 		{syncBalanceStorage, runBalanceStorage},
 		{syncSyncProviders, runSyncProviders},
