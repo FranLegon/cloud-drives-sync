@@ -486,22 +486,22 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 		}
 
 		reusedReplica := false
-		if targetProvider == model.ProviderTelegram && finalName == masterFile.Name {
+		if finalName == masterFile.Name {
 			replicas, repErr := r.db.GetReplicas(fileID)
 			if repErr != nil {
-				logger.Warning("Failed to load replicas for Telegram restore reuse path=%q: %v", masterFile.Path, repErr)
+				logger.Warning("Failed to load replicas for reuse path=%q provider=%s: %v", masterFile.Path, targetProvider, repErr)
 			} else {
 				for _, existingReplica := range replicas {
 					if existingReplica.Provider != targetProvider || existingReplica.AccountID != accountID || existingReplica.Status != "deleted" {
 						continue
 					}
 
-					// Telegram uploads create a new message/native ID. Reusing the old DB row is fine,
-					// but the old deleted row must not keep its stale native_id because metadata
-					// verification checks cloud presence by native_id. If another row already exists
-					// for the new native_id, retire the deleted row instead of updating into a unique
-					// conflict.
-					if currentReplica, lookupErr := r.db.GetReplicaByNativeID(targetProvider, nativeID); lookupErr == nil && currentReplica != nil {
+					// Recreated provider objects can receive a new native ID after delete+reupload,
+					// ownership transfer, or other replacement flows. Reusing the old DB row is fine,
+					// but only if the row already using the new native_id belongs to this same
+					// destination account. Other accounts may legitimately reference the same
+					// provider-native object ID.
+					if currentReplica, lookupErr := r.db.GetReplicaByNativeID(targetProvider, nativeID); lookupErr == nil && currentReplica != nil && currentReplica.AccountID == accountID {
 						if currentReplica.ID == existingReplica.ID {
 							currentReplica.Path = conflictPath
 							currentReplica.Name = uploadedFile.Name
@@ -513,7 +513,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 							currentReplica.Fragments = newReplica.Fragments
 							currentReplica.Owner = accountID
 							if err := r.db.UpdateReplica(currentReplica); err != nil {
-								logger.Warning("Failed to refresh Telegram replica path=%q provider=%s native_id=%s: %v", masterFile.Path, targetProvider, nativeID, err)
+								logger.Warning("Failed to refresh reused replica path=%q provider=%s account=%s native_id=%s: %v", masterFile.Path, targetProvider, accountID, nativeID, err)
 							} else {
 								for i, rep := range masterFile.Replicas {
 									if rep.ID == currentReplica.ID {
@@ -529,7 +529,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 						existingReplica.Status = "deleted"
 						existingReplica.ModTime = modTime
 						if err := r.db.UpdateReplica(existingReplica); err != nil {
-							logger.Warning("Failed to retire stale Telegram replica path=%q old_native_id=%s: %v", masterFile.Path, existingReplica.NativeID, err)
+							logger.Warning("Failed to retire stale deleted replica path=%q provider=%s account=%s old_native_id=%s: %v", masterFile.Path, targetProvider, accountID, existingReplica.NativeID, err)
 						}
 						continue
 					}
@@ -545,7 +545,7 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 					existingReplica.Fragments = newReplica.Fragments
 					existingReplica.Owner = accountID
 					if err := r.db.UpdateReplica(existingReplica); err != nil {
-						logger.Warning("Failed to reuse deleted Telegram replica path=%q provider=%s native_id=%s: %v", masterFile.Path, targetProvider, nativeID, err)
+						logger.Warning("Failed to reuse deleted replica path=%q provider=%s native_id=%s: %v", masterFile.Path, targetProvider, nativeID, err)
 					} else {
 						for i, rep := range masterFile.Replicas {
 							if rep.ID == existingReplica.ID {

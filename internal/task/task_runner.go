@@ -1996,7 +1996,7 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 							}
 							logger.DryRun("Would copy %s from %s to %s", sourceFile.Path, sourceProvider, provider)
 						} else {
-							jobKey := sourceFile.ID + "\x00" + string(provider) + "\x00"
+							jobKey := sourceFile.Path + "\x00" + string(provider) + "\x00"
 							if _, exists := scheduledJobs[jobKey]; exists {
 								continue
 							}
@@ -2028,7 +2028,7 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 						logger.DryRun("Would resolve conflict by uploading %s as %s to %s", sourceFile.Path, conflictName, provider)
 					} else {
 						logger.Info("Resolving conflict by uploading as %s", conflictName)
-						jobKey := sourceFile.ID + "\x00" + string(provider) + "\x00" + conflictName
+						jobKey := sourceFile.Path + "\x00" + string(provider) + "\x00" + conflictName
 						if _, exists := scheduledJobs[jobKey]; exists {
 							continue
 						}
