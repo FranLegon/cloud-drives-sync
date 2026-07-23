@@ -870,8 +870,8 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 }
 
 // AcceptOwnership accepts ownership
-func (c *Client) AcceptOwnership(fileID string) error {
-	return errors.New("not implemented - OneDrive doesn't support ownership acceptance")
+func (c *Client) AcceptOwnership(fileID string) (string, error) {
+	return "", errors.New("not implemented - OneDrive doesn't support ownership acceptance")
 }
 
 // FindSharedItem searches for a shared item in "Shared with me"

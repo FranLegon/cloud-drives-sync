@@ -1111,8 +1111,8 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 	return ErrNotSupported
 }
 
-func (c *Client) AcceptOwnership(fileID string) error {
-	return ErrNotSupported
+func (c *Client) AcceptOwnership(fileID string) (string, error) {
+	return "", ErrNotSupported
 }
 
 func (c *Client) GetUserEmail() string {

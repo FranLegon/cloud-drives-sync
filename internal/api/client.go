@@ -50,7 +50,7 @@ type CloudClient interface {
 
 	// Ownership transfer (Google Drive specific)
 	TransferOwnership(fileID, newOwnerEmail string) error
-	AcceptOwnership(fileID string) error
+	AcceptOwnership(fileID string) (string, error)
 
 	// User information
 	GetUserEmail() string

@@ -2121,8 +2121,12 @@ func legacyOwnershipTransferTest(r *task.Runner, main *model.User, backups []*mo
 	}
 	if err == api.ErrOwnershipTransferPending {
 		logger.Info("[soft1] Got pending transfer signal — accepting ownership")
-		if err := targetClient.AcceptOwnership(fileID); err != nil {
+		acceptedFileID, err := targetClient.AcceptOwnership(fileID)
+		if err != nil {
 			return fmt.Errorf("accept ownership: %w", err)
+		}
+		if acceptedFileID != "" {
+			fileID = acceptedFileID
 		}
 		time.Sleep(2 * time.Second)
 		metadata, err := targetClient.GetFileMetadata(fileID)

@@ -160,7 +160,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 			return nil, fmt.Errorf("failed to list files: %w", err)
 		}
 
-		logger.Info("Google ListFiles page: found %d items", len(fileList.Files)) // ADDED LOG
+		// logger.Info("Google ListFiles page: found %d items", len(fileList.Files))
 
 		for _, f := range fileList.Files {
 			if f.MimeType == "application/vnd.google-apps.folder" {
@@ -732,7 +732,7 @@ func (c *Client) TransferOwnership(fileID, newOwnerEmail string) error {
 }
 
 // AcceptOwnership accepts a pending ownership transfer
-func (c *Client) AcceptOwnership(fileID string) error {
+func (c *Client) AcceptOwnership(fileID string) (string, error) {
 	// The prospective owner accepts by creating or updating their permission with
 	// role=owner and transferOwnership=true
 	// See: https://developers.google.com/workspace/drive/api/guides/transfer-file#transfer-consumer-account
@@ -740,7 +740,7 @@ func (c *Client) AcceptOwnership(fileID string) error {
 	// List permissions to find my permission on this file
 	perms, err := c.service.Permissions.List(fileID).Fields("permissions(id, role, emailAddress, pendingOwner)").Do()
 	if err != nil {
-		return fmt.Errorf("failed to list permissions: %w", err)
+		return "", fmt.Errorf("failed to list permissions: %w", err)
 	}
 
 	var permID string
@@ -757,7 +757,7 @@ func (c *Client) AcceptOwnership(fileID string) error {
 		logger.InfoTagged([]string{"Google", c.user.Email}, "Accepting ownership via permissions.update (permID=%s)...", permID)
 		_, err = c.service.Permissions.Update(fileID, permID, &drive.Permission{Role: "owner"}).TransferOwnership(true).Do()
 		if err != nil {
-			return fmt.Errorf("failed to accept ownership via update: %w", err)
+			return "", fmt.Errorf("failed to accept ownership via update: %w", err)
 		}
 	} else {
 		// No existing permission found — accept by creating owner permission
@@ -769,12 +769,18 @@ func (c *Client) AcceptOwnership(fileID string) error {
 		}
 		_, err = c.service.Permissions.Create(fileID, ownerPerm).TransferOwnership(true).SendNotificationEmail(true).Do()
 		if err != nil {
-			return fmt.Errorf("failed to accept ownership via create: %w", err)
+			return "", fmt.Errorf("failed to accept ownership via create: %w", err)
 		}
 	}
 
-	logger.InfoTagged([]string{"Google", c.user.Email}, "Accepted ownership of file %s", fileID)
-	return nil
+	acceptedID := fileID
+	acceptedMeta, metaErr := c.GetFileMetadata(fileID)
+	if metaErr == nil && acceptedMeta != nil && len(acceptedMeta.Replicas) > 0 && acceptedMeta.Replicas[0].NativeID != "" {
+		acceptedID = acceptedMeta.Replicas[0].NativeID
+	}
+
+	logger.InfoTagged([]string{"Google", c.user.Email}, "Accepted ownership of file %s", acceptedID)
+	return acceptedID, nil
 }
 
 func isConsentRequiredError(err error) bool {

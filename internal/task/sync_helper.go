@@ -84,13 +84,18 @@ func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.
 }
 
 // transferOwnershipWithFallback transfers ownership and handles the pending state, moving the file to the sync folder if necessary.
-func (r *Runner) transferOwnershipWithFallback(sourceClient api.CloudClient, targetClient api.CloudClient, target *AccountStatus, file *model.File, nativeID string, sourceLogTags []string) error {
+func (r *Runner) transferOwnershipWithFallback(sourceClient api.CloudClient, targetClient api.CloudClient, target *AccountStatus, file *model.File, nativeID string, sourceLogTags []string) (string, error) {
+	finalNativeID := nativeID
 	err := sourceClient.TransferOwnership(nativeID, target.User.Email)
 	if err == api.ErrOwnershipTransferPending {
 		logger.InfoTagged(sourceLogTags, "Ownership transfer pending, accepting as %s...", target.User.Email)
-		if acceptErr := targetClient.AcceptOwnership(nativeID); acceptErr != nil {
+		acceptedNativeID, acceptErr := targetClient.AcceptOwnership(nativeID)
+		if acceptErr != nil {
 			logger.Error("Failed to accept ownership: %v", acceptErr)
-			return fmt.Errorf("acceptance failed: %w", acceptErr)
+			return finalNativeID, fmt.Errorf("acceptance failed: %w", acceptErr)
+		}
+		if acceptedNativeID != "" {
+			finalNativeID = acceptedNativeID
 		}
 		err = nil // Clear error as acceptance succeeded
 
@@ -100,14 +105,14 @@ func (r *Runner) transferOwnershipWithFallback(sourceClient api.CloudClient, tar
 		if folderErr != nil {
 			logger.Warning("Failed to resolve target sync folder for %s: %v", file.Name, folderErr)
 		} else {
-			if mvErr := targetClient.MoveFile(nativeID, targetFolderID); mvErr != nil {
+			if mvErr := targetClient.MoveFile(finalNativeID, targetFolderID); mvErr != nil {
 				logger.Warning("Failed to move transferred file %s to sync folder: %v", file.Name, mvErr)
 			} else {
 				logger.InfoTagged([]string{string(target.User.Provider), target.User.Email}, "Moved %s to sync folder", file.Name)
 			}
 		}
 	}
-	return err
+	return finalNativeID, err
 }
 
 // It is safe to call concurrently; a mutex prevents duplicate folder creation.

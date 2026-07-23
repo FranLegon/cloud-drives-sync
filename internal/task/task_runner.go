@@ -810,13 +810,16 @@ func (r *Runner) BalanceStorage(syncRunID int64) error {
 				if !r.safeMode {
 					targetAccountID := target.User.GetAccountID()
 					logger.InfoTagged(source.User.LogTags(), "Transferring path=%q (%d bytes) to target=%s", file.Path, file.Size, targetAccountID)
-					err := r.transferOwnershipWithFallback(source.Client, target.Client, target, file, sourceReplica.NativeID, source.User.LogTags())
+					finalNativeID, err := r.transferOwnershipWithFallback(source.Client, target.Client, target, file, sourceReplica.NativeID, source.User.LogTags())
 					if err != nil {
 						logger.Error("Failed to transfer ownership: %v", err)
 						continue
 					}
 
 					// Update database to reflect ownership change
+					if finalNativeID != sourceReplica.NativeID {
+						sourceReplica.NativeID = finalNativeID
+					}
 					if err := r.db.UpdateReplicaOwner(string(provider), sourceAccountID, sourceReplica.NativeID, targetAccountID); err != nil {
 						logger.Warning("DB update owner failed path=%q provider=%s account=%s native_id=%s: %v", file.Path, provider, sourceAccountID, sourceReplica.NativeID, err)
 					}
@@ -1004,7 +1007,7 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 			targetAccountID := target.User.GetAccountID()
 			mainAccountID := mainUser.GetAccountID()
 			logger.InfoTagged([]string{"Google", mainUser.Email}, "Transferring path=%q (%d bytes) to target=%s", file.Path, file.Size, targetAccountID)
-			err := r.transferOwnershipWithFallback(mainClient, target.Client, target, file, mainReplica.NativeID, []string{"Google", mainUser.Email})
+			finalNativeID, err := r.transferOwnershipWithFallback(mainClient, target.Client, target, file, mainReplica.NativeID, []string{"Google", mainUser.Email})
 
 			fallbackUsed := false
 
@@ -1026,6 +1029,9 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 
 			if err == nil && !fallbackUsed {
 				// Update database to reflect ownership change for standard transfer
+				if finalNativeID != mainReplica.NativeID {
+					mainReplica.NativeID = finalNativeID
+				}
 				if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainAccountID, mainReplica.NativeID, targetAccountID); dbErr != nil {
 					logger.Warning("DB update owner failed path=%q provider=Google account=%s native_id=%s target=%s: %v", file.Path, mainAccountID, mainReplica.NativeID, targetAccountID, dbErr)
 				}
@@ -1819,15 +1825,22 @@ func (r *Runner) ensureGoogleFolderOwnedByMain(client api.CloudClient, folder *m
 	}
 	if err := ownerClient.TransferOwnership(folder.ID, googleMain.Email); err != nil {
 		if err == api.ErrOwnershipTransferPending || strings.Contains(err.Error(), "ONLY_PENDING_OWNER_CAN_BECOME_NEW_OWNER") {
-			if acceptErr := mainClient.AcceptOwnership(folder.ID); acceptErr != nil {
+			acceptedFolderID, acceptErr := mainClient.AcceptOwnership(folder.ID)
+			if acceptErr != nil {
 				return fmt.Errorf("accept duplicate folder ownership %s: %w", folder.Path, acceptErr)
+			}
+			if acceptedFolderID != "" {
+				folder.ID = acceptedFolderID
 			}
 		} else {
 			return fmt.Errorf("transfer duplicate folder ownership %s: %w", folder.Path, err)
 		}
 	} else {
-		if acceptErr := mainClient.AcceptOwnership(folder.ID); acceptErr != nil {
+		acceptedFolderID, acceptErr := mainClient.AcceptOwnership(folder.ID)
+		if acceptErr != nil {
 			logger.Warning("Accept ownership for %s returned: %v", folder.Path, acceptErr)
+		} else if acceptedFolderID != "" {
+			folder.ID = acceptedFolderID
 		}
 	}
 	folder.OwnerEmail = googleMain.Email
@@ -2481,9 +2494,13 @@ func (r *Runner) claimGoogleFolderOwnership() {
 
 		if err == api.ErrOwnershipTransferPending {
 			// Pending transfer — main account needs to accept
-			if acceptErr := mainClient.AcceptOwnership(folder.ID); acceptErr != nil {
+			acceptedFolderID, acceptErr := mainClient.AcceptOwnership(folder.ID)
+			if acceptErr != nil {
 				logger.Warning("Failed to accept folder %q ownership: %v", folder.Path, acceptErr)
 				continue
+			}
+			if acceptedFolderID != "" {
+				folder.ID = acceptedFolderID
 			}
 			logger.Info("Accepted folder %q ownership", folder.Path)
 			// Move folder back into sync folder structure
@@ -2501,9 +2518,13 @@ func (r *Runner) claimGoogleFolderOwnership() {
 			}
 			if strings.Contains(errStr, "ONLY_PENDING_OWNER_CAN_BECOME_NEW_OWNER") {
 				// A pending transfer already exists — main account just needs to accept
-				if acceptErr := mainClient.AcceptOwnership(folder.ID); acceptErr != nil {
+				acceptedFolderID, acceptErr := mainClient.AcceptOwnership(folder.ID)
+				if acceptErr != nil {
 					logger.Warning("Failed to accept pending folder %q ownership: %v", folder.Path, acceptErr)
 					continue
+				}
+				if acceptedFolderID != "" {
+					folder.ID = acceptedFolderID
 				}
 				logger.Info("Accepted pending folder %q ownership", folder.Path)
 			} else {
