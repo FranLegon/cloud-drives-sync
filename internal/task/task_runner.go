@@ -1028,12 +1028,20 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 			}
 
 			if err == nil && !fallbackUsed {
-				// Update database to reflect ownership change for standard transfer
-				if finalNativeID != mainReplica.NativeID {
+				// Update database to reflect ownership change for standard transfer.
+				oldNativeID := mainReplica.NativeID
+				if finalNativeID != "" && finalNativeID != mainReplica.NativeID {
 					mainReplica.NativeID = finalNativeID
 				}
-				if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainAccountID, mainReplica.NativeID, targetAccountID); dbErr != nil {
-					logger.Warning("DB update owner failed path=%q provider=Google account=%s native_id=%s target=%s: %v", file.Path, mainAccountID, mainReplica.NativeID, targetAccountID, dbErr)
+				if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainAccountID, oldNativeID, targetAccountID); dbErr != nil {
+					logger.Warning("DB update owner failed path=%q provider=Google account=%s native_id=%s target=%s: %v", file.Path, mainAccountID, oldNativeID, targetAccountID, dbErr)
+				} else if finalNativeID != "" && finalNativeID != oldNativeID {
+					mainReplica.AccountID = targetAccountID
+					mainReplica.Owner = targetAccountID
+					mainReplica.ModTime = time.Now()
+					if dbErr := r.db.UpdateReplica(mainReplica); dbErr != nil {
+						logger.Warning("DB native_id refresh failed path=%q provider=Google account=%s old_native_id=%s new_native_id=%s: %v", file.Path, targetAccountID, oldNativeID, finalNativeID, dbErr)
+					}
 				}
 				filesMoved = true
 			}
@@ -1862,6 +1870,14 @@ func (r *Runner) ensureGoogleFolderOwnedByMain(client api.CloudClient, folder *m
 	folder.OwnerEmail = googleMain.Email
 	if err := r.db.InsertFolder(folder); err != nil {
 		logger.Warning("Failed to update folder owner for %s: %v", folder.Path, err)
+	}
+	if folder.ID != "" {
+		targetDir := strings.Trim(model.NormalizePath(filepath.Dir(folder.Path)), "/")
+		if destID, moveErr := r.ensureFolderStructure(mainClient, targetDir, model.ProviderGoogle); moveErr != nil {
+			logger.Warning("Failed to resolve target folder for duplicate folder %s after ownership acceptance: %v", folder.Path, moveErr)
+		} else if mvErr := mainClient.MoveFile(folder.ID, destID); mvErr != nil {
+			logger.Warning("Failed to move duplicate folder %s back into sync structure after ownership acceptance: %v", folder.Path, mvErr)
+		}
 	}
 	_ = client
 	return nil
