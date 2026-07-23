@@ -1299,6 +1299,22 @@ func providerHasMatchingIdentity(files []*model.File, sourceFile *model.File) bo
 	return false
 }
 
+func hasActiveMicrosoftReplicaAtPath(file *model.File, accountID, path string) bool {
+	if file == nil {
+		return false
+	}
+	canonicalPath := model.NormalizePath(path)
+	for _, replica := range file.Replicas {
+		if replica == nil || replica.Status != "active" || replica.Provider != model.ProviderMicrosoft || replica.AccountID != accountID {
+			continue
+		}
+		if model.NormalizePath(replica.Path) == canonicalPath {
+			return true
+		}
+	}
+	return false
+}
+
 // buildMainAccountSet returns a map of provider -> set of main account IDs
 func (r *Runner) buildMainAccountSet() map[model.Provider]map[string]bool {
 	mainAccounts := make(map[model.Provider]map[string]bool)
@@ -2235,13 +2251,7 @@ func (r *Runner) distributeShortcutsAcrossMSAccounts(msUsers []model.User, files
 
 		for _, msFile := range msFiles {
 			for _, user := range msUsers {
-				hasIt := false
-				for _, replica := range msFile.Replicas {
-					if replica.Status == "active" && replica.Provider == model.ProviderMicrosoft && replica.AccountID == user.Email {
-						hasIt = true
-						break
-					}
-				}
+				hasIt := hasActiveMicrosoftReplicaAtPath(msFile, user.Email, path)
 
 				if !hasIt {
 					if syncRunID > 0 && doneCopies != nil {

@@ -680,6 +680,27 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 		return nil, fmt.Errorf("failed to ensure folder structure: %w", err)
 	}
 
+	if targetUser.Provider == model.ProviderMicrosoft {
+		for _, replica := range sourceFile.Replicas {
+			if replica == nil || replica.Status != "active" || replica.Provider != model.ProviderMicrosoft || replica.AccountID != targetUser.Email {
+				continue
+			}
+			if model.NormalizePath(replica.Path) == model.NormalizePath(sourceFile.Path) {
+				continue
+			}
+			logger.InfoTagged(targetUser.LogTags(), "Deleting stale Microsoft replica path=%q native_id=%s before recreating canonical path=%q", replica.Path, replica.NativeID, sourceFile.Path)
+			if err := targetClient.DeleteFile(replica.NativeID); err != nil {
+				logger.Warning("Failed to delete stale Microsoft replica path=%q native_id=%s: %v", replica.Path, replica.NativeID, err)
+			} else {
+				replica.Status = "deleted"
+				replica.ModTime = time.Now()
+				if err := r.db.UpdateReplica(replica); err != nil {
+					logger.Warning("Failed to mark stale Microsoft replica deleted path=%q native_id=%s: %v", replica.Path, replica.NativeID, err)
+				}
+			}
+		}
+	}
+
 	// 5. Create Shortcut
 	shortcut, err := targetClient.CreateShortcut(parentID, sourceFile.Name, sourceReplica.NativeID, sourceDriveID)
 	if err != nil {
