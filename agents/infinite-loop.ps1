@@ -1,4 +1,3 @@
-
 $focusPrompts = @(
     @{ Weight = 4;  Prompt = "Tighten command orchestration flow. Simplify repeated pre-check and setup logic between commands, reduce branching complexity, and keep exact user-visible behavior unless fixing a clear bug." }
     @{ Weight = 4;  Prompt = "Harden error handling paths across Go files. Prioritize wrapping errors with context, avoiding swallowed errors, and returning actionable messages. Preserve existing behavior and public interfaces." }
