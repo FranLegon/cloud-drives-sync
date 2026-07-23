@@ -495,6 +495,45 @@ func (r *Runner) copyFile(masterFile *model.File, targetProvider model.Provider,
 					if existingReplica.Provider != targetProvider || existingReplica.AccountID != accountID || existingReplica.Status != "deleted" {
 						continue
 					}
+
+					// Telegram uploads create a new message/native ID. Reusing the old DB row is fine,
+					// but the old deleted row must not keep its stale native_id because metadata
+					// verification checks cloud presence by native_id. If another row already exists
+					// for the new native_id, retire the deleted row instead of updating into a unique
+					// conflict.
+					if currentReplica, lookupErr := r.db.GetReplicaByNativeID(targetProvider, nativeID); lookupErr == nil && currentReplica != nil {
+						if currentReplica.ID == existingReplica.ID {
+							currentReplica.Path = conflictPath
+							currentReplica.Name = uploadedFile.Name
+							currentReplica.Size = uploadedFile.Size
+							currentReplica.Status = "active"
+							currentReplica.NativeHash = nativeHash
+							currentReplica.ModTime = modTime
+							currentReplica.Fragmented = newReplica.Fragmented
+							currentReplica.Fragments = newReplica.Fragments
+							currentReplica.Owner = accountID
+							if err := r.db.UpdateReplica(currentReplica); err != nil {
+								logger.Warning("Failed to refresh Telegram replica path=%q provider=%s native_id=%s: %v", masterFile.Path, targetProvider, nativeID, err)
+							} else {
+								for i, rep := range masterFile.Replicas {
+									if rep.ID == currentReplica.ID {
+										masterFile.Replicas[i] = currentReplica
+										break
+									}
+								}
+								reusedReplica = true
+								break
+							}
+						}
+
+						existingReplica.Status = "deleted"
+						existingReplica.ModTime = modTime
+						if err := r.db.UpdateReplica(existingReplica); err != nil {
+							logger.Warning("Failed to retire stale Telegram replica path=%q old_native_id=%s: %v", masterFile.Path, existingReplica.NativeID, err)
+						}
+						continue
+					}
+
 					existingReplica.Path = conflictPath
 					existingReplica.Name = uploadedFile.Name
 					existingReplica.Size = uploadedFile.Size
