@@ -100,7 +100,7 @@ func (r *Runner) transferOwnershipWithFallback(sourceClient api.CloudClient, tar
 		err = nil // Clear error as acceptance succeeded
 
 		// Move file to target's sync folder (it's currently in root after pending owner flow)
-		dir := model.NormalizePath(filepath.Dir(file.Path))
+		dir := strings.Trim(model.NormalizePath(filepath.Dir(file.Path)), "/")
 		targetFolderID, folderErr := r.ensureFolderStructure(targetClient, dir, target.User.Provider)
 		if folderErr != nil {
 			logger.Warning("Failed to resolve target sync folder for %s: %v", file.Name, folderErr)
