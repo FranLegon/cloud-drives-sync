@@ -1806,7 +1806,12 @@ func (r *Runner) mergeFolderInto(client api.CloudClient, user *model.User, canon
 
 	if !r.safeMode {
 		if err := client.DeleteFolder(duplicate.ID); err != nil {
-			return fmt.Errorf("delete duplicate folder %s: %w", duplicate.Path, err)
+			errStr := err.Error()
+			if strings.Contains(errStr, "404") || strings.Contains(errStr, "notFound") {
+				logger.Warning("Duplicate folder %s already missing remotely; continuing cleanup", duplicate.Path)
+			} else {
+				return fmt.Errorf("delete duplicate folder %s: %w", duplicate.Path, err)
+			}
 		}
 	}
 
@@ -1815,6 +1820,17 @@ func (r *Runner) mergeFolderInto(client api.CloudClient, user *model.User, canon
 	if !r.safeMode {
 		if err := r.db.DeleteFolder(duplicate.ID); err != nil {
 			logger.Warning("Failed to delete duplicate folder %s from DB: %v", duplicate.Path, err)
+		}
+		if logicalFolderID := logicalFolderIDForPath(duplicate.Path); logicalFolderID != "" {
+			if err := r.db.InsertLogicalFolder(&model.LogicalFolder{
+				ID:                    logicalFolderID,
+				Path:                  duplicate.Path,
+				Name:                  duplicate.Name,
+				ParentLogicalFolderID: logicalFolderIDForPath(strings.TrimSuffix(duplicate.Path, "/"+duplicate.Name)),
+				Status:                "deleted",
+			}); err != nil {
+				logger.Warning("Failed to mark duplicate logical folder %s deleted: %v", duplicate.Path, err)
+			}
 		}
 	}
 	return nil
@@ -1868,10 +1884,25 @@ func (r *Runner) ensureGoogleFolderOwnedByMain(client api.CloudClient, folder *m
 		}
 	}
 	folder.OwnerEmail = googleMain.Email
+	folder.UserEmail = googleMain.Email
+	folder.UserPhone = ""
 	if err := r.db.InsertFolder(folder); err != nil {
 		logger.Warning("Failed to update folder owner for %s: %v", folder.Path, err)
 	}
 	if folder.ID != "" {
+		logicalFolderID := logicalFolderIDForPath(folder.Path)
+		if logicalFolderID != "" {
+			if err := r.db.InsertFolderReplica(&model.FolderReplica{
+				LogicalFolderID: logicalFolderID,
+				Provider:        model.ProviderGoogle,
+				AccountID:       googleMain.Email,
+				NativeFolderID:  folder.ID,
+				Owner:           googleMain.Email,
+				LastSeenAt:      time.Now().Unix(),
+			}); err != nil {
+				logger.Warning("Failed to update folder replica owner for %s: %v", folder.Path, err)
+			}
+		}
 		targetDir := strings.Trim(model.NormalizePath(filepath.Dir(folder.Path)), "/")
 		if destID, moveErr := r.ensureFolderStructure(mainClient, targetDir, model.ProviderGoogle); moveErr != nil {
 			logger.Warning("Failed to resolve target folder for duplicate folder %s after ownership acceptance: %v", folder.Path, moveErr)
