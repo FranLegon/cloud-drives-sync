@@ -105,7 +105,11 @@ func (r *Runner) transferOwnershipWithFallback(sourceClient api.CloudClient, tar
 		if folderErr != nil {
 			logger.Warning("Failed to resolve target sync folder for %s: %v", file.Name, folderErr)
 		} else {
-			if mvErr := targetClient.MoveFile(finalNativeID, targetFolderID); mvErr != nil {
+			moveNativeID := finalNativeID
+			if moveNativeID == "" {
+				moveNativeID = nativeID
+			}
+			if mvErr := targetClient.MoveFile(moveNativeID, targetFolderID); mvErr != nil {
 				logger.Warning("Failed to move transferred file %s to sync folder: %v", file.Name, mvErr)
 			} else {
 				logger.InfoTagged([]string{string(target.User.Provider), target.User.Email}, "Moved %s to sync folder", file.Name)

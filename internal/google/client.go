@@ -773,14 +773,8 @@ func (c *Client) AcceptOwnership(fileID string) (string, error) {
 		}
 	}
 
-	acceptedID := fileID
-	acceptedMeta, metaErr := c.GetFileMetadata(fileID)
-	if metaErr == nil && acceptedMeta != nil && len(acceptedMeta.Replicas) > 0 && acceptedMeta.Replicas[0].NativeID != "" {
-		acceptedID = acceptedMeta.Replicas[0].NativeID
-	}
-
-	logger.InfoTagged([]string{"Google", c.user.Email}, "Accepted ownership of file %s", acceptedID)
-	return acceptedID, nil
+	logger.InfoTagged([]string{"Google", c.user.Email}, "Accepted ownership of file %s", fileID)
+	return fileID, nil
 }
 
 func isConsentRequiredError(err error) bool {
