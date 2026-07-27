@@ -1035,12 +1035,14 @@ func (r *Runner) FreeMain(syncRunID int64) (bool, error) {
 				}
 				if dbErr := r.db.UpdateReplicaOwner(string(model.ProviderGoogle), mainAccountID, oldNativeID, targetAccountID); dbErr != nil {
 					logger.Warning("DB update owner failed path=%q provider=Google account=%s native_id=%s target=%s: %v", file.Path, mainAccountID, oldNativeID, targetAccountID, dbErr)
-				} else if finalNativeID != "" && finalNativeID != oldNativeID {
+				} else {
 					mainReplica.AccountID = targetAccountID
 					mainReplica.Owner = targetAccountID
+					mainReplica.Path = file.Path
+					mainReplica.Name = file.Name
 					mainReplica.ModTime = time.Now()
 					if dbErr := r.db.UpdateReplica(mainReplica); dbErr != nil {
-						logger.Warning("DB native_id refresh failed path=%q provider=Google account=%s old_native_id=%s new_native_id=%s: %v", file.Path, targetAccountID, oldNativeID, finalNativeID, dbErr)
+						logger.Warning("DB replica refresh failed path=%q provider=Google account=%s old_native_id=%s new_native_id=%s: %v", file.Path, targetAccountID, oldNativeID, mainReplica.NativeID, dbErr)
 					}
 				}
 				filesMoved = true
@@ -1830,6 +1832,18 @@ func (r *Runner) mergeFolderInto(client api.CloudClient, user *model.User, canon
 				Status:                "deleted",
 			}); err != nil {
 				logger.Warning("Failed to mark duplicate logical folder %s deleted: %v", duplicate.Path, err)
+			}
+		}
+		if canonicalLogicalFolderID := logicalFolderIDForPath(canonical.Path); canonicalLogicalFolderID != "" {
+			if err := r.db.InsertFolderReplica(&model.FolderReplica{
+				LogicalFolderID: canonicalLogicalFolderID,
+				Provider:        user.Provider,
+				AccountID:       user.GetAccountID(),
+				NativeFolderID:  canonical.ID,
+				Owner:           canonical.OwnerEmail,
+				LastSeenAt:      time.Now().Unix(),
+			}); err != nil {
+				logger.Warning("Failed to refresh canonical folder replica %s: %v", canonical.Path, err)
 			}
 		}
 	}

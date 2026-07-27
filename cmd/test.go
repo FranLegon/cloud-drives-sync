@@ -5,6 +5,7 @@ package cmd
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/big"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/pprof"
+	"sort"
 	"strings"
 	"time"
 
@@ -536,73 +538,115 @@ func verifyFileOnAllProviders(r *task.Runner, mainUser *model.User, backups []*m
 	return nil
 }
 
-// verifyFolderOnAllProviders checks that a named folder exists on every provider that supports folders.
-func verifyFolderOnAllProviders(r *task.Runner, mainUser *model.User, backups []*model.User, folderName string) error {
-	allUsers := append([]*model.User{mainUser}, backups...)
-	for _, u := range allUsers {
-		if u.Provider == model.ProviderTelegram {
-			continue
+type Node struct {
+	Name     string  `json:"name"`
+	IsDir    bool    `json:"is_dir"`
+	Children []*Node `json:"children,omitempty"`
+}
+
+func mustExpectedTree(jsonStr string) *Node {
+	var node Node
+	if err := json.Unmarshal([]byte(jsonStr), &node); err != nil {
+		panic(fmt.Sprintf("invalid expected tree json: %v", err))
+	}
+	normalizeNode(&node)
+	return &node
+}
+
+func normalizeNode(node *Node) {
+	if node == nil {
+		return
+	}
+	for _, child := range node.Children {
+		normalizeNode(child)
+	}
+	sort.Slice(node.Children, func(i, j int) bool {
+		if node.Children[i].IsDir != node.Children[j].IsDir {
+			return node.Children[i].IsDir && !node.Children[j].IsDir
 		}
-		client, err := r.GetOrCreateClient(u)
+		return node.Children[i].Name < node.Children[j].Name
+	})
+	if !node.IsDir || len(node.Children) == 0 {
+		node.Children = nil
+	}
+}
+
+func buildProviderTree(client api.CloudClient, folderID, name string) (*Node, error) {
+	node := &Node{Name: name, IsDir: true}
+	folders, err := client.ListFolders(folderID)
+	if err != nil {
+		return nil, err
+	}
+	for _, folder := range folders {
+		child, err := buildProviderTree(client, folder.ID, folder.Name)
 		if err != nil {
-			return fmt.Errorf("get client for %s: %w", u.Email, err)
+			return nil, err
 		}
-		sid, err := client.GetSyncFolderID()
-		if err != nil {
-			return fmt.Errorf("get sync folder for %s: %w", u.Email, err)
+		node.Children = append(node.Children, child)
+	}
+	files, err := client.ListFiles(folderID)
+	if err != nil {
+		return nil, err
+	}
+	for _, file := range files {
+		node.Children = append(node.Children, &Node{Name: file.Name, IsDir: false})
+	}
+	normalizeNode(node)
+	return node, nil
+}
+
+func compareNodes(expected, actual *Node, currentPath string) error {
+	if expected == nil || actual == nil {
+		if expected == actual {
+			return nil
 		}
-		folders, err := client.ListFolders(sid)
-		if err != nil {
-			return fmt.Errorf("list folders for %s: %w", u.Email, err)
-		}
-		found := false
-		for _, f := range folders {
-			if f.Name == folderName {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("folder %q not found for account %s (%s)", folderName, u.Email, u.Provider)
+		return fmt.Errorf("tree mismatch at %s: expected node %v, got %v", currentPath, expected != nil, actual != nil)
+	}
+	if expected.Name != actual.Name {
+		return fmt.Errorf("tree mismatch at %s: expected name %q, got %q", currentPath, expected.Name, actual.Name)
+	}
+	if expected.IsDir != actual.IsDir {
+		return fmt.Errorf("tree mismatch at %s: expected is_dir=%v, got %v", currentPath, expected.IsDir, actual.IsDir)
+	}
+	if len(expected.Children) != len(actual.Children) {
+		return fmt.Errorf("tree mismatch at %s: expected %d children, got %d", currentPath, len(expected.Children), len(actual.Children))
+	}
+	for i := range expected.Children {
+		childPath := currentPath + "/" + expected.Children[i].Name
+		if err := compareNodes(expected.Children[i], actual.Children[i], childPath); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// verifyNestedFolderOnAllProviders checks a nested path exists on every provider that supports folders.
-func verifyNestedFolderOnAllProviders(r *task.Runner, mainUser *model.User, backups []*model.User, parts []string) error {
-	allUsers := append([]*model.User{mainUser}, backups...)
-	for _, u := range allUsers {
-		if u.Provider == model.ProviderTelegram {
+func verifyGoogleTreeForUsers(r *task.Runner, users []*model.User, expected *Node) error {
+	for _, u := range users {
+		if u.Provider != model.ProviderGoogle {
 			continue
 		}
 		client, err := r.GetOrCreateClient(u)
 		if err != nil {
 			return fmt.Errorf("get client for %s: %w", u.Email, err)
 		}
-		parentID, err := client.GetSyncFolderID()
+		syncFolderID, err := client.GetSyncFolderID()
 		if err != nil {
 			return fmt.Errorf("get sync folder for %s: %w", u.Email, err)
 		}
-		for _, part := range parts {
-			folders, err := client.ListFolders(parentID)
-			if err != nil {
-				return fmt.Errorf("list folders (path %v) for %s: %w", parts, u.Email, err)
-			}
-			found := false
-			for _, f := range folders {
-				if f.Name == part {
-					parentID = f.ID
-					found = true
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("folder segment %q not found under path for %s (%s)", part, u.Email, u.Provider)
-			}
+		actual, err := buildProviderTree(client, syncFolderID, expected.Name)
+		if err != nil {
+			return fmt.Errorf("build tree for %s: %w", u.Email, err)
+		}
+		if err := compareNodes(expected, actual, expected.Name); err != nil {
+			return fmt.Errorf("google tree mismatch for %s: %w", u.Email, err)
 		}
 	}
 	return nil
+}
+
+func verifyGoogleTree(r *task.Runner, mainUser *model.User, backups []*model.User, expected *Node) error {
+	googleUsers := append([]*model.User{mainUser}, filterUsers(backups, model.ProviderGoogle)...)
+	return verifyGoogleTreeForUsers(r, googleUsers, expected)
 }
 
 // SPEC Case 1: Clean-slate setup
@@ -735,7 +779,7 @@ func specCase4(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
-	return verifyFolderOnAllProviders(r, main, backups, folderName)
+	return verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-test","is_dir":true,"children":[{"name":"test-case-id-4-folder","is_dir":true}]}`))
 }
 
 // SPEC Case 5: Create folder on Google backup
@@ -761,7 +805,7 @@ func specCase5(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
-	return verifyFolderOnAllProviders(r, main, backups, folderName)
+	return verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-test","is_dir":true,"children":[{"name":"test-case-id-5-folder","is_dir":true}]}`))
 }
 
 // SPEC Case 6: Create file on Microsoft backup
@@ -818,7 +862,7 @@ func specCase7(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
-	return verifyFolderOnAllProviders(r, main, backups, folderName)
+	return verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-test","is_dir":true,"children":[{"name":"test-case-id-7-folder","is_dir":true}]}`))
 }
 
 // SPEC Case 8: Sync file from Telegram
@@ -972,7 +1016,7 @@ func specCase11(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
-	return verifyNestedFolderOnAllProviders(r, main, backups, []string{"test-case-id-11-folder", "test-case-id-11-subfolder", "test-case-id-11-subsubfolder"})
+	return verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-test","is_dir":true,"children":[{"name":"test-case-id-11-folder","is_dir":true,"children":[{"name":"test-case-id-11-subfolder","is_dir":true,"children":[{"name":"test-case-id-11-subsubfolder","is_dir":true}]}]}]}`))
 }
 
 // SPEC Case 12: Microsoft OneDrive nested folders
@@ -1005,7 +1049,7 @@ func specCase12(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
-	return verifyNestedFolderOnAllProviders(r, main, backups, []string{"test-case-id-12-folder", "test-case-id-12-subfolder", "test-case-id-12-subsubfolder"})
+	return verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-test","is_dir":true,"children":[{"name":"test-case-id-12-folder","is_dir":true,"children":[{"name":"test-case-id-12-subfolder","is_dir":true,"children":[{"name":"test-case-id-12-subsubfolder","is_dir":true}]}]}]}`))
 }
 
 // SPEC Case 13: Google Drive moved file
@@ -1730,93 +1774,8 @@ func specCase24(r *task.Runner, main *model.User, backups []*model.User) error {
 		return fmt.Errorf("sync failed: %w", err)
 	}
 
-	verifyMergedTree := func(client api.CloudClient, accountLabel string) error {
-		rootID, err := client.GetSyncFolderID()
-		if err != nil {
-			return fmt.Errorf("get sync folder for %s: %w", accountLabel, err)
-		}
-		rootFolders, err := client.ListFolders(rootID)
-		if err != nil {
-			return fmt.Errorf("list root folders for %s: %w", accountLabel, err)
-		}
-		var grandparentFolder *model.Folder
-		for _, f := range rootFolders {
-			if f.Name == grandparentName {
-				grandparentFolder = f
-				break
-			}
-		}
-		if grandparentFolder == nil {
-			return fmt.Errorf("grandparent folder %s missing for %s", grandparentName, accountLabel)
-		}
-
-		parentFolders, err := client.ListFolders(grandparentFolder.ID)
-		if err != nil {
-			return fmt.Errorf("list parent folders for %s: %w", accountLabel, err)
-		}
-		matchingParents := make([]*model.Folder, 0)
-		for _, f := range parentFolders {
-			if f.Name == parentName {
-				matchingParents = append(matchingParents, f)
-			}
-		}
-		if len(matchingParents) != 1 {
-			return fmt.Errorf("expected exactly 1 merged parent folder for %s, found %d", accountLabel, len(matchingParents))
-		}
-		mergedParent := matchingParents[0]
-
-		parentFiles, err := client.ListFiles(mergedParent.ID)
-		if err != nil {
-			return fmt.Errorf("list parent files for %s: %w", accountLabel, err)
-		}
-		parentFileNames := map[string]bool{}
-		for _, f := range parentFiles {
-			parentFileNames[f.Name] = true
-		}
-		if !parentFileNames[parentFileAName] || !parentFileNames[parentFileBName] {
-			return fmt.Errorf("merged parent folder for %s missing expected files: have %v", accountLabel, parentFileNames)
-		}
-
-		childFolders, err := client.ListFolders(mergedParent.ID)
-		if err != nil {
-			return fmt.Errorf("list child folders for %s: %w", accountLabel, err)
-		}
-		matchingChildren := make([]*model.Folder, 0)
-		for _, f := range childFolders {
-			if f.Name == childName {
-				matchingChildren = append(matchingChildren, f)
-			}
-		}
-		if len(matchingChildren) != 1 {
-			return fmt.Errorf("expected exactly 1 merged child folder for %s, found %d", accountLabel, len(matchingChildren))
-		}
-		mergedChild := matchingChildren[0]
-
-		childFiles, err := client.ListFiles(mergedChild.ID)
-		if err != nil {
-			return fmt.Errorf("list child files for %s: %w", accountLabel, err)
-		}
-		childFileNames := map[string]bool{}
-		for _, f := range childFiles {
-			childFileNames[f.Name] = true
-		}
-		if !childFileNames[childFileAName] || !childFileNames[childFileBName] {
-			return fmt.Errorf("merged child folder for %s missing expected files: have %v", accountLabel, childFileNames)
-		}
-		return nil
-	}
-
-	googleUsers := append([]*model.User{main}, filterUsers(backups, model.ProviderGoogle)...)
-	microsoftUsers := filterUsers(backups, model.ProviderMicrosoft)
-	for _, u := range append(googleUsers, microsoftUsers...) {
-		client, err := r.GetOrCreateClient(u)
-		if err != nil {
-			return err
-		}
-		accountLabel := u.GetAccountID()
-		if err := verifyMergedTree(client, accountLabel); err != nil {
-			return err
-		}
+	if err := verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-test","is_dir":true,"children":[{"name":"test-case-id-24-grandparent","is_dir":true,"children":[{"name":"test-case-id-24-parent","is_dir":true,"children":[{"name":"test-case-id-24-child","is_dir":true,"children":[{"name":"test-case-id-24-child-A.txt","is_dir":false},{"name":"test-case-id-24-child-B.txt","is_dir":false}]},{"name":"test-case-id-24-parent-A.txt","is_dir":false},{"name":"test-case-id-24-parent-B.txt","is_dir":false}]}]}]}`)); err != nil {
+		return err
 	}
 
 	logicalFolders, err := db.GetAllLogicalFolders()
@@ -1935,83 +1894,8 @@ func specCase25(r *task.Runner, main *model.User, backups []*model.User) error {
 		return fmt.Errorf("sync failed: %w", err)
 	}
 
-	verifyMergedConflictFolder := func(client api.CloudClient, provider model.Provider, syncFolderID string, accountLabel string) error {
-		rootFolders, err := client.ListFolders(syncFolderID)
-		if err != nil {
-			return fmt.Errorf("list root folders for %s: %w", accountLabel, err)
-		}
-		matchingOuter := make([]*model.Folder, 0)
-		for _, f := range rootFolders {
-			if f.Name == outerName {
-				matchingOuter = append(matchingOuter, f)
-			}
-		}
-		if len(matchingOuter) != 1 {
-			return fmt.Errorf("expected exactly 1 outer folder for %s, found %d", accountLabel, len(matchingOuter))
-		}
-		outerFolder := matchingOuter[0]
-
-		outerFiles, err := client.ListFiles(outerFolder.ID)
-		if err != nil {
-			return fmt.Errorf("list outer files for %s: %w", accountLabel, err)
-		}
-		outerMatches := 0
-		outerConflictMatches := 0
-		for _, f := range outerFiles {
-			if f.Name == outerFileName {
-				outerMatches++
-				continue
-			}
-			if strings.HasPrefix(f.Name, "test-case-id-25-outer") && strings.Contains(f.Name, "_conflict_") {
-				outerMatches++
-				outerConflictMatches++
-			}
-		}
-		if outerMatches != 2 {
-			return fmt.Errorf("expected exactly 2 outer file variants for %s, found %d", accountLabel, outerMatches)
-		}
-		if outerConflictMatches != 1 {
-			return fmt.Errorf("expected exactly 1 outer conflict-renamed file for %s, found %d", accountLabel, outerConflictMatches)
-		}
-
-		innerFolders, err := client.ListFolders(outerFolder.ID)
-		if err != nil {
-			return fmt.Errorf("list inner folders for %s: %w", accountLabel, err)
-		}
-		matchingInner := make([]*model.Folder, 0)
-		for _, f := range innerFolders {
-			if f.Name == innerName {
-				matchingInner = append(matchingInner, f)
-			}
-		}
-		if len(matchingInner) != 1 {
-			return fmt.Errorf("expected exactly 1 inner folder for %s, found %d", accountLabel, len(matchingInner))
-		}
-		innerFolder := matchingInner[0]
-
-		innerFiles, err := client.ListFiles(innerFolder.ID)
-		if err != nil {
-			return fmt.Errorf("list inner files for %s: %w", accountLabel, err)
-		}
-		innerMatches := 0
-		innerConflictMatches := 0
-		for _, f := range innerFiles {
-			if f.Name == innerFileName {
-				innerMatches++
-				continue
-			}
-			if strings.HasPrefix(f.Name, "test-case-id-25-inner") && strings.Contains(f.Name, "_conflict_") {
-				innerMatches++
-				innerConflictMatches++
-			}
-		}
-		if innerMatches != 2 {
-			return fmt.Errorf("expected exactly 2 inner file variants for %s, found %d", accountLabel, innerMatches)
-		}
-		if innerConflictMatches != 1 {
-			return fmt.Errorf("expected exactly 1 inner conflict-renamed file for %s, found %d", accountLabel, innerConflictMatches)
-		}
-		return nil
+	if err := verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-test","is_dir":true,"children":[{"name":"test-case-id-25-outer","is_dir":true,"children":[{"name":"test-case-id-25-inner","is_dir":true},{"name":"test-case-id-25-outer.txt","is_dir":false}]}]}`)); err != nil {
+		return err
 	}
 
 	googleUsers := append([]*model.User{main}, filterUsers(backups, model.ProviderGoogle)...)
@@ -2025,8 +1909,59 @@ func specCase25(r *task.Runner, main *model.User, backups []*model.User) error {
 		if err != nil {
 			return err
 		}
-		if err := verifyMergedConflictFolder(client, u.Provider, syncFolderID, u.GetAccountID()); err != nil {
-			return err
+		rootFolders, err := client.ListFolders(syncFolderID)
+		if err != nil {
+			return fmt.Errorf("list root folders for %s: %w", u.GetAccountID(), err)
+		}
+		var outerFolder *model.Folder
+		for _, f := range rootFolders {
+			if f.Name == outerName {
+				outerFolder = f
+				break
+			}
+		}
+		if outerFolder == nil {
+			return fmt.Errorf("expected outer folder for %s", u.GetAccountID())
+		}
+		outerFiles, err := client.ListFiles(outerFolder.ID)
+		if err != nil {
+			return fmt.Errorf("list outer files for %s: %w", u.GetAccountID(), err)
+		}
+		outerMatches := 0
+		for _, f := range outerFiles {
+			if f.Name == outerFileName || (strings.HasPrefix(f.Name, "test-case-id-25-outer") && strings.Contains(f.Name, "_conflict_")) {
+				outerMatches++
+			}
+		}
+		if outerMatches != 2 {
+			return fmt.Errorf("expected exactly 2 outer file variants for %s, found %d", u.GetAccountID(), outerMatches)
+		}
+		innerFolders, err := client.ListFolders(outerFolder.ID)
+		if err != nil {
+			return fmt.Errorf("list inner folders for %s: %w", u.GetAccountID(), err)
+		}
+		var innerFolder *model.Folder
+		for _, f := range innerFolders {
+			if f.Name == innerName {
+				innerFolder = f
+				break
+			}
+		}
+		if innerFolder == nil {
+			return fmt.Errorf("expected inner folder for %s", u.GetAccountID())
+		}
+		innerFiles, err := client.ListFiles(innerFolder.ID)
+		if err != nil {
+			return fmt.Errorf("list inner files for %s: %w", u.GetAccountID(), err)
+		}
+		innerMatches := 0
+		for _, f := range innerFiles {
+			if f.Name == innerFileName || (strings.HasPrefix(f.Name, "test-case-id-25-inner") && strings.Contains(f.Name, "_conflict_")) {
+				innerMatches++
+			}
+		}
+		if innerMatches != 2 {
+			return fmt.Errorf("expected exactly 2 inner file variants for %s, found %d", u.GetAccountID(), innerMatches)
 		}
 	}
 

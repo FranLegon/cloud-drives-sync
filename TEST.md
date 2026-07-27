@@ -1,3 +1,23 @@
+# Test specific test case
+```powershell
+#Run specific test case:
+go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --unsafe -p $env:CLOUD_DRIVES_SYNC_PASS --case "TestCaseNumber"
+```
+
+# Test and commit if all tests pass
+```powershell
+#Run tests:
+go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --unsafe -p $env:CLOUD_DRIVES_SYNC_PASS --with-commit
+```
+
+<!--
+# Compare current vs last commit results:
+```powershell
+#Compare execution time of current code vs last commit:
+git stash && git checkout main~1 && go build -o cloud-drives-sync.exe . && Write-Host "=== BEFORE ===" && measure-command { .\cloud-drives-sync.exe test --unsafe -p $env:CLOUD_DRIVES_SYNC_PASS } && write-host (Get-ChildItem -Path logs -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Select-Object -ExpandProperty FullName) && git checkout main && git stash pop && go build -o cloud-drives-sync.exe . && Write-Host "=== AFTER ===" && measure-command { .\cloud-drives-sync.exe test --unsafe -p $env:CLOUD_DRIVES_SYNC_PASS } && write-host (Get-ChildItem -Path logs -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Select-Object -ExpandProperty FullName)
+```
+-->
+
 # Suppress go-sqlcipher warnings and cache CGO compilation:
 
 ```powershell
@@ -17,31 +37,9 @@ if (-not (Select-String -Path .gitignore -Pattern "^\.env$" -Quiet)) { Add-Conte
 $env:CLOUD_DRIVES_SYNC_PASS="your_password_here"
 if (-not (Test-Path -Path .env)) { New-Item -Path .env -ItemType File -Value "CLOUD_DRIVES_SYNC_PASS=$($env:CLOUD_DRIVES_SYNC_PASS)" }
 if (-not (Select-String -Path .gitignore -Pattern "^\.env$" -Quiet)) { Add-Content -Path .gitignore -Value ".env" }
-```
-
-# Test
-```powershell
 #Load .env variables into environment:
 Get-Content .env | ForEach-Object { if ($_ -match '^(.*?)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] } }
-#Run tests:
-go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --unsafe -p $env:CLOUD_DRIVES_SYNC_PASS --with-commit
 ```
-
-# Test specific test case
-```powershell
-#Load .env variables into environment:
-Get-Content .env | ForEach-Object { if ($_ -match '^(.*?)=(.*)$') { Set-Item -Path "Env:$($Matches[1])" -Value $Matches[2] } }
-#Run specific test case:
-go build -o cloud-drives-sync.exe . && .\cloud-drives-sync.exe test --unsafe -p $env:CLOUD_DRIVES_SYNC_PASS --case "TestCaseNumber"
-```
-
-<!--
-# Compare current vs last commit results:
-```powershell
-#Compare execution time of current code vs last commit:
-git stash && git checkout main~1 && go build -o cloud-drives-sync.exe . && Write-Host "=== BEFORE ===" && measure-command { .\cloud-drives-sync.exe test --unsafe -p $env:CLOUD_DRIVES_SYNC_PASS } && write-host (Get-ChildItem -Path logs -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Select-Object -ExpandProperty FullName) && git checkout main && git stash pop && go build -o cloud-drives-sync.exe . && Write-Host "=== AFTER ===" && measure-command { .\cloud-drives-sync.exe test --unsafe -p $env:CLOUD_DRIVES_SYNC_PASS } && write-host (Get-ChildItem -Path logs -File | Sort-Object LastWriteTime -Descending | Select-Object -First 1 | Select-Object -ExpandProperty FullName)
-```
--->
 
 # OpenCode infite loop:
 ```powershell

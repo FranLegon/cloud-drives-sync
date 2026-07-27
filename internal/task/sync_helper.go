@@ -23,6 +23,25 @@ func logicalFolderIDForPath(path string) string {
 	return "lf:path:/" + path
 }
 
+func (r *Runner) resolveCurrentFolderPath(provider model.Provider, accountID, path string) string {
+	path = model.NormalizePath(path)
+	if path == "." || path == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	for current := path; current != "/" && current != ""; current = model.NormalizePath(filepath.Dir(current)) {
+		folder, err := r.db.GetFolderByPathAndAccount(current, provider, accountID)
+		if err == nil && folder != nil && folder.ID != "" {
+			return current
+		}
+	}
+
+	return "/"
+}
+
 // getDestinationClient returns the best client for a provider to upload a file
 func (r *Runner) getDestinationClient(provider model.Provider, size int64) (api.CloudClient, *model.User, error) {
 	// Telegram has no quota limit, use fast path
@@ -99,24 +118,71 @@ func (r *Runner) transferOwnershipWithFallback(sourceClient api.CloudClient, tar
 		}
 		err = nil // Clear error as acceptance succeeded
 
-		// Move file to target's sync folder (it's currently in root after pending owner flow)
-		dir := strings.Trim(model.NormalizePath(filepath.Dir(file.Path)), "/")
-		targetFolderID, folderErr := r.ensureFolderStructure(targetClient, dir, target.User.Provider)
+		// Move file back into its logical parent path.
+		targetDir := model.NormalizePath(filepath.Dir(file.Path))
+		if targetDir == "." || targetDir == "" {
+			targetDir = "/"
+		}
+		targetFolderID, folderErr := r.resolveTransferTargetFolder(targetClient, target.User.Provider, targetDir)
 		if folderErr != nil {
-			logger.Warning("Failed to resolve target sync folder for %s: %v", file.Name, folderErr)
+			logger.Warning("Failed to resolve target sync folder for %s at %s: %v", file.Name, targetDir, folderErr)
 		} else {
 			moveNativeID := finalNativeID
 			if moveNativeID == "" {
 				moveNativeID = nativeID
 			}
 			if mvErr := targetClient.MoveFile(moveNativeID, targetFolderID); mvErr != nil {
-				logger.Warning("Failed to move transferred file %s to sync folder: %v", file.Name, mvErr)
+				logger.Warning("Failed to move transferred file %s to sync folder %s: %v", file.Name, targetDir, mvErr)
 			} else {
-				logger.InfoTagged([]string{string(target.User.Provider), target.User.Email}, "Moved %s to sync folder", file.Name)
+				logger.InfoTagged([]string{string(target.User.Provider), target.User.Email}, "Moved %s to sync folder %s", file.Name, targetDir)
 			}
 		}
 	}
 	return finalNativeID, err
+}
+
+func (r *Runner) resolveTransferTargetFolder(client api.CloudClient, provider model.Provider, path string) (string, error) {
+	path = model.NormalizePath(path)
+	if path == "." || path == "" || path == "/" {
+		return client.GetSyncFolderID()
+	}
+
+	if provider != model.ProviderGoogle {
+		return r.ensureFolderStructure(client, strings.Trim(path, "/"), provider)
+	}
+
+	currentID, err := client.GetSyncFolderID()
+	if err != nil {
+		return "", err
+	}
+
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		folders, err := client.ListFolders(currentID)
+		if err != nil {
+			return "", err
+		}
+		var nextID string
+		for _, folder := range folders {
+			if folder.Name == part {
+				nextID = folder.ID
+				break
+			}
+		}
+		if nextID == "" {
+			created, err := client.CreateFolder(currentID, part)
+			if err != nil {
+				return "", err
+			}
+			nextID = created.ID
+		}
+		currentID = nextID
+	}
+
+	return currentID, nil
 }
 
 // It is safe to call concurrently; a mutex prevents duplicate folder creation.
