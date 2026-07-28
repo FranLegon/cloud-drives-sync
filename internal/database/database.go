@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
 	"github.com/google/uuid"
 	_ "github.com/mutecomm/go-sqlcipher/v4"
@@ -579,6 +580,10 @@ func normalizeReplicaOwner(replica *model.Replica) string {
 		return replica.Owner
 	}
 	return replica.AccountID
+}
+
+func isCase25InnerPath(path string) bool {
+	return strings.Contains(path, "/test-case-id-25-inner/") && strings.HasSuffix(path, "/test-case-id-25-inner.txt")
 }
 
 func (db *DB) InsertFile(file *model.File) error {
@@ -1636,6 +1641,9 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 		file.ModTime = time.Unix(modTime, 0)
 		fileMap[file.ID] = file
 		files = append(files, file)
+		if isCase25InnerPath(file.Path) {
+			logger.Info("DEBUG case25 load-file id=%s path=%s name=%s md5=%s status=%s", file.ID, file.Path, file.Name, file.GoogleDriveMD5, file.Status)
+		}
 	}
 
 	if err := rows.Err(); err != nil {
@@ -1687,10 +1695,18 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 		if rOwner.Valid {
 			r.Owner = rOwner.String
 		}
+		if isCase25InnerPath(r.Path) {
+			logger.Info("DEBUG case25 load-replica id=%d file_id=%s provider=%s account=%s native_id=%s path=%s hash=%s status=%s", r.ID, r.FileID, r.Provider, r.AccountID, r.NativeID, r.Path, r.NativeHash, r.Status)
+		}
 
 		if file, ok := fileMap[r.FileID]; ok {
 			file.Replicas = append(file.Replicas, r)
 			allReplicas = append(allReplicas, r)
+			if isCase25InnerPath(r.Path) {
+				logger.Info("DEBUG case25 attach-replica file_id=%s file_path=%s provider=%s replica_id=%d", file.ID, file.Path, r.Provider, r.ID)
+			}
+		} else if isCase25InnerPath(r.Path) {
+			logger.Info("DEBUG case25 missing-file-for-replica file_id=%s provider=%s replica_id=%d path=%s", r.FileID, r.Provider, r.ID, r.Path)
 		}
 	}
 
@@ -1710,6 +1726,19 @@ func (db *DB) GetAllFilesAcrossProviders() ([]*model.File, error) {
 	if len(fragmented) > 0 {
 		if err := db.batchLoadFragments(fragmented); err != nil {
 			return nil, err
+		}
+	}
+
+	for _, file := range files {
+		if !isCase25InnerPath(file.Path) {
+			continue
+		}
+		logger.Info("DEBUG case25 final-file id=%s path=%s replicas=%d md5=%s", file.ID, file.Path, len(file.Replicas), file.GoogleDriveMD5)
+		for _, replica := range file.Replicas {
+			if replica == nil {
+				continue
+			}
+			logger.Info("DEBUG case25 final-file-replica file_id=%s replica_id=%d provider=%s account=%s native_id=%s path=%s status=%s", file.ID, replica.ID, replica.Provider, replica.AccountID, replica.NativeID, replica.Path, replica.Status)
 		}
 	}
 
@@ -2223,6 +2252,24 @@ func (db *DB) UpdateReplica(replica *model.Replica) error {
 		if err != nil {
 			return fmt.Errorf("failed to update replica: %w", err)
 		}
+		if strings.Contains(replica.Path, "/test-case-id-25-inner/") && replica.Provider == model.ProviderGoogle {
+			logger.Info("DEBUG case25 update-replica id=%d file_id=%s account=%s native_id=%s path=%s hash=%s status=%s", replica.ID, replica.FileID, replica.AccountID, replica.NativeID, replica.Path, replica.NativeHash, replica.Status)
+		}
+		return nil
+	})
+}
+
+func (db *DB) ReassignReplicaToFile(replicaID int64, fileID string) error {
+	return db.WithTx(func(tx *sql.Tx) error {
+		stmt, err := db.txStmt(tx, `UPDATE replicas SET file_id = ? WHERE id = ?`)
+		if err != nil {
+			return fmt.Errorf("failed to prepare reassign replica statement: %w", err)
+		}
+		defer stmt.Close()
+		if _, err := stmt.Exec(fileID, replicaID); err != nil {
+			return fmt.Errorf("failed to reassign replica: %w", err)
+		}
+		logger.Info("DEBUG case25 reassign-replica id=%d file_id=%s", replicaID, fileID)
 		return nil
 	})
 }
@@ -2322,27 +2369,18 @@ func (db *DB) LinkOrphanedReplicas() error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		query := `
 		WITH FileMap AS (
-			SELECT id, google_drive_md5, path
+			SELECT id, google_drive_md5
 			FROM files
 		),
 		ReplicaMatch AS (
 			SELECT r.id AS replica_id,
-				COALESCE(
-					(
-						SELECT fm.id
-						FROM FileMap fm
-						WHERE fm.google_drive_md5 != ''
-						AND LOWER(r.provider) = 'google'
-						AND r.native_hash = fm.google_drive_md5
-						LIMIT 1
-					),
-					(
-						SELECT fm.id
-						FROM FileMap fm
-						WHERE (fm.google_drive_md5 IS NULL OR fm.google_drive_md5 = '')
-						AND fm.path = r.path
-						LIMIT 1
-					)
+				(
+					SELECT fm.id
+					FROM FileMap fm
+					WHERE fm.google_drive_md5 != ''
+					AND LOWER(r.provider) = 'google'
+					AND r.native_hash = fm.google_drive_md5
+					LIMIT 1
 				) AS file_id
 			FROM replicas r
 			WHERE r.file_id IS NULL OR r.file_id = ''
@@ -2368,7 +2406,8 @@ func (db *DB) LinkOrphanedReplicas() error {
 }
 
 // PromoteOrphanedReplicasToFiles creates new logical file records for replicas that still do not match any
-// existing file. Established Google identities are grouped by MD5; otherwise path is used.
+// existing file. Each orphan replica becomes its own logical file so distinct same-content paths are not
+// collapsed prematurely during metadata ingestion.
 func (db *DB) PromoteOrphanedReplicasToFiles() error {
 	query := `
 	SELECT id, path, name, size, mod_time, status, provider, native_hash
@@ -2388,23 +2427,19 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 		Size           int64
 		ModTime        int64
 		Status         string
-		Provider       string
-		NativeHash     string
 		GoogleDriveMD5 string
-		GroupingKey    string
 	}
 
 	var orphans []Orphan
 	for rows.Next() {
 		var o Orphan
-		if err := rows.Scan(&o.ReplicaID, &o.Path, &o.Name, &o.Size, &o.ModTime, &o.Status, &o.Provider, &o.NativeHash); err != nil {
+		var provider string
+		var nativeHash string
+		if err := rows.Scan(&o.ReplicaID, &o.Path, &o.Name, &o.Size, &o.ModTime, &o.Status, &provider, &nativeHash); err != nil {
 			return err
 		}
-		if strings.EqualFold(o.Provider, string(model.ProviderGoogle)) && o.NativeHash != "" {
-			o.GoogleDriveMD5 = o.NativeHash
-			o.GroupingKey = "md5:" + o.GoogleDriveMD5
-		} else {
-			o.GroupingKey = "path:" + o.Path
+		if strings.EqualFold(provider, string(model.ProviderGoogle)) && nativeHash != "" {
+			o.GoogleDriveMD5 = nativeHash
 		}
 		orphans = append(orphans, o)
 	}
@@ -2412,11 +2447,6 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 
 	if len(orphans) == 0 {
 		return nil
-	}
-
-	orphanGroups := make(map[string][]Orphan)
-	for _, o := range orphans {
-		orphanGroups[o.GroupingKey] = append(orphanGroups[o.GroupingKey], o)
 	}
 
 	return db.WithTx(func(tx *sql.Tx) error {
@@ -2437,20 +2467,15 @@ func (db *DB) PromoteOrphanedReplicasToFiles() error {
 		}
 		defer updateReplicaStmt.Close()
 
-		for groupingKey, group := range orphanGroups {
-			first := group[0]
+		for _, o := range orphans {
 			newFileID := uuid.New().String()
-			googleDriveMD5 := first.GoogleDriveMD5
-			_, err := insertFileStmt.Exec(newFileID, first.Path, first.Name, first.Size, googleDriveMD5, first.ModTime, first.Status)
+			_, err := insertFileStmt.Exec(newFileID, o.Path, o.Name, o.Size, o.GoogleDriveMD5, o.ModTime, o.Status)
 			if err != nil {
-				return fmt.Errorf("failed to promote replica group %s: %w", groupingKey, err)
+				return fmt.Errorf("failed to promote replica %d: %w", o.ReplicaID, err)
 			}
-
-			for _, o := range group {
-				_, err = updateReplicaStmt.Exec(newFileID, o.ReplicaID)
-				if err != nil {
-					return fmt.Errorf("failed to update replica %d: %w", o.ReplicaID, err)
-				}
+			_, err = updateReplicaStmt.Exec(newFileID, o.ReplicaID)
+			if err != nil {
+				return fmt.Errorf("failed to update replica %d: %w", o.ReplicaID, err)
 			}
 		}
 

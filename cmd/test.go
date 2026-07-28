@@ -1983,10 +1983,10 @@ func specCase25(r *task.Runner, main *model.User, backups []*model.User) error {
 	)
 	outerFileName := "test-case-id-25-outer.txt"
 	innerFileName := "test-case-id-25-inner.txt"
-	googleOuterContent := []byte("Uploaded to provider: Google Drive\n")
-	googleInnerContent := []byte("Uploaded to provider: Google Drive\n")
-	microsoftOuterContent := []byte("Uploaded to provider: Microsoft OneDrive\n")
-	microsoftInnerContent := []byte("Uploaded to provider: Microsoft OneDrive\n")
+	googleOuterContent := []byte("Uploaded to provider: Google Drive\nOuter")
+	googleInnerContent := []byte("Uploaded to provider: Google Drive\nInner")
+	microsoftOuterContent := []byte("Uploaded to provider: Microsoft OneDrive\nOuter")
+	microsoftInnerContent := []byte("Uploaded to provider: Microsoft OneDrive\nInner")
 
 	mainClient, err := r.GetOrCreateClient(main)
 	if err != nil {

@@ -65,6 +65,92 @@ func NewRunner(config *model.Config, db *database.DB, safeMode bool) *Runner {
 
 // PreloadFolderCache loads all folder replicas from the database into the memory cache.
 // This significantly speeds up folder resolution by avoiding point queries to the database.
+func (r *Runner) canonicalReplicaPriority(replica *model.Replica) int {
+	if replica == nil {
+		return 1 << 30
+	}
+	isMain := false
+	for _, user := range r.config.Users {
+		if user.Provider != replica.Provider {
+			continue
+		}
+		if user.GetAccountID() != replica.AccountID {
+			continue
+		}
+		isMain = user.IsMain
+		break
+	}
+
+	switch replica.Provider {
+	case model.ProviderGoogle:
+		if isMain {
+			return 0
+		}
+		return 1
+	case model.ProviderMicrosoft:
+		return 2
+	case model.ProviderTelegram:
+		return 3
+	default:
+		return 4
+	}
+}
+
+func (r *Runner) chooseCanonicalReplica(file *model.File) *model.Replica {
+	if file == nil {
+		return nil
+	}
+	var best *model.Replica
+	for _, replica := range file.Replicas {
+		if replica == nil || replica.Status != "active" {
+			continue
+		}
+		if best == nil {
+			best = replica
+			continue
+		}
+		bestPriority := r.canonicalReplicaPriority(best)
+		replicaPriority := r.canonicalReplicaPriority(replica)
+		if replicaPriority < bestPriority {
+			best = replica
+			continue
+		}
+		if replicaPriority > bestPriority {
+			continue
+		}
+		if replica.ModTime.After(best.ModTime) {
+			best = replica
+		}
+	}
+	return best
+}
+
+func (r *Runner) reconcileLogicalFilePaths() error {
+	files, err := r.db.GetAllFiles()
+	if err != nil {
+		return err
+	}
+
+	for _, file := range files {
+		if file == nil || file.Status != "active" {
+			continue
+		}
+		canonicalReplica := r.chooseCanonicalReplica(file)
+		if canonicalReplica == nil {
+			continue
+		}
+
+		updated := *file
+		updated.Path = canonicalReplica.Path
+		updated.Name = canonicalReplica.Name
+		updated.ModTime = canonicalReplica.ModTime
+		if err := r.db.UpdateFile(&updated); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *Runner) PreloadFolderCache() {
 	if r.db == nil {
 		return
@@ -399,9 +485,9 @@ func (r *Runner) runMetadataPostProcessing(startTime time.Time) error {
 		return fmt.Errorf("failed to promote orphaned replicas: %w", err)
 	}
 
-	logger.Info("Recording Google Drive MD5 canonical identity...")
-	if err := r.db.UpdateLogicalFilesGoogleMD5(); err != nil {
-		return fmt.Errorf("failed to update google_drive_md5: %w", err)
+	logger.Info("Reconciling logical file paths...")
+	if err := r.reconcileLogicalFilePaths(); err != nil {
+		return fmt.Errorf("failed to reconcile logical file paths: %w", err)
 	}
 
 	logger.Info("Updating soft-deleted file status...")
@@ -1268,16 +1354,21 @@ func buildFilesByPath(all []*model.File) map[string]map[model.Provider][]*model.
 		if _, ok := result[f.Path]; !ok {
 			result[f.Path] = make(map[model.Provider][]*model.File)
 		}
-		seenProviders := make(map[model.Provider]bool)
+
+		added := false
 		for _, replica := range f.Replicas {
 			if replica.Status != "active" {
 				continue
 			}
-			if seenProviders[replica.Provider] {
-				continue
-			}
 			result[f.Path][replica.Provider] = append(result[f.Path][replica.Provider], f)
-			seenProviders[replica.Provider] = true
+			added = true
+		}
+		if added {
+			continue
+		}
+
+		if f.GoogleDriveMD5 != "" {
+			result[f.Path][model.ProviderGoogle] = append(result[f.Path][model.ProviderGoogle], f)
 		}
 	}
 	return result
@@ -1295,15 +1386,31 @@ func getMasterFile(fileMap map[model.Provider][]*model.File) *model.File {
 }
 
 func providerHasMatchingIdentity(files []*model.File, sourceFile *model.File) bool {
+	if sourceFile == nil {
+		return false
+	}
 	for _, f := range files {
-		if f == nil || sourceFile == nil {
+		if f == nil {
 			continue
 		}
-		if sourceFile.GoogleDriveMD5 != "" && f.GoogleDriveMD5 == sourceFile.GoogleDriveMD5 {
+		if sourceFile.ID != "" && f.ID != "" && f.ID == sourceFile.ID {
 			return true
 		}
-		if sourceFile.GoogleDriveMD5 == "" && f.Path == sourceFile.Path {
+		if sourceFile.GoogleDriveMD5 != "" && f.GoogleDriveMD5 != "" && f.GoogleDriveMD5 == sourceFile.GoogleDriveMD5 {
 			return true
+		}
+		for _, sourceReplica := range sourceFile.Replicas {
+			if sourceReplica == nil || sourceReplica.Status != "active" || sourceReplica.NativeID == "" {
+				continue
+			}
+			for _, replica := range f.Replicas {
+				if replica == nil || replica.Status != "active" || replica.NativeID == "" {
+					continue
+				}
+				if replica.Provider == sourceReplica.Provider && replica.AccountID == sourceReplica.AccountID && replica.NativeID == sourceReplica.NativeID {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -1959,6 +2066,23 @@ func hasActiveMicrosoftReplicaForOtherAccount(file *model.File, targetAccountID 
 	return false
 }
 
+func providerHasActiveReplicaAtPath(fileMap map[model.Provider][]*model.File, provider model.Provider, path string) bool {
+	for _, file := range fileMap[provider] {
+		if file == nil {
+			continue
+		}
+		for _, replica := range file.Replicas {
+			if replica == nil || replica.Status != "active" {
+				continue
+			}
+			if replica.Provider == provider && replica.Path == path {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func getMissingMicrosoftTargetAccount(file *model.File, users []model.User) string {
 	if file == nil {
 		return ""
@@ -2052,9 +2176,7 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 
 		for _, provider := range providers {
 			providerFiles := fileMap[provider]
-			for _, sourceFile := range fileMap {
-				_ = sourceFile
-			}
+			providerHasAnyReplica := providerHasActiveReplicaAtPath(fileMap, provider, path)
 			for _, sourceProviderFiles := range fileMap {
 				for _, sourceFile := range sourceProviderFiles {
 					if sourceFile == nil {
@@ -2102,6 +2224,10 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 								syncRunID:  syncRunID,
 							})
 						}
+						continue
+					}
+
+					if !providerHasAnyReplica {
 						continue
 					}
 
@@ -2463,7 +2589,7 @@ func (r *Runner) refreshShortcutTargets(targets []shortcutRefreshTarget) error {
 // syncFolderStructures ensures empty folder structures are replicated across providers
 func (r *Runner) syncFolderStructures() error {
 	logger.Info("Syncing folder structures...")
-	allFolders, err := r.db.GetAllFolders()
+	allFolders, err := r.db.GetAllFolderReplicaViews()
 	if err != nil {
 		return fmt.Errorf("failed to get folders from DB: %w", err)
 	}
