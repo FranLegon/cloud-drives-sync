@@ -1005,7 +1005,11 @@ func specCase7(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
-	return verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-2.txt","is_dir":false},{"name":"test-case-id-3.txt","is_dir":false},{"name":"test-case-id-4-folder","is_dir":true},{"name":"test-case-id-5-folder","is_dir":true},{"name":"test-case-id-6.txt","is_dir":false},{"name":"test-case-id-7-folder","is_dir":true}]}`))
+	expected := mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-2.txt","is_dir":false},{"name":"test-case-id-3.txt","is_dir":false},{"name":"test-case-id-4-folder","is_dir":true},{"name":"test-case-id-5-folder","is_dir":true},{"name":"test-case-id-6.txt","is_dir":false},{"name":"test-case-id-7-folder","is_dir":true}]}`)
+	if isIsolatedTestRun() {
+		expected = mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-7-folder","is_dir":true}]}`)
+	}
+	return verifyGoogleTree(r, main, backups, expected)
 }
 
 // SPEC Case 8: Sync file from Telegram

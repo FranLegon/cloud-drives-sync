@@ -1229,6 +1229,66 @@ func (db *DB) GetAllFolderReplicaViews() ([]*model.Folder, error) {
 	return folders, rows.Err()
 }
 
+// SyncLogicalFoldersFromFolders projects discovered provider folders from the legacy folders table
+// into logical_folders and folder_replicas so empty-folder convergence can operate on them.
+func (db *DB) SyncLogicalFoldersFromFolders() error {
+	folders, err := db.GetAllFolders()
+	if err != nil {
+		return fmt.Errorf("failed to load folders for logical sync: %w", err)
+	}
+
+	return db.WithTx(func(tx *sql.Tx) error {
+		for _, folder := range folders {
+			if folder == nil || folder.Path == "" || folder.Path == "/" {
+				continue
+			}
+
+			logicalFolderID := "lf:path:" + folder.Path
+			parentPath := filepath.Dir(folder.Path)
+			parentLogicalFolderID := ""
+			if parentPath != "." && parentPath != "/" && parentPath != "" {
+				parentLogicalFolderID = "lf:path:" + strings.ReplaceAll(parentPath, "\\", "/")
+			}
+
+			status := "active"
+			var parent interface{}
+			if parentLogicalFolderID != "" {
+				parent = parentLogicalFolderID
+			}
+			if _, err := tx.Exec(
+				`INSERT INTO logical_folders (id, path, name, parent_logical_folder_id, status)
+				 VALUES (?, ?, ?, ?, ?)
+				 ON CONFLICT(id) DO UPDATE SET
+					path=excluded.path,
+					name=excluded.name,
+					parent_logical_folder_id=excluded.parent_logical_folder_id,
+					status=excluded.status`,
+				logicalFolderID, folder.Path, folder.Name, parent, status,
+			); err != nil {
+				return fmt.Errorf("failed to upsert logical folder for %s: %w", folder.Path, err)
+			}
+
+			accountID := folder.UserEmail
+			if folder.Provider == model.ProviderTelegram {
+				accountID = folder.UserPhone
+			}
+			if _, err := tx.Exec(
+				`INSERT INTO folder_replicas
+				 (logical_folder_id, provider, account_id, native_folder_id, owner, last_seen_at)
+				 VALUES (?, ?, ?, ?, ?, ?)
+				 ON CONFLICT(provider, account_id, native_folder_id) DO UPDATE SET
+					logical_folder_id=excluded.logical_folder_id,
+					owner=excluded.owner,
+					last_seen_at=excluded.last_seen_at`,
+				logicalFolderID, string(folder.Provider), accountID, folder.ID, folder.OwnerEmail, time.Now().Unix(),
+			); err != nil {
+				return fmt.Errorf("failed to upsert folder replica for %s: %w", folder.Path, err)
+			}
+		}
+		return nil
+	})
+}
+
 // UpdateLogicalFilesGoogleMD5 populates each logical file's canonical Google Drive MD5 identity from
 // its most recent active Google replica's fingerprint. Only rows whose value actually changes are
 // updated, so repeated runs are idempotent (do not bump the metadata version).

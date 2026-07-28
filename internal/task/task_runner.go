@@ -510,6 +510,11 @@ func (r *Runner) runMetadataPostProcessing(startTime time.Time) error {
 		logger.Error("Failed to process hard-deleted folder: %v", err)
 	}
 
+	logger.Info("Projecting discovered folders into logical folder replicas...")
+	if err := r.db.SyncLogicalFoldersFromFolders(); err != nil {
+		return fmt.Errorf("failed to sync logical folders from discovered folders: %w", err)
+	}
+
 	return nil
 }
 
