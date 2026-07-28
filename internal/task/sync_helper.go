@@ -147,42 +147,7 @@ func (r *Runner) resolveTransferTargetFolder(client api.CloudClient, provider mo
 		return client.GetSyncFolderID()
 	}
 
-	if provider != model.ProviderGoogle {
-		return r.ensureFolderStructure(client, strings.Trim(path, "/"), provider)
-	}
-
-	currentID, err := client.GetSyncFolderID()
-	if err != nil {
-		return "", err
-	}
-
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	for _, part := range parts {
-		if part == "" {
-			continue
-		}
-		folders, err := client.ListFolders(currentID)
-		if err != nil {
-			return "", err
-		}
-		var nextID string
-		for _, folder := range folders {
-			if folder.Name == part {
-				nextID = folder.ID
-				break
-			}
-		}
-		if nextID == "" {
-			created, err := client.CreateFolder(currentID, part)
-			if err != nil {
-				return "", err
-			}
-			nextID = created.ID
-		}
-		currentID = nextID
-	}
-
-	return currentID, nil
+	return r.ensureFolderStructure(client, strings.Trim(path, "/"), provider)
 }
 
 // It is safe to call concurrently; a mutex prevents duplicate folder creation.

@@ -1845,6 +1845,9 @@ func (r *Runner) mergeFolderInto(client api.CloudClient, user *model.User, canon
 			}); err != nil {
 				logger.Warning("Failed to refresh canonical folder replica %s: %v", canonical.Path, err)
 			}
+			cachePrefix := model.GenerateCacheKey(user.Provider, user.GetAccountID()) + ":"
+			trimmedCanonicalPath := strings.Trim(canonical.Path, "/\\")
+			r.folderCache.Store(cachePrefix+trimmedCanonicalPath, canonical.ID)
 		}
 	}
 	return nil
