@@ -734,6 +734,10 @@ func verifyGoogleSubtree(r *task.Runner, mainUser *model.User, backups []*model.
 	return verifyGoogleSubtreeForUsers(r, googleUsers, subtreePath, expected)
 }
 
+func isIsolatedTestRun() bool {
+	return strings.TrimSpace(testCase) != ""
+}
+
 // SPEC Case 1: Clean-slate setup
 func specCase1(r *task.Runner, main *model.User, backups []*model.User) error {
 	logger.Info("[MANUAL INTERACTION] Verification: special folders and clean DB state after config --init")
@@ -864,7 +868,11 @@ func specCase4(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
-	return verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-2.txt","is_dir":false},{"name":"test-case-id-3.txt","is_dir":false},{"name":"test-case-id-4-folder","is_dir":true}]}`))
+	expected := mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-2.txt","is_dir":false},{"name":"test-case-id-3.txt","is_dir":false},{"name":"test-case-id-4-folder","is_dir":true}]}`)
+	if isIsolatedTestRun() {
+		expected = mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-4-folder","is_dir":true}]}`)
+	}
+	return verifyGoogleTree(r, main, backups, expected)
 }
 
 // SPEC Case 5: Create folder on Google backup
@@ -890,7 +898,11 @@ func specCase5(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
-	return verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-2.txt","is_dir":false},{"name":"test-case-id-3.txt","is_dir":false},{"name":"test-case-id-4-folder","is_dir":true},{"name":"test-case-id-5-folder","is_dir":true}]}`))
+	expected := mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-2.txt","is_dir":false},{"name":"test-case-id-3.txt","is_dir":false},{"name":"test-case-id-4-folder","is_dir":true},{"name":"test-case-id-5-folder","is_dir":true}]}`)
+	if isIsolatedTestRun() {
+		expected = mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-5-folder","is_dir":true}]}`)
+	}
+	return verifyGoogleTree(r, main, backups, expected)
 }
 
 // SPEC Case 6: Create file on Microsoft backup
@@ -1101,7 +1113,11 @@ func specCase11(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
-	return verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true,"children":[{"name":"test-case-id-10.txt","is_dir":false}]}]},{"name":"test-case-id-2.txt","is_dir":false},{"name":"test-case-id-3.txt","is_dir":false},{"name":"test-case-id-4-folder","is_dir":true},{"name":"test-case-id-5-folder","is_dir":true},{"name":"test-case-id-6.txt","is_dir":false},{"name":"test-case-id-7-folder","is_dir":true},{"name":"test-case-id-8.txt","is_dir":false},{"name":"test-case-id-9.txt","is_dir":false},{"name":"test-case-id-11-folder","is_dir":true,"children":[{"name":"test-case-id-11-subfolder","is_dir":true,"children":[{"name":"test-case-id-11-subsubfolder","is_dir":true}]}]}]}`))
+	expected := mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true,"children":[{"name":"test-case-id-10.txt","is_dir":false}]}]},{"name":"test-case-id-2.txt","is_dir":false},{"name":"test-case-id-3.txt","is_dir":false},{"name":"test-case-id-4-folder","is_dir":true},{"name":"test-case-id-5-folder","is_dir":true},{"name":"test-case-id-6.txt","is_dir":false},{"name":"test-case-id-7-folder","is_dir":true},{"name":"test-case-id-8.txt","is_dir":false},{"name":"test-case-id-9.txt","is_dir":false},{"name":"test-case-id-11-folder","is_dir":true,"children":[{"name":"test-case-id-11-subfolder","is_dir":true,"children":[{"name":"test-case-id-11-subsubfolder","is_dir":true}]}]}]}`)
+	if isIsolatedTestRun() {
+		expected = mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-11-folder","is_dir":true,"children":[{"name":"test-case-id-11-subfolder","is_dir":true,"children":[{"name":"test-case-id-11-subsubfolder","is_dir":true}]}]}]}`)
+	}
+	return verifyGoogleTree(r, main, backups, expected)
 }
 
 // SPEC Case 12: Microsoft OneDrive nested folders
@@ -1134,7 +1150,11 @@ func specCase12(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("sync failed: %w", err)
 	}
-	return verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true,"children":[{"name":"test-case-id-10.txt","is_dir":false}]}]},{"name":"test-case-id-2.txt","is_dir":false},{"name":"test-case-id-3.txt","is_dir":false},{"name":"test-case-id-4-folder","is_dir":true},{"name":"test-case-id-5-folder","is_dir":true},{"name":"test-case-id-6.txt","is_dir":false},{"name":"test-case-id-7-folder","is_dir":true},{"name":"test-case-id-8.txt","is_dir":false},{"name":"test-case-id-9.txt","is_dir":false},{"name":"test-case-id-11-folder","is_dir":true,"children":[{"name":"test-case-id-11-subfolder","is_dir":true,"children":[{"name":"test-case-id-11-subsubfolder","is_dir":true}]}]},{"name":"test-case-id-12-folder","is_dir":true,"children":[{"name":"test-case-id-12-subfolder","is_dir":true,"children":[{"name":"test-case-id-12-subsubfolder","is_dir":true}]}]}]}`))
+	expected := mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true,"children":[{"name":"test-case-id-10.txt","is_dir":false}]}]},{"name":"test-case-id-2.txt","is_dir":false},{"name":"test-case-id-3.txt","is_dir":false},{"name":"test-case-id-4-folder","is_dir":true},{"name":"test-case-id-5-folder","is_dir":true},{"name":"test-case-id-6.txt","is_dir":false},{"name":"test-case-id-7-folder","is_dir":true},{"name":"test-case-id-8.txt","is_dir":false},{"name":"test-case-id-9.txt","is_dir":false},{"name":"test-case-id-11-folder","is_dir":true,"children":[{"name":"test-case-id-11-subfolder","is_dir":true,"children":[{"name":"test-case-id-11-subsubfolder","is_dir":true}]}]},{"name":"test-case-id-12-folder","is_dir":true,"children":[{"name":"test-case-id-12-subfolder","is_dir":true,"children":[{"name":"test-case-id-12-subsubfolder","is_dir":true}]}]}]}`)
+	if isIsolatedTestRun() {
+		expected = mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-12-folder","is_dir":true,"children":[{"name":"test-case-id-12-subfolder","is_dir":true,"children":[{"name":"test-case-id-12-subsubfolder","is_dir":true}]}]}]}`)
+	}
+	return verifyGoogleTree(r, main, backups, expected)
 }
 
 // SPEC Case 13: Google Drive moved file
@@ -1979,7 +1999,11 @@ func specCase25(r *task.Runner, main *model.User, backups []*model.User) error {
 		return fmt.Errorf("sync failed: %w", err)
 	}
 
-	if err := verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-25-outer","is_dir":true,"children":[{"name":"test-case-id-25-inner","is_dir":true},{"name":"test-case-id-25-outer.txt","is_dir":false}]}]}`)); err != nil {
+	expected := mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-25-outer","is_dir":true,"children":[{"name":"test-case-id-25-inner","is_dir":true},{"name":"test-case-id-25-outer.txt","is_dir":false}]}]}`)
+	if isIsolatedTestRun() {
+		expected = mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-25-outer","is_dir":true,"children":[{"name":"test-case-id-25-inner","is_dir":true},{"name":"test-case-id-25-outer.txt","is_dir":false}]}]}`)
+	}
+	if err := verifyGoogleTree(r, main, backups, expected); err != nil {
 		return err
 	}
 
