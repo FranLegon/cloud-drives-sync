@@ -661,6 +661,79 @@ func verifyGoogleTree(r *task.Runner, mainUser *model.User, backups []*model.Use
 	return verifyGoogleTreeForUsers(r, googleUsers, expected)
 }
 
+func findNodeByPath(root *Node, path string) *Node {
+	if root == nil {
+		return nil
+	}
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return root
+	}
+	current := root
+	for _, part := range strings.Split(path, "/") {
+		if part == "" {
+			continue
+		}
+		var next *Node
+		for _, child := range current.Children {
+			if child.Name == part {
+				next = child
+				break
+			}
+		}
+		if next == nil {
+			return nil
+		}
+		current = next
+	}
+	return current
+}
+
+func verifyGoogleSubtreeForUsers(r *task.Runner, users []*model.User, subtreePath string, expected *Node) error {
+	for _, u := range users {
+		if u.Provider != model.ProviderGoogle {
+			continue
+		}
+		client, err := r.GetOrCreateClient(u)
+		if err != nil {
+			return fmt.Errorf("get client for %s: %w", u.Email, err)
+		}
+		syncFolderID, err := client.GetSyncFolderID()
+		if err != nil {
+			return fmt.Errorf("get sync folder for %s: %w", u.Email, err)
+		}
+		actualRoot, err := buildProviderTree(client, syncFolderID, "cloud-drives-sync-root")
+		if err != nil {
+			return fmt.Errorf("build tree for %s: %w", u.Email, err)
+		}
+		actual := findNodeByPath(actualRoot, subtreePath)
+		if actual == nil {
+			return fmt.Errorf("google subtree missing for %s at %s", u.Email, subtreePath)
+		}
+		if err := compareNodes(expected, actual, expected.Name); err != nil {
+			expectedJSON, marshalExpectedErr := json.MarshalIndent(expected, "", "  ")
+			actualJSON, marshalActualErr := json.MarshalIndent(actual, "", "  ")
+			if marshalExpectedErr != nil {
+				logger.Error("failed to marshal expected google subtree for %s: %v", u.Email, marshalExpectedErr)
+			} else {
+				logger.Error("expected google subtree for %s at %s:\n%s", u.Email, subtreePath, string(expectedJSON))
+			}
+			if marshalActualErr != nil {
+				logger.Error("failed to marshal actual google subtree for %s: %v", u.Email, marshalActualErr)
+			} else {
+				logger.Error("actual google subtree for %s at %s:\n%s", u.Email, subtreePath, string(actualJSON))
+			}
+			return fmt.Errorf("google subtree mismatch for %s at %s: %w", u.Email, subtreePath, err)
+		}
+	}
+	return nil
+}
+
+func verifyGoogleSubtree(r *task.Runner, mainUser *model.User, backups []*model.User, subtreePath string, expected *Node) error {
+	googleUsers := append([]*model.User{mainUser}, filterUsers(backups, model.ProviderGoogle)...)
+	return verifyGoogleSubtreeForUsers(r, googleUsers, subtreePath, expected)
+}
+
 // SPEC Case 1: Clean-slate setup
 func specCase1(r *task.Runner, main *model.User, backups []*model.User) error {
 	logger.Info("[MANUAL INTERACTION] Verification: special folders and clean DB state after config --init")
@@ -1786,7 +1859,7 @@ func specCase24(r *task.Runner, main *model.User, backups []*model.User) error {
 		return fmt.Errorf("sync failed: %w", err)
 	}
 
-	if err := verifyGoogleTree(r, main, backups, mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-24-grandparent","is_dir":true,"children":[{"name":"test-case-id-24-parent","is_dir":true,"children":[{"name":"test-case-id-24-child","is_dir":true,"children":[{"name":"test-case-id-24-child-A.txt","is_dir":false},{"name":"test-case-id-24-child-B.txt","is_dir":false}]},{"name":"test-case-id-24-parent-A.txt","is_dir":false},{"name":"test-case-id-24-parent-B.txt","is_dir":false}]}]}]}`)); err != nil {
+	if err := verifyGoogleSubtree(r, main, backups, "/"+grandparentName, mustExpectedTree(`{"name":"test-case-id-24-grandparent","is_dir":true,"children":[{"name":"test-case-id-24-parent","is_dir":true,"children":[{"name":"test-case-id-24-child","is_dir":true,"children":[{"name":"test-case-id-24-child-A.txt","is_dir":false},{"name":"test-case-id-24-child-B.txt","is_dir":false}]},{"name":"test-case-id-24-parent-A.txt","is_dir":false},{"name":"test-case-id-24-parent-B.txt","is_dir":false}]}]}`)); err != nil {
 		return err
 	}
 

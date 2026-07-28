@@ -2005,8 +2005,8 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 		updateQuery := fmt.Sprintf(`
 		WITH ReplicaAgg AS (
 			SELECT file_id,
-				SUM(CASE WHEN provider = 'google' AND path NOT LIKE '%%%s%%' AND path NOT LIKE '%%%s%%' THEN 1 ELSE 0 END) as active_google,
-				SUM(CASE WHEN provider = 'google' THEN 1 ELSE 0 END) as total_google,
+				SUM(CASE WHEN LOWER(provider) = 'google' AND path NOT LIKE '%%%s%%' AND path NOT LIKE '%%%s%%' THEN 1 ELSE 0 END) as active_google,
+				SUM(CASE WHEN LOWER(provider) = 'google' THEN 1 ELSE 0 END) as total_google,
 				SUM(CASE WHEN path NOT LIKE '%%%s%%' AND path NOT LIKE '%%%s%%' THEN 1 ELSE 0 END) as active_any,
 				COUNT(*) as total_any
 			FROM replicas
@@ -2054,7 +2054,7 @@ func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 				) as rn
 			FROM replicas r
 			WHERE r.status = 'active'
-			AND r.provider = 'google'
+			AND LOWER(r.provider) = 'google'
 			AND r.file_id IS NOT NULL
 			AND r.file_id != ''
 			AND r.last_seen_at >= ?
