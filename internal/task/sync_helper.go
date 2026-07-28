@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/FranLegon/cloud-drives-sync/internal/api"
+	"github.com/FranLegon/cloud-drives-sync/internal/config"
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/FranLegon/cloud-drives-sync/internal/microsoft"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
@@ -316,6 +317,77 @@ func handleDownloadError(err error, errChan chan error, contextStr string) {
 	} else {
 		errChan <- nil // Signal completion to prevent deadlock
 	}
+}
+
+func (r *Runner) ensureGoogleDriveMD5(sourceFile *model.File, sourceReplica *model.Replica) (string, error) {
+	if sourceFile != nil && sourceFile.GoogleDriveMD5 != "" {
+		return sourceFile.GoogleDriveMD5, nil
+	}
+	if sourceFile == nil || sourceReplica == nil {
+		return "", fmt.Errorf("missing source file or replica for Google MD5 resolution")
+	}
+
+	googleMain := config.GetMainAccount(r.config, model.ProviderGoogle)
+	if googleMain == nil {
+		return "", fmt.Errorf("google main account not configured")
+	}
+
+	sourceUser := r.getUser(sourceReplica.Provider, sourceReplica.AccountID)
+	if sourceUser == nil {
+		return "", fmt.Errorf("user not found for replica %s", sourceReplica.AccountID)
+	}
+
+	sourceClient, err := r.GetOrCreateClient(sourceUser)
+	if err != nil {
+		return "", fmt.Errorf("failed to get source client for MD5 resolution: %w", err)
+	}
+	googleClient, err := r.GetOrCreateClient(googleMain)
+	if err != nil {
+		return "", fmt.Errorf("failed to get Google main client for MD5 resolution: %w", err)
+	}
+	googleSyncFolderID, err := googleClient.GetSyncFolderID()
+	if err != nil {
+		return "", fmt.Errorf("failed to get Google sync folder for MD5 resolution: %w", err)
+	}
+
+	pr, pw := io.Pipe()
+	errChan := make(chan error, 1)
+	go func() {
+		defer close(errChan)
+		if err := sourceClient.DownloadFile(sourceReplica.NativeID, pw); err != nil {
+			_ = pw.CloseWithError(err)
+			errChan <- err
+			return
+		}
+		_ = pw.Close()
+		errChan <- nil
+	}()
+
+	tempName := fmt.Sprintf(".tmp-md5-%s-%d", uuid.New().String(), time.Now().UnixNano())
+	uploadedFile, uploadErr := googleClient.UploadFile(googleSyncFolderID, tempName, pr, sourceFile.Size)
+	_ = pr.Close()
+	downloadErr := <-errChan
+	if uploadErr != nil {
+		return "", fmt.Errorf("failed temporary Google upload for MD5 resolution: %w", uploadErr)
+	}
+	if downloadErr != nil {
+		if uploadedFile != nil && uploadedFile.ID != "" {
+			_ = googleClient.DeleteFile(uploadedFile.ID)
+		}
+		return "", fmt.Errorf("failed source download for MD5 resolution: %w", downloadErr)
+	}
+	if uploadedFile == nil || uploadedFile.GoogleDriveMD5 == "" {
+		if uploadedFile != nil && uploadedFile.ID != "" {
+			_ = googleClient.DeleteFile(uploadedFile.ID)
+		}
+		return "", fmt.Errorf("temporary Google upload did not return md5")
+	}
+	if err := googleClient.DeleteFile(uploadedFile.ID); err != nil {
+		logger.Warning("Failed to delete temporary Google MD5 probe file %s: %v", uploadedFile.ID, err)
+	}
+
+	sourceFile.GoogleDriveMD5 = uploadedFile.GoogleDriveMD5
+	return uploadedFile.GoogleDriveMD5, nil
 }
 
 // copyFile copies a file from one provider to another.
@@ -775,8 +847,12 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 				} else {
 					logger.Warning("Shortcut creation failed path=%q account=%s: %v. Falling back to placeholder creation.", sourceFile.Path, targetUser.Email, err)
 				}
+				googleDriveMD5, md5Err := r.ensureGoogleDriveMD5(sourceFile, sourceReplica)
+				if md5Err != nil {
+					return nil, fmt.Errorf("failed to resolve GoogleDriveMD5 for fake shortcut: %w", md5Err)
+				}
 				if msClient, ok := targetClient.(*microsoft.Client); ok {
-					shortcut, err = msClient.CreateFakeShortcut(parentID, sourceFile.Name, sourceFile.Size, sourceFile.GoogleDriveMD5)
+					shortcut, err = msClient.CreateFakeShortcut(parentID, sourceFile.Name, sourceFile.Size, googleDriveMD5)
 					if err != nil {
 						return nil, fmt.Errorf("failed to create fake shortcut: %w", err)
 					}
@@ -832,5 +908,6 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 		ParentID:     parentID,
 		ParentPath:   dir,
 		ExpectedName: shortcut.Name,
+		NativeID:     shortcut.ID,
 	}, nil
 }

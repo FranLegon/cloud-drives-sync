@@ -2378,6 +2378,7 @@ type shortcutRefreshTarget struct {
 	ParentID     string
 	ParentPath   string
 	ExpectedName string
+	NativeID     string
 }
 
 // distributeShortcuts ensures that for every file in Microsoft OneDrive,
@@ -2559,7 +2560,15 @@ func (r *Runner) refreshShortcutTargets(targets []shortcutRefreshTarget) error {
 
 		matched := false
 		for _, file := range files {
-			if file.Name != target.Name && file.Name != target.ExpectedName {
+			matchesID := target.NativeID != ""
+			for _, replica := range file.Replicas {
+				if replica != nil && replica.NativeID == target.NativeID {
+					matchesID = true
+					break
+				}
+			}
+			matchesName := file.Name == target.Name || file.Name == target.ExpectedName
+			if !matchesID && !matchesName {
 				continue
 			}
 			matched = true
@@ -2573,9 +2582,12 @@ func (r *Runner) refreshShortcutTargets(targets []shortcutRefreshTarget) error {
 					return fmt.Errorf("failed to upsert refreshed shortcut replica for %s: %w", target.Path, err)
 				}
 			}
+			if matchesID {
+				break
+			}
 		}
 		if !matched {
-			logger.Warning("Targeted shortcut refresh did not find expected item path=%q account=%s folder=%s", target.Path, target.AccountID, target.ParentPath)
+			logger.Warning("Targeted shortcut refresh did not find expected item path=%q account=%s folder=%s native_id=%s", target.Path, target.AccountID, target.ParentPath, target.NativeID)
 		}
 	}
 
