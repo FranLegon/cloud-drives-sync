@@ -553,6 +553,33 @@ func mustExpectedTree(jsonStr string) *Node {
 	return &node
 }
 
+func isConflictWildcardPattern(name string) bool {
+	return strings.Contains(name, "_conflict_YYYY-MM-DD_hh-mm-ss")
+}
+
+func matchesExpectedNodeName(expectedName, actualName string) bool {
+	if expectedName == actualName {
+		return true
+	}
+	if !isConflictWildcardPattern(expectedName) {
+		return false
+	}
+	parts := strings.Split(expectedName, "_conflict_YYYY-MM-DD_hh-mm-ss")
+	if len(parts) != 2 {
+		return false
+	}
+	prefix, suffix := parts[0], parts[1]
+	if !strings.HasPrefix(actualName, prefix+"_conflict_") || !strings.HasSuffix(actualName, suffix) {
+		return false
+	}
+	middle := strings.TrimSuffix(strings.TrimPrefix(actualName, prefix+"_conflict_"), suffix)
+	if len(middle) != len("2006-01-02_15-04-05") {
+		return false
+	}
+	_, err := time.Parse("2006-01-02_15-04-05", middle)
+	return err == nil
+}
+
 func normalizeNode(node *Node) {
 	if node == nil {
 		return
@@ -602,7 +629,7 @@ func compareNodes(expected, actual *Node, currentPath string) error {
 		}
 		return fmt.Errorf("tree mismatch at %s: expected node %v, got %v", currentPath, expected != nil, actual != nil)
 	}
-	if expected.Name != actual.Name {
+	if !matchesExpectedNodeName(expected.Name, actual.Name) {
 		return fmt.Errorf("tree mismatch at %s: expected name %q, got %q", currentPath, expected.Name, actual.Name)
 	}
 	if expected.IsDir != actual.IsDir {
@@ -611,10 +638,29 @@ func compareNodes(expected, actual *Node, currentPath string) error {
 	if len(expected.Children) != len(actual.Children) {
 		return fmt.Errorf("tree mismatch at %s: expected %d children, got %d", currentPath, len(expected.Children), len(actual.Children))
 	}
-	for i := range expected.Children {
-		childPath := currentPath + "/" + expected.Children[i].Name
-		if err := compareNodes(expected.Children[i], actual.Children[i], childPath); err != nil {
-			return err
+	usedActual := make([]bool, len(actual.Children))
+	for _, expectedChild := range expected.Children {
+		matched := false
+		for i, actualChild := range actual.Children {
+			if usedActual[i] {
+				continue
+			}
+			if expectedChild.IsDir != actualChild.IsDir {
+				continue
+			}
+			if !matchesExpectedNodeName(expectedChild.Name, actualChild.Name) {
+				continue
+			}
+			childPath := currentPath + "/" + actualChild.Name
+			if err := compareNodes(expectedChild, actualChild, childPath); err != nil {
+				continue
+			}
+			usedActual[i] = true
+			matched = true
+			break
+		}
+		if !matched {
+			return fmt.Errorf("tree mismatch at %s: expected child %q not found", currentPath, expectedChild.Name)
 		}
 	}
 	return nil
@@ -1999,9 +2045,9 @@ func specCase25(r *task.Runner, main *model.User, backups []*model.User) error {
 		return fmt.Errorf("sync failed: %w", err)
 	}
 
-	expected := mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-25-outer","is_dir":true,"children":[{"name":"test-case-id-25-inner","is_dir":true},{"name":"test-case-id-25-outer.txt","is_dir":false}]}]}`)
+	expected := mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-25-outer","is_dir":true,"children":[{"name":"test-case-id-25-inner","is_dir":true,"children":[{"name":"test-case-id-25-inner.txt","is_dir":false},{"name":"test-case-id-25-inner_conflict_YYYY-MM-DD_hh-mm-ss.txt","is_dir":false}]},{"name":"test-case-id-25-outer.txt","is_dir":false},{"name":"test-case-id-25-outer_conflict_YYYY-MM-DD_hh-mm-ss.txt","is_dir":false}]}]}`)
 	if isIsolatedTestRun() {
-		expected = mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-25-outer","is_dir":true,"children":[{"name":"test-case-id-25-inner","is_dir":true},{"name":"test-case-id-25-outer.txt","is_dir":false}]}]}`)
+		expected = mustExpectedTree(`{"name":"cloud-drives-sync-root","is_dir":true,"children":[{"name":"cloud-drives-sync-aux","is_dir":true,"children":[{"name":"hard-deleted","is_dir":true},{"name":"soft-deleted","is_dir":true},{"name":"unsynced-from-backups","is_dir":true}]},{"name":"test-case-id-25-outer","is_dir":true,"children":[{"name":"test-case-id-25-inner","is_dir":true,"children":[{"name":"test-case-id-25-inner.txt","is_dir":false},{"name":"test-case-id-25-inner_conflict_YYYY-MM-DD_hh-mm-ss.txt","is_dir":false}]},{"name":"test-case-id-25-outer.txt","is_dir":false},{"name":"test-case-id-25-outer_conflict_YYYY-MM-DD_hh-mm-ss.txt","is_dir":false}]}]}`)
 	}
 	if err := verifyGoogleTree(r, main, backups, expected); err != nil {
 		return err
