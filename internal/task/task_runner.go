@@ -3080,12 +3080,31 @@ func (r *Runner) ProcessHardDeletes() error {
 func (r *Runner) ProcessHardDeletedFolder() error {
 	hardDeletedPrefix := "/" + AuxFolder + "/" + HardDeletedFolder
 
-	files, err := r.db.GetActiveFilesByPathPrefix(hardDeletedPrefix)
+	allFiles, err := r.db.GetAllFiles()
 	if err != nil {
-		return fmt.Errorf("failed to get files in hard-deleted folder: %w", err)
+		return fmt.Errorf("failed to get files for hard-deleted scan: %w", err)
 	}
-	if len(files) == 0 {
+
+	filesByID := make(map[string]*model.File)
+	for _, file := range allFiles {
+		for _, rep := range file.Replicas {
+			if rep == nil || rep.Status != "active" {
+				continue
+			}
+			if strings.HasPrefix(rep.Path, hardDeletedPrefix) {
+				filesByID[file.ID] = file
+				break
+			}
+		}
+	}
+
+	if len(filesByID) == 0 {
 		return nil
+	}
+
+	files := make([]*model.File, 0, len(filesByID))
+	for _, file := range filesByID {
+		files = append(files, file)
 	}
 
 	logger.Info("Found %d file(s) in hard-deleted folder — permanently removing from all providers...", len(files))
