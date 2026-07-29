@@ -140,6 +140,22 @@ func (r *Runner) reconcileLogicalFilePaths() error {
 			continue
 		}
 
+		hasActiveReplica := false
+		for _, replica := range file.Replicas {
+			if replica != nil && replica.Status == "active" {
+				hasActiveReplica = true
+				break
+			}
+		}
+		if !hasActiveReplica {
+			updated := *file
+			updated.Status = "deleted"
+			if err := r.db.UpdateFile(&updated); err != nil {
+				return err
+			}
+			continue
+		}
+
 		updated := *file
 		updated.Path = canonicalReplica.Path
 		updated.Name = canonicalReplica.Name
@@ -1356,24 +1372,27 @@ func buildFilesByPath(all []*model.File) map[string]map[model.Provider][]*model.
 		if f.Status != "active" {
 			continue
 		}
+
+		hasActiveReplica := false
+		for _, replica := range f.Replicas {
+			if replica != nil && replica.Status == "active" {
+				hasActiveReplica = true
+				break
+			}
+		}
+		if !hasActiveReplica {
+			continue
+		}
+
 		if _, ok := result[f.Path]; !ok {
 			result[f.Path] = make(map[model.Provider][]*model.File)
 		}
 
-		added := false
 		for _, replica := range f.Replicas {
-			if replica.Status != "active" {
+			if replica == nil || replica.Status != "active" {
 				continue
 			}
 			result[f.Path][replica.Provider] = append(result[f.Path][replica.Provider], f)
-			added = true
-		}
-		if added {
-			continue
-		}
-
-		if f.GoogleDriveMD5 != "" {
-			result[f.Path][model.ProviderGoogle] = append(result[f.Path][model.ProviderGoogle], f)
 		}
 	}
 	return result
