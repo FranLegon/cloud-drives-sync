@@ -2213,6 +2213,14 @@ func (db *DB) GetFileByPath(path string) (*model.File, error) {
 	SELECT id, path, name, size, google_drive_md5, mod_time, status
 	FROM files
 	WHERE path = ?
+	ORDER BY CASE status
+		WHEN 'soft-deleted' THEN 0
+		WHEN 'hard-deleted' THEN 1
+		WHEN 'deleted' THEN 2
+		WHEN 'active' THEN 3
+		ELSE 4
+	END, mod_time DESC
+	LIMIT 1
 	`
 	row := db.queryRow(query, path)
 
