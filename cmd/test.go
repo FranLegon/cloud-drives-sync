@@ -2715,16 +2715,21 @@ func verifyFileInDB(path string) error {
 func verifyFileStatus(db *database.DB, path, expectedStatus string, shouldBeInactive bool) error {
 	if shouldBeInactive {
 		logger.Info("[VERIFICATION] Checking file '%s' is NOT '%s' (should be soft-deleted/inactive)", path, expectedStatus)
-		f, _ := db.GetFileByPath(path)
-		if f != nil && f.Status == expectedStatus {
-			logger.Error("[VERIFICATION] File %s has status '%s' but should be inactive. Replicas:", path, f.Status)
-			for i, r := range f.Replicas {
-				logger.Error("[VERIFICATION]   Replica %d: Provider=%s, Account=%s, NativeID=%s, Status=%s, Path=%s", i, r.Provider, r.AccountID, r.NativeID, r.Status, r.Path)
-			}
-			return fmt.Errorf("file %s should be soft-deleted/inactive but is %s", path, f.Status)
+		files, err := db.GetFilesByPath(path)
+		if err != nil {
+			return err
 		}
-		if f != nil {
-			logger.Info("[VERIFICATION] File %s has status '%s' (OK)", path, f.Status)
+		for _, f := range files {
+			if f != nil && f.Status == expectedStatus {
+				logger.Error("[VERIFICATION] File %s has status '%s' but should be inactive. Replicas:", path, f.Status)
+				for i, r := range f.Replicas {
+					logger.Error("[VERIFICATION]   Replica %d: Provider=%s, Account=%s, NativeID=%s, Status=%s, Path=%s", i, r.Provider, r.AccountID, r.NativeID, r.Status, r.Path)
+				}
+				return fmt.Errorf("file %s should be soft-deleted/inactive but is %s", path, f.Status)
+			}
+		}
+		if len(files) > 0 {
+			logger.Info("[VERIFICATION] File %s has no active logical row at requested path (OK)", path)
 		} else {
 			logger.Info("[VERIFICATION] File %s not found in DB (OK - treated as inactive)", path)
 		}

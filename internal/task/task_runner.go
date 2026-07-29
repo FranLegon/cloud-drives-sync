@@ -3085,69 +3085,86 @@ func (r *Runner) ProcessHardDeletedFolder() error {
 		return fmt.Errorf("failed to get files for hard-deleted scan: %w", err)
 	}
 
-	filesByID := make(map[string]*model.File)
+	filesByIdentity := make(map[string][]*model.File)
 	for _, file := range allFiles {
 		for _, rep := range file.Replicas {
 			if rep == nil || rep.Status != "active" {
 				continue
 			}
 			if strings.HasPrefix(rep.Path, hardDeletedPrefix) {
-				filesByID[file.ID] = file
+				identity := file.GoogleDriveMD5
+				if identity == "" {
+					identity = model.NormalizePath(file.Path)
+				}
+				if identity == "" {
+					identity = file.ID
+				}
+				filesByIdentity[identity] = append(filesByIdentity[identity], file)
 				break
 			}
 		}
 	}
 
-	if len(filesByID) == 0 {
+	if len(filesByIdentity) == 0 {
 		return nil
 	}
 
-	files := make([]*model.File, 0, len(filesByID))
-	for _, file := range filesByID {
-		files = append(files, file)
+	files := make([][]*model.File, 0, len(filesByIdentity))
+	for _, group := range filesByIdentity {
+		files = append(files, group)
 	}
 
 	logger.Info("Found %d file(s) in hard-deleted folder — permanently removing from all providers...", len(files))
 
-	for _, file := range files {
+	for _, group := range files {
+		file := group[0]
 		logger.Info("Hard-deleting %s from all providers", file.Path)
 
-		for _, rep := range file.Replicas {
-			if rep.Status == "deleted" || rep.Status == "hard-deleted" {
-				continue
-			}
+		seenReplica := make(map[int64]bool)
+		for _, groupedFile := range group {
+			for _, rep := range groupedFile.Replicas {
+				if rep.Status == "deleted" || rep.Status == "hard-deleted" || seenReplica[rep.ID] {
+					continue
+				}
+				seenReplica[rep.ID] = true
 
-			user := r.getUser(rep.Provider, rep.AccountID)
-			if user == nil {
-				logger.Warning("[ProcessHardDeletedFolder] No user found for replica %s (%s/%s)", rep.NativeID, rep.Provider, rep.AccountID)
-				continue
-			}
+				user := r.getUser(rep.Provider, rep.AccountID)
+				if user == nil {
+					logger.Warning("[ProcessHardDeletedFolder] No user found for replica %s (%s/%s)", rep.NativeID, rep.Provider, rep.AccountID)
+					continue
+				}
 
-			client, err := r.GetOrCreateClient(user)
-			if err != nil {
-				logger.Error("[ProcessHardDeletedFolder] Failed to get client for %s: %v", user.GetAccountID(), err)
-				continue
-			}
+				client, err := r.GetOrCreateClient(user)
+				if err != nil {
+					logger.Error("[ProcessHardDeletedFolder] Failed to get client for %s: %v", user.GetAccountID(), err)
+					continue
+				}
 
-			if r.safeMode {
-				logger.DryRun("[DRY RUN] Would hard-delete %s from %s (%s)", file.Path, rep.AccountID, rep.Provider)
-				continue
-			}
+				if r.safeMode {
+					logger.DryRun("[DRY RUN] Would hard-delete %s from %s (%s)", file.Path, rep.AccountID, rep.Provider)
+					continue
+				}
 
-			logger.Info("Deleting %s (NativeID=%s) from %s (%s)", file.Path, rep.NativeID, rep.AccountID, rep.Provider)
-			if err := client.DeleteFile(rep.NativeID); err != nil {
-				logger.Warning("[ProcessHardDeletedFolder] Failed to delete %s from %s: %v — continuing", rep.NativeID, rep.AccountID, err)
-			}
+				logger.Info("Deleting %s (NativeID=%s) from %s (%s)", file.Path, rep.NativeID, rep.AccountID, rep.Provider)
+				if err := client.DeleteFile(rep.NativeID); err != nil {
+					logger.Warning("[ProcessHardDeletedFolder] Failed to delete %s from %s: %v — continuing", rep.NativeID, rep.AccountID, err)
+				}
 
-			rep.Status = "deleted"
-			if err := r.db.UpdateReplica(rep); err != nil {
-				logger.Error("[ProcessHardDeletedFolder] Failed to update replica status: %v", err)
+				rep.Status = "deleted"
+				if err := r.db.UpdateReplica(rep); err != nil {
+					logger.Error("[ProcessHardDeletedFolder] Failed to update replica status: %v", err)
+				}
 			}
 		}
 
-		file.Status = "hard-deleted"
-		if err := r.db.UpdateFile(file); err != nil {
-			logger.Error("[ProcessHardDeletedFolder] Failed to mark file as hard-deleted: %v", err)
+		for _, groupedFile := range group {
+			groupedFile.Status = "hard-deleted"
+			if strings.HasPrefix(groupedFile.Path, hardDeletedPrefix) {
+				groupedFile.Path = "/" + groupedFile.Name
+			}
+			if err := r.db.UpdateFile(groupedFile); err != nil {
+				logger.Error("[ProcessHardDeletedFolder] Failed to mark file as hard-deleted: %v", err)
+			}
 		}
 	}
 	return nil

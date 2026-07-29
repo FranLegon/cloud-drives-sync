@@ -2209,43 +2209,59 @@ func CreateDB(masterPassword string) error {
 
 // GetFileByPath retrieves a file by its path
 func (db *DB) GetFileByPath(path string) (*model.File, error) {
+	files, err := db.GetFilesByPath(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(files) == 0 {
+		return nil, nil
+	}
+	return files[0], nil
+}
+
+func (db *DB) GetFilesByPath(path string) ([]*model.File, error) {
 	query := `
 	SELECT id, path, name, size, google_drive_md5, mod_time, status
 	FROM files
 	WHERE path = ?
 	ORDER BY CASE status
-		WHEN 'soft-deleted' THEN 0
-		WHEN 'hard-deleted' THEN 1
+		WHEN 'hard-deleted' THEN 0
+		WHEN 'soft-deleted' THEN 1
 		WHEN 'deleted' THEN 2
 		WHEN 'active' THEN 3
 		ELSE 4
 	END, mod_time DESC
-	LIMIT 1
 	`
-	row := db.queryRow(query, path)
-
-	file := &model.File{}
-	var modTime int64
-	err := row.Scan(
-		&file.ID, &file.Path, &file.Name, &file.Size,
-		&file.GoogleDriveMD5, &modTime, &file.Status,
-	)
-	if err == sql.ErrNoRows {
-		return nil, nil // Return nil if not found
-	}
+	rows, err := db.query(query, path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to scan file: %w", err)
+		return nil, fmt.Errorf("failed to query files by path: %w", err)
 	}
-	file.ModTime = time.Unix(modTime, 0)
+	defer rows.Close()
 
-	// Get Replicas
-	replicas, err := db.GetReplicas(file.ID)
-	if err != nil {
-		return nil, err
+	var files []*model.File
+	for rows.Next() {
+		file := &model.File{}
+		var modTime int64
+		if err := rows.Scan(
+			&file.ID, &file.Path, &file.Name, &file.Size,
+			&file.GoogleDriveMD5, &modTime, &file.Status,
+		); err != nil {
+			return nil, fmt.Errorf("failed to scan file: %w", err)
+		}
+		file.ModTime = time.Unix(modTime, 0)
+
+		replicas, err := db.GetReplicas(file.ID)
+		if err != nil {
+			return nil, err
+		}
+		file.Replicas = replicas
+		files = append(files, file)
 	}
-	file.Replicas = replicas
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("failed to iterate files by path: %w", err)
+	}
 
-	return file, nil
+	return files, nil
 }
 
 // GetFileByID retrieves a file by its ID
