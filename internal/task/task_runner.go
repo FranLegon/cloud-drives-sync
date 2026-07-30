@@ -1323,18 +1323,10 @@ func (r *Runner) SyncProviders(syncRunID int64) error {
 
 	softDeletedPath := AuxFolder + "/" + SoftDeletedFolder
 
-	// Google is the source of truth only for soft-delete state. File placement
-	// still flows through normal folder discovery and copy logic.
-	googleVerdict := computeGoogleVerdict(files, softDeletedPath)
-
-	// Phase 1: Converge soft-delete state across providers.
-	if err := r.convergeReplicaStatus(files, softDeletedPath, syncRunID, googleVerdict); err != nil {
-		return fmt.Errorf("status convergence failed: %w", err)
-	}
-
-	// Phase 2: Copy missing files and resolve conflicts using normal folder paths.
+	// Soft-delete contents now flow through normal folder discovery/copy logic.
+	// Only DB status projection and Telegram metadata remain special.
 	filesByPath := buildFilesByPath(files)
-	if err := r.syncMissingAndConflicts(filesByPath, softDeletedPath, syncRunID, googleVerdict); err != nil {
+	if err := r.syncMissingAndConflicts(filesByPath, softDeletedPath, syncRunID); err != nil {
 		return err
 	}
 
@@ -1474,216 +1466,7 @@ func isMainReplica(replica *model.Replica, mainAccounts map[model.Provider]map[s
 	return accounts[replica.AccountID]
 }
 
-// statusIntent tracks the intended status for a file across providers
-type statusIntent struct {
-	Status     string
-	ActivePath string
-	SoftPath   string
-}
-
-// computeGoogleVerdict returns Google's authoritative status per identity.
-// Google Drive MD5 is canonical when present; otherwise path is used.
-func computeGoogleVerdict(files []*model.File, softDeletedPath string) map[string]statusIntent {
-	softPathWin := strings.ReplaceAll(softDeletedPath, "/", "\\")
-	inSoft := func(p string) bool {
-		return strings.Contains(p, softDeletedPath) || strings.Contains(p, softPathWin)
-	}
-	identityKey := func(f *model.File) string {
-		if f == nil {
-			return ""
-		}
-		if f.GoogleDriveMD5 != "" {
-			return "md5:" + f.GoogleDriveMD5
-		}
-		if f.Path != "" {
-			return "path:" + f.Path
-		}
-		return ""
-	}
-
-	verdict := make(map[string]statusIntent)
-	for _, f := range files {
-		key := identityKey(f)
-		if key == "" {
-			continue
-		}
-		for _, replica := range f.Replicas {
-			if replica.Provider != model.ProviderGoogle || replica.Status != "active" {
-				continue
-			}
-			v := verdict[key]
-			if inSoft(replica.Path) {
-				if v.Status != "active" {
-					v.Status = "soft-deleted"
-					v.SoftPath = replica.Path
-				}
-			} else {
-				v.Status = "active"
-				v.ActivePath = replica.Path
-			}
-			verdict[key] = v
-		}
-	}
-	return verdict
-}
-
-// convergeReplicaStatus ensures replicas are moved to/from soft-deleted based on
-// Google's authoritative status (falling back to the main account when Google
-// has no replica for the content).
-func (r *Runner) convergeReplicaStatus(files []*model.File, softDeletedPath string, syncRunID int64, googleVerdict map[string]statusIntent) error {
-	mainAccounts := r.buildMainAccountSet()
-
-	var doneCopies map[string]bool
-	if syncRunID > 0 {
-		var err error
-		doneCopies, err = r.db.BatchCheckSyncCopyDone(syncRunID)
-		if err != nil {
-			logger.Warning("Failed to load sync copy log for run %d: %v", syncRunID, err)
-			doneCopies = nil
-		}
-	}
-
-	// Index every file by identity, regardless of logical status, so that
-	// soft-deleted contents are converged too (not only active ones).
-	identityKey := func(f *model.File) string {
-		if f == nil {
-			return ""
-		}
-		if f.GoogleDriveMD5 != "" {
-			return "md5:" + f.GoogleDriveMD5
-		}
-		if f.Path != "" {
-			return "path:" + f.Path
-		}
-		return ""
-	}
-	filesByIdentity := make(map[string][]*model.File, len(files))
-	for _, f := range files {
-		key := identityKey(f)
-		if key == "" {
-			continue
-		}
-		filesByIdentity[key] = append(filesByIdentity[key], f)
-	}
-
-	softPathWin := strings.ReplaceAll(softDeletedPath, "/", "\\")
-	inSoftFn := func(p string) bool {
-		return strings.Contains(p, softDeletedPath) || strings.Contains(p, softPathWin)
-	}
-
-	// Seed intents with Google's authoritative verdict. Google always wins.
-	intents := make(map[string]statusIntent, len(filesByIdentity))
-	for key, v := range googleVerdict {
-		intents[key] = v
-	}
-
-	// Fallback only for contents where Google has no opinion: derive the intent
-	// from the main account replica / logical path as before.
-	for _, f := range files {
-		key := identityKey(f)
-		if f.Status != "active" || key == "" {
-			continue
-		}
-		if _, decided := googleVerdict[key]; decided {
-			continue
-		}
-
-		inSoftDeleted := inSoftFn(f.Path)
-
-		for _, replica := range f.Replicas {
-			if replica.Status != "active" {
-				continue
-			}
-
-			intent := intents[key]
-
-			if inSoftDeleted {
-				intent.Status = "soft-deleted"
-				intent.SoftPath = f.Path
-			} else {
-				if isMainReplica(replica, mainAccounts) && intent.Status != "soft-deleted" {
-					intent.Status = "active"
-					intent.ActivePath = f.Path
-				}
-			}
-
-			intents[key] = intent
-		}
-	}
-
-	var wg sync.WaitGroup
-	// Use bounded concurrency to avoid flooding network
-	sem := make(chan struct{}, 4)
-
-	for key, intent := range intents {
-		fileSet := filesByIdentity[key]
-		for _, f := range fileSet {
-			for _, replica := range f.Replicas {
-				if replica.Status != "active" || isMainReplica(replica, mainAccounts) {
-					continue
-				}
-
-				// For Google shared files, only the owner can move the file.
-				// Skip non-owner replicas; the owner's replica will handle the move.
-				if replica.Provider == model.ProviderGoogle && replica.Owner != "" && replica.Owner != replica.AccountID {
-					continue
-				}
-
-				replicaInSoftDeleted := strings.Contains(replica.Path, softDeletedPath) || strings.Contains(replica.Path, softPathWin)
-
-				switch intent.Status {
-				case "soft-deleted":
-					if replicaInSoftDeleted {
-						continue
-					}
-					if syncRunID > 0 && doneCopies != nil && doneCopies[f.ID+"\x00soft-delete-"+string(replica.Provider)] {
-						continue
-					}
-					wg.Add(1)
-					sem <- struct{}{}
-					go func(rep *model.Replica, fname string, fileID string) {
-						defer wg.Done()
-						defer func() { <-sem }()
-						r.softDeleteReplica(rep, fname, softDeletedPath)
-						if syncRunID > 0 {
-							r.db.LogSyncCopy(syncRunID, fileID, "soft-delete-"+string(rep.Provider))
-						}
-					}(replica, f.Name, f.ID)
-
-				case "active":
-					if !replicaInSoftDeleted || intent.ActivePath == "" || replica.Provider == model.ProviderTelegram {
-						continue
-					}
-					if syncRunID > 0 && doneCopies != nil && doneCopies[f.ID+"\x00restore-"+string(replica.Provider)] {
-						continue
-					}
-					wg.Add(1)
-					sem <- struct{}{}
-					go func(rep *model.Replica, fname, apath string, fileID string) {
-						defer wg.Done()
-						defer func() { <-sem }()
-						r.moveReplicaToPath(rep, fname, apath)
-						if syncRunID > 0 {
-							r.db.LogSyncCopy(syncRunID, fileID, "restore-"+string(rep.Provider))
-						}
-					}(replica, f.Name, intent.ActivePath, f.ID)
-				}
-			}
-		}
-	}
-	wg.Wait()
-
-	return nil
-}
-
-// softDeleteReplica moves a replica to the soft-deleted folder, or marks it as deleted for Telegram
-func (r *Runner) softDeleteReplica(replica *model.Replica, fileName, softDeletedPath string) {
-	if replica.Provider == model.ProviderTelegram {
-		r.markTelegramReplicaDeleted(replica, fileName)
-		return
-	}
-	r.moveReplicaToPath(replica, fileName, "/"+softDeletedPath+"/"+fileName)
-}
+// markTelegramReplicaDeleted marks a Telegram replica as deleted
 
 // markTelegramReplicaDeleted marks a Telegram replica as deleted
 func (r *Runner) markTelegramReplicaDeleted(replica *model.Replica, fileName string) {
@@ -1708,6 +1491,7 @@ func (r *Runner) markTelegramReplicaDeleted(replica *model.Replica, fileName str
 			return
 		}
 		replica.Status = "deleted"
+		replica.Path = "/" + AuxFolder + "/" + SoftDeletedFolder + "/" + fileName
 		if err := r.db.UpdateReplica(replica); err != nil {
 			logger.Warning("Failed to update telegram replica status in DB: %v", err)
 		}
@@ -2132,9 +1916,9 @@ func sortFilesBySizeDesc(files []*model.File) {
 	})
 }
 
-// syncMissingAndConflicts copies missing files across providers, resolves conflicts, and enforces soft-delete placement.
+// syncMissingAndConflicts copies missing files across providers and resolves conflicts.
 // syncRunID is used to skip files already copied in a previous attempt of this run (crash recovery).
-func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provider][]*model.File, softDeletedPath string, syncRunID int64, googleVerdict map[string]statusIntent) error {
+func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provider][]*model.File, softDeletedPath string, syncRunID int64) error {
 	// Determine active providers from config
 	activeProviders := make(map[model.Provider]bool)
 	for _, u := range r.config.Users {
@@ -2158,38 +1942,17 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 		}
 	}
 
-	// Phase 1 and 2: Handle soft-deleted placements and collect copy jobs
 	jobs := make([]copyJob, 0, len(filesByPath))
 	scheduledJobs := make(map[string]struct{})
 
 	for path, fileMap := range filesByPath {
 		if strings.Contains(path, softDeletedPath) {
-			if masterFile := getMasterFile(fileMap); masterFile != nil {
-				r.enforceSoftDeletedPlacement(masterFile, softDeletedPath)
-			}
 			continue
 		}
 
 		masterFile := getMasterFile(fileMap)
 		if masterFile == nil {
 			continue
-		}
-
-		for _, providerFiles := range fileMap {
-			for _, file := range providerFiles {
-				if file == nil {
-					continue
-				}
-				identityKey := ""
-				if file.GoogleDriveMD5 != "" {
-					identityKey = "md5:" + file.GoogleDriveMD5
-				} else if file.Path != "" {
-					identityKey = "path:" + file.Path
-				}
-				if v, ok := googleVerdict[identityKey]; ok && v.Status == "soft-deleted" {
-					goto nextPath
-				}
-			}
 		}
 
 		for _, provider := range providers {
@@ -2281,14 +2044,13 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 				}
 			}
 		}
-	nextPath:
 	}
 
 	if len(jobs) == 0 {
 		return nil
 	}
 
-	// Phase 3: Execute copy jobs in parallel
+	// Execute copy jobs in parallel
 	const maxWorkers = 4
 	logger.Info("Executing %d file copy operations with %d workers...", len(jobs), maxWorkers)
 
@@ -2331,61 +2093,6 @@ func (r *Runner) syncMissingAndConflicts(filesByPath map[string]map[model.Provid
 	}
 
 	return nil
-}
-
-// enforceSoftDeletedPlacement ensures all replicas of a soft-deleted file are in the soft-deleted folder
-func (r *Runner) enforceSoftDeletedPlacement(masterFile *model.File, softDeletedPath string) {
-	for _, replica := range masterFile.Replicas {
-		if replica.Status != "active" || strings.Contains(replica.Path, softDeletedPath) {
-			continue
-		}
-
-		logger.Info("Replica for %s on %s is misplaced (found at %s). Moving to soft-deleted...", masterFile.Name, replica.Provider, replica.Path)
-
-		user := r.getUser(replica.Provider, replica.AccountID)
-		if user == nil {
-			logger.Error("User not found for replica %s", replica.AccountID)
-			continue
-		}
-
-		client, err := r.GetOrCreateClient(user)
-		if err != nil {
-			logger.Error("Failed to create client: %v", err)
-			continue
-		}
-
-		if replica.Provider == model.ProviderTelegram {
-			logger.Info("Marking soft-deleted file on Telegram: %s", masterFile.Name)
-			if tgClient, ok := client.(*telegram.Client); ok {
-				if err := tgClient.UpdateFileStatus(replica, "deleted"); err != nil {
-					logger.Error("Failed to update file status on Telegram: %v", err)
-				} else {
-					replica.Status = "deleted"
-					r.db.UpdateReplica(replica)
-				}
-			} else {
-				logger.Error("Client is not a Telegram client for %s", replica.Provider)
-			}
-		} else {
-			destID, err := r.ensureFolderStructure(client, softDeletedPath, replica.Provider)
-			if err != nil {
-				logger.Error("Failed to ensure soft-deleted folder: %v", err)
-				continue
-			}
-
-			if r.safeMode {
-				logger.DryRun("Would move %s to soft-deleted on %s", masterFile.Name, replica.Provider)
-			} else {
-				if err := client.MoveFile(replica.NativeID, destID); err != nil {
-					logger.Error("Failed to move file to soft-deleted: %v", err)
-				} else {
-					newPath := "/" + softDeletedPath + "/" + masterFile.Name
-					replica.Path = newPath
-					r.db.UpdateReplica(replica)
-				}
-			}
-		}
-	}
 }
 
 type shortcutRefreshTarget struct {
@@ -2975,18 +2682,25 @@ func (r *Runner) ProcessHardDeletes() error {
 				rep.ID, rep.Provider, rep.AccountID, rep.NativeID, rep.Status, rep.Path, rep.FileID)
 		}
 
-		// Check if file is still present in any Google account (active)
+		// Hard delete only when Google no longer has the file and no other provider
+		// still has an active non-soft-deleted replica.
 		hasGoogleReplica := false
+		hasActiveReplicaOutsideSoftDelete := false
 		for _, rep := range file.Replicas {
-			if rep.Provider == model.ProviderGoogle && rep.Status == "active" {
+			if rep.Status != "active" {
+				continue
+			}
+			if rep.Provider == model.ProviderGoogle {
 				hasGoogleReplica = true
-				break
+			}
+			if !strings.Contains(rep.Path, "/"+AuxFolder+"/"+SoftDeletedFolder+"/") {
+				hasActiveReplicaOutsideSoftDelete = true
 			}
 		}
 
-		logger.Info("[DEBUG-HD] hasGoogleReplica=%v for %s", hasGoogleReplica, file.Path)
+		logger.Info("[DEBUG-HD] hasGoogleReplica=%v hasActiveReplicaOutsideSoftDelete=%v for %s", hasGoogleReplica, hasActiveReplicaOutsideSoftDelete, file.Path)
 
-		if !hasGoogleReplica {
+		if !hasGoogleReplica && !hasActiveReplicaOutsideSoftDelete {
 			logger.Info("Detected Hard Delete for %s (Identity: %s). Propagating...", file.Path, identity)
 
 			// 1. Mark as deleted in DB
