@@ -1323,25 +1323,19 @@ func (r *Runner) SyncProviders(syncRunID int64) error {
 
 	softDeletedPath := AuxFolder + "/" + SoftDeletedFolder
 
-	// Google is the source of truth. Compute Google's authoritative verdict
-	// (active vs soft-deleted) per content so that, when providers disagree,
-	// Google's state always wins.
+	// Google is the source of truth only for soft-delete state. File placement
+	// still flows through normal folder discovery and copy logic.
 	googleVerdict := computeGoogleVerdict(files, softDeletedPath)
 
-	// Phase 1: Converge soft-deleted status across providers
+	// Phase 1: Converge soft-delete state across providers.
 	if err := r.convergeReplicaStatus(files, softDeletedPath, syncRunID, googleVerdict); err != nil {
 		return fmt.Errorf("status convergence failed: %w", err)
 	}
 
-	// Phase 2: Copy missing files and resolve conflicts
+	// Phase 2: Copy missing files and resolve conflicts using normal folder paths.
 	filesByPath := buildFilesByPath(files)
 	if err := r.syncMissingAndConflicts(filesByPath, softDeletedPath, syncRunID, googleVerdict); err != nil {
 		return err
-	}
-
-	// Check for soft-delete consistency
-	if err := r.checkSoftDeletedConsistency(filesByPath, softDeletedPath, syncRunID); err != nil {
-		logger.Error("Failed to check soft deleted consistency: %v", err)
 	}
 
 	// Reload files before shortcut distribution: syncMissingAndConflicts inserts
@@ -3181,140 +3175,9 @@ func (r *Runner) getUser(provider model.Provider, accountID string) *model.User 
 	return nil
 }
 
-// checkSoftDeletedConsistency ensures that if a file is in soft-deleted in one provider, it moves it there for others.
+// checkSoftDeletedConsistency is intentionally a no-op.
+// Soft-delete contents are now handled through normal folder discovery/copy
+// flows, with special handling limited to logical status and Telegram state.
 func (r *Runner) checkSoftDeletedConsistency(filesByPath map[string]map[model.Provider][]*model.File, softDeletedPath string, syncRunID int64) error {
-	// Map identity -> soft-deleted file (if exists)
-	softDeletedIDs := make(map[string]*model.File)
-
-	var doneCopies map[string]bool
-	if syncRunID > 0 {
-		var err error
-		doneCopies, err = r.db.BatchCheckSyncCopyDone(syncRunID)
-		if err != nil {
-			logger.Warning("Failed to load sync copy log for run %d: %v", syncRunID, err)
-			doneCopies = nil
-		}
-	}
-
-	for path, fileMap := range filesByPath {
-		if strings.Contains(path, softDeletedPath) {
-			for _, files := range fileMap {
-				for _, f := range files {
-					if f != nil {
-						identity := f.GoogleDriveMD5
-						if identity == "" {
-							identity = f.Path
-						}
-						if identity != "" {
-							softDeletedIDs[identity] = f
-						}
-						break
-					}
-				}
-			}
-		}
-	}
-
-	for path, fileMap := range filesByPath {
-		// Skip if already in soft-deleted path
-		if strings.Contains(path, softDeletedPath) {
-			continue
-		}
-
-		for provider, files := range fileMap {
-			for _, file := range files {
-				identity := file.GoogleDriveMD5
-				if identity == "" {
-					identity = file.Path
-				}
-				target, ok := softDeletedIDs[identity]
-				if !ok {
-					continue
-				}
-
-				// Found a file that should be soft deleted
-				logger.Info("File %s (Identity: %s) found in %s but soft-deleted in another provider. Moving to soft-deleted.", path, identity, provider)
-
-				// Calculate target path
-				// "cloud-drives-sync-aux/soft-deleted" is relative to sync root.
-				// target.Path includes the full path relative to sync root.
-				// We want to move 'file' to 'target.Path' (or construct if target is just representative)
-				// Ideally we move it to the path defined by the file in soft-deleted.
-				targetSoftPath := target.Path
-				targetFolder := model.NormalizePath(filepath.Dir(targetSoftPath))
-
-				if !r.safeMode {
-					// Find correct user/client using replicas
-					var client api.CloudClient
-					var err error
-
-					// Find the replica for this provider
-					var targetReplica *model.Replica
-					for _, replica := range file.Replicas {
-						if replica.Provider == provider {
-							targetReplica = replica
-							break
-						}
-					}
-
-					if targetReplica == nil {
-						logger.Error("Could not find replica for provider %s for file %s", provider, file.Path)
-						continue
-					}
-
-					// Find the user for this replica
-					if user := r.getUser(provider, targetReplica.AccountID); user != nil {
-						client, err = r.GetOrCreateClient(user)
-					}
-
-					if client == nil || err != nil {
-						logger.Error("Could not find client for file %s", file.Path)
-						continue
-					}
-
-					// Telegram handling
-					if provider == model.ProviderTelegram {
-						if syncRunID > 0 && doneCopies != nil && doneCopies[file.ID+"\x00soft-del-cons-"+string(provider)] {
-							continue
-						}
-						if tgClient, ok := client.(*telegram.Client); ok {
-							logger.Info("Marking file as deleted on Telegram: %s", file.Name)
-							if err := tgClient.UpdateFileStatus(targetReplica, "deleted"); err != nil {
-								logger.Error("Failed to update file status on Telegram: %v", err)
-							} else {
-								targetReplica.Status = "deleted"
-								r.db.UpdateReplica(targetReplica)
-								if syncRunID > 0 {
-									r.db.LogSyncCopy(syncRunID, file.ID, "soft-del-cons-"+string(provider))
-								}
-							}
-						}
-						continue
-					}
-
-					if syncRunID > 0 && doneCopies != nil && doneCopies[file.ID+"\x00soft-del-cons-"+string(provider)] {
-						continue
-					}
-
-					// Get target folder ID
-					targetFolderID, err := r.ensureFolderStructure(client, targetFolder, provider)
-					if err != nil {
-						logger.Error("Failed to ensure folder structure for %s: %v", targetFolder, err)
-						continue
-					}
-
-					if err := client.MoveFile(targetReplica.NativeID, targetFolderID); err != nil {
-						logger.Error("Failed to move file %s to soft-deleted: %v", path, err)
-					} else {
-						if syncRunID > 0 {
-							r.db.LogSyncCopy(syncRunID, file.ID, "soft-del-cons-"+string(provider))
-						}
-					}
-				} else {
-					logger.DryRun("Would move %s to %s in %s", path, targetSoftPath, provider)
-				}
-			}
-		}
-	}
 	return nil
 }
