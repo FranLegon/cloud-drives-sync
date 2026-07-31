@@ -2080,68 +2080,92 @@ func (db *DB) DeleteStaleReplicasByNativeID(provider model.Provider, oldNativeID
 	})
 }
 
-// UpdateSoftDeletedFileStatus derives logical file status from discovered replica
-// placement. Soft-delete contents behave like normal folders; only the logical
-// status is special, and Google remains authoritative when present.
+// UpdateSoftDeletedFileStatus marks files as softdeleted or active based on replica locations
+// Priority: Google provider state takes precedence when replicas disagree
+// Only considers recently scanned replicas (last_seen_at >= query start time)
 func (db *DB) UpdateSoftDeletedFileStatus(scanStartTime time.Time) error {
 	return db.WithTx(func(tx *sql.Tx) error {
 		minTimestamp := scanStartTime.Unix()
 
-		softDeletedPattern := "%" + auxFolderName + "/soft-deleted%"
-		softDeletedPatternWin := "%" + auxFolderName + `\soft-deleted%`
+		softDeletedPattern := auxFolderName + "/soft-deleted"
+		softDeletedPatternWin := auxFolderName + `\soft-deleted`
 
-		updateQuery := `
+		// Single-pass update: Determine the correct status based on current replica locations
+		updateQuery := fmt.Sprintf(`
 		WITH ReplicaAgg AS (
-			SELECT
-				file_id,
-				MAX(CASE WHEN provider = 'Google' AND path NOT LIKE ? AND path NOT LIKE ? THEN 1 ELSE 0 END) AS google_active_outside_soft,
-				MAX(CASE WHEN provider = 'Google' AND (path LIKE ? OR path LIKE ?) THEN 1 ELSE 0 END) AS google_in_soft,
-				MAX(CASE WHEN path NOT LIKE ? AND path NOT LIKE ? THEN 1 ELSE 0 END) AS any_active_outside_soft,
-				MAX(CASE WHEN path LIKE ? OR path LIKE ? THEN 1 ELSE 0 END) AS any_in_soft,
-				MAX(CASE WHEN provider = 'Google' AND path NOT LIKE ? AND path NOT LIKE ? THEN path ELSE NULL END) AS google_active_path,
-				MAX(CASE WHEN path NOT LIKE ? AND path NOT LIKE ? THEN path ELSE NULL END) AS any_active_path,
-				MAX(CASE WHEN provider = 'Google' AND (path LIKE ? OR path LIKE ?) THEN path ELSE NULL END) AS google_soft_path,
-				MAX(CASE WHEN path LIKE ? OR path LIKE ? THEN path ELSE NULL END) AS any_soft_path
+			SELECT file_id,
+				SUM(CASE WHEN LOWER(provider) = 'google' AND path NOT LIKE '%%%s%%' AND path NOT LIKE '%%%s%%' THEN 1 ELSE 0 END) as active_google,
+				SUM(CASE WHEN LOWER(provider) = 'google' THEN 1 ELSE 0 END) as total_google,
+				SUM(CASE WHEN path NOT LIKE '%%%s%%' AND path NOT LIKE '%%%s%%' THEN 1 ELSE 0 END) as active_any,
+				COUNT(*) as total_any
 			FROM replicas
-			WHERE status = 'active' AND last_seen_at >= ? AND file_id IS NOT NULL AND file_id != ''
+			WHERE status = 'active' AND last_seen_at >= ?
 			GROUP BY file_id
 		)
 		UPDATE files
 		SET status = CASE
-				WHEN r.google_active_outside_soft = 1 THEN 'active'
-				WHEN r.google_in_soft = 1 THEN 'soft-deleted'
-				WHEN r.any_active_outside_soft = 1 THEN 'active'
-				WHEN r.any_in_soft = 1 THEN 'soft-deleted'
-				ELSE files.status
-			END,
-			path = CASE
-				WHEN r.google_active_outside_soft = 1 THEN COALESCE(r.google_active_path, files.path)
-				WHEN r.google_in_soft = 1 THEN COALESCE(r.google_soft_path, files.path)
-				WHEN r.any_active_outside_soft = 1 THEN COALESCE(r.any_active_path, files.path)
-				WHEN r.any_in_soft = 1 THEN COALESCE(r.any_soft_path, files.path)
-				ELSE files.path
-			END
+			WHEN r.active_google > 0 THEN 'active'
+			WHEN r.total_google > 0 AND r.active_google = 0 THEN 'soft-deleted'
+			WHEN r.total_google = 0 AND r.active_any > 0 THEN 'active'
+			WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'soft-deleted'
+			ELSE files.status
+		END
 		FROM ReplicaAgg r
 		WHERE files.id = r.file_id
-		`
+		AND files.status != CASE
+			WHEN r.active_google > 0 THEN 'active'
+			WHEN r.total_google > 0 AND r.active_google = 0 THEN 'soft-deleted'
+			WHEN r.total_google = 0 AND r.active_any > 0 THEN 'active'
+			WHEN r.total_google = 0 AND r.total_any > 0 AND r.active_any = 0 THEN 'soft-deleted'
+			ELSE files.status
+		END
+		`, softDeletedPattern, softDeletedPatternWin, softDeletedPattern, softDeletedPatternWin)
 
 		updateStmt, err := db.txStmt(tx, updateQuery)
 		if err != nil {
 			return fmt.Errorf("failed to prepare statement: %w", err)
 		}
 		defer updateStmt.Close()
-		if _, err := updateStmt.Exec(
-			softDeletedPattern, softDeletedPatternWin,
-			softDeletedPattern, softDeletedPatternWin,
-			softDeletedPattern, softDeletedPatternWin,
-			softDeletedPattern, softDeletedPatternWin,
-			softDeletedPattern, softDeletedPatternWin,
-			softDeletedPattern, softDeletedPatternWin,
-			softDeletedPattern, softDeletedPatternWin,
-			softDeletedPattern, softDeletedPatternWin,
-			minTimestamp,
-		); err != nil {
+		if _, err := updateStmt.Exec(minTimestamp); err != nil {
 			return fmt.Errorf("failed to update soft-deleted status: %w", err)
+		}
+
+		// Second pass: catch files that remain 'soft-deleted' due to file_id linkage issues
+		// by checking Google replicas against canonical file identity.
+		fallbackQuery := fmt.Sprintf(`
+		WITH LatestActive AS (
+			SELECT
+				r.file_id,
+				r.path,
+				ROW_NUMBER() OVER(
+					PARTITION BY r.file_id
+					ORDER BY r.mod_time DESC
+				) as rn
+			FROM replicas r
+			WHERE r.status = 'active'
+			AND LOWER(r.provider) = 'google'
+			AND r.file_id IS NOT NULL
+			AND r.file_id != ''
+			AND r.last_seen_at >= ?
+			AND r.path NOT LIKE '%%%s%%'
+			AND r.path NOT LIKE '%%%s%%'
+		)
+		UPDATE files
+		SET status = 'active',
+			path = COALESCE(la.path, files.path)
+		FROM LatestActive la
+		WHERE files.id = la.file_id
+		AND la.rn = 1
+		AND files.status = 'soft-deleted'
+		`, softDeletedPattern, softDeletedPatternWin)
+
+		fallbackStmt, err := db.txStmt(tx, fallbackQuery)
+		if err != nil {
+			return fmt.Errorf("failed to prepare fallback statement: %w", err)
+		}
+		defer fallbackStmt.Close()
+		if _, err := fallbackStmt.Exec(minTimestamp); err != nil {
+			return fmt.Errorf("failed to update soft-deleted status (fallback): %w", err)
 		}
 
 		return nil
@@ -2185,59 +2209,43 @@ func CreateDB(masterPassword string) error {
 
 // GetFileByPath retrieves a file by its path
 func (db *DB) GetFileByPath(path string) (*model.File, error) {
-	files, err := db.GetFilesByPath(path)
-	if err != nil {
-		return nil, err
-	}
-	if len(files) == 0 {
-		return nil, nil
-	}
-	return files[0], nil
-}
-
-func (db *DB) GetFilesByPath(path string) ([]*model.File, error) {
 	query := `
 	SELECT id, path, name, size, google_drive_md5, mod_time, status
 	FROM files
 	WHERE path = ?
 	ORDER BY CASE status
-		WHEN 'hard-deleted' THEN 0
-		WHEN 'soft-deleted' THEN 1
+		WHEN 'soft-deleted' THEN 0
+		WHEN 'hard-deleted' THEN 1
 		WHEN 'deleted' THEN 2
 		WHEN 'active' THEN 3
 		ELSE 4
 	END, mod_time DESC
+	LIMIT 1
 	`
-	rows, err := db.query(query, path)
+	row := db.queryRow(query, path)
+
+	file := &model.File{}
+	var modTime int64
+	err := row.Scan(
+		&file.ID, &file.Path, &file.Name, &file.Size,
+		&file.GoogleDriveMD5, &modTime, &file.Status,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil // Return nil if not found
+	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to query files by path: %w", err)
+		return nil, fmt.Errorf("failed to scan file: %w", err)
 	}
-	defer rows.Close()
+	file.ModTime = time.Unix(modTime, 0)
 
-	var files []*model.File
-	for rows.Next() {
-		file := &model.File{}
-		var modTime int64
-		if err := rows.Scan(
-			&file.ID, &file.Path, &file.Name, &file.Size,
-			&file.GoogleDriveMD5, &modTime, &file.Status,
-		); err != nil {
-			return nil, fmt.Errorf("failed to scan file: %w", err)
-		}
-		file.ModTime = time.Unix(modTime, 0)
-
-		replicas, err := db.GetReplicas(file.ID)
-		if err != nil {
-			return nil, err
-		}
-		file.Replicas = replicas
-		files = append(files, file)
+	// Get Replicas
+	replicas, err := db.GetReplicas(file.ID)
+	if err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("failed to iterate files by path: %w", err)
-	}
+	file.Replicas = replicas
 
-	return files, nil
+	return file, nil
 }
 
 // GetFileByID retrieves a file by its ID

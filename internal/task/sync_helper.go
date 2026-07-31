@@ -889,8 +889,8 @@ func (r *Runner) createShortcut(sourceFile *model.File, targetUser *model.User, 
 		newReplica.NativeHash = shortcut.Replicas[0].NativeHash
 	}
 
-	if err := r.db.UpsertReplicaByNativeID(newReplica, time.Now().Unix()); err != nil {
-		logger.Error("DB upsert shortcut replica failed path=%q provider=%s account=%s: %v", sourceFile.Path, targetUser.Provider, accountID, err)
+	if err := r.db.InsertReplica(newReplica); err != nil {
+		logger.Error("DB insert shortcut replica failed path=%q provider=%s account=%s: %v", sourceFile.Path, targetUser.Provider, accountID, err)
 	} else {
 		if syncRunID > 0 {
 			targetProviderKey := fmt.Sprintf("shortcut:%s", targetUser.Email)
