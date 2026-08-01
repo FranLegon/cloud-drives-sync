@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -15,10 +16,17 @@ import (
 	"github.com/FranLegon/cloud-drives-sync/internal/auth"
 	"github.com/FranLegon/cloud-drives-sync/internal/logger"
 	"github.com/FranLegon/cloud-drives-sync/internal/model"
+	drivefs "github.com/rclone/rclone/backend/drive"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/object"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/drive/v3"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/option"
+
+	_ "github.com/rclone/rclone/backend/drive"
 )
 
 var syncFolderName = "cloud-drives-sync-root"
@@ -42,6 +50,17 @@ type Client struct {
 	syncFolderID  string
 	folderCache   map[string][]*model.Folder
 	folderCacheMu sync.Mutex
+
+	// rclone backend, rooted at the sync folder. Created lazily once the sync
+	// folder ID is known (see ensureFs). Used for file content I/O and quota.
+	f    fs.Fs
+	fsMu sync.Mutex
+
+	// idToPath maps native Drive IDs to their path relative to the rclone Fs
+	// root (the sync folder). Populated during listing so that path-based
+	// rclone operations can be bridged from the ID-based CloudClient interface.
+	idToPath   map[string]string
+	idToPathMu sync.Mutex
 }
 
 // NewClient creates a new Google Drive client
@@ -66,7 +85,69 @@ func NewClient(user *model.User, config *oauth2.Config) (*Client, error) {
 		config:      config,
 		tokenSource: tokenSource,
 		folderCache: make(map[string][]*model.Folder),
+		idToPath:    make(map[string]string),
 	}, nil
+}
+
+// ensureFs lazily creates the rclone Fs rooted at the sync folder. It requires
+// that the sync folder ID has already been resolved (via PreFlightCheck or
+// CreateSyncFolder). rclone uses the stored refresh token to obtain access
+// tokens automatically for the session lifetime.
+func (c *Client) ensureFs(ctx context.Context) (fs.Fs, error) {
+	c.fsMu.Lock()
+	defer c.fsMu.Unlock()
+
+	if c.f != nil {
+		return c.f, nil
+	}
+	if c.syncFolderID == "" {
+		return nil, errors.New("sync folder ID not known; run PreFlightCheck first")
+	}
+
+	refresh := c.tokenSource.GetRefreshToken()
+	tokenJSON := fmt.Sprintf(`{"access_token":"","token_type":"Bearer","refresh_token":%q,"expiry":"0001-01-01T00:00:00Z"}`, refresh)
+
+	m := configmap.Simple{
+		"client_id":      c.config.ClientID,
+		"client_secret":  c.config.ClientSecret,
+		"token":          tokenJSON,
+		"scope":          "drive",
+		"root_folder_id": c.syncFolderID,
+	}
+
+	f, err := drivefs.NewFs(ctx, "gdrive", "", m)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize rclone drive backend: %w", err)
+	}
+	c.f = f
+	return f, nil
+}
+
+// setPath records the path (relative to the rclone Fs root) for a native ID.
+func (c *Client) setPath(id, p string) {
+	if id == "" {
+		return
+	}
+	c.idToPathMu.Lock()
+	c.idToPath[id] = p
+	c.idToPathMu.Unlock()
+}
+
+// getPath returns the recorded path for a native ID.
+func (c *Client) getPath(id string) (string, bool) {
+	c.idToPathMu.Lock()
+	defer c.idToPathMu.Unlock()
+	p, ok := c.idToPath[id]
+	return p, ok
+}
+
+// joinPath joins a parent path (relative to the Fs root) with a child name
+// using rclone's forward-slash convention.
+func joinPath(parent, name string) string {
+	if parent == "" {
+		return name
+	}
+	return path.Join(parent, name)
 }
 
 // PreFlightCheck verifies the sync folder structure
@@ -93,6 +174,7 @@ func (c *Client) PreFlightCheck() error {
 
 	folder := fileList.Files[0]
 	c.syncFolderID = folder.Id
+	c.setPath(c.syncFolderID, "")
 
 	// Check if folder is in root, if not move it
 	if len(folder.Parents) > 0 {
@@ -130,6 +212,7 @@ func (c *Client) CreateSyncFolder() (string, error) {
 	}
 
 	c.syncFolderID = createdFolder.Id
+	c.setPath(c.syncFolderID, "")
 	logger.InfoTagged([]string{"Google", c.user.Email}, "Created sync folder '%s' (ID: %s)", syncFolderName, c.syncFolderID)
 	return c.syncFolderID, nil
 }
@@ -141,6 +224,8 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 	}
 
 	query := fmt.Sprintf("'%s' in parents and trashed=false", folderID)
+
+	parentPath, hasParentPath := c.getPath(folderID)
 
 	var allFiles []*model.File
 	var allFolders []*model.Folder
@@ -175,6 +260,9 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 					folder.OwnerEmail = f.Owners[0].EmailAddress
 				}
 				allFolders = append(allFolders, folder)
+				if hasParentPath {
+					c.setPath(f.Id, joinPath(parentPath, f.Name))
+				}
 				continue
 			}
 
@@ -215,6 +303,9 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 			file.Replicas = []*model.Replica{replica}
 			allFiles = append(allFiles, file)
+			if hasParentPath {
+				c.setPath(f.Id, joinPath(parentPath, f.Name))
+			}
 		}
 
 		if fileList.NextPageToken == "" {
@@ -244,6 +335,8 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 	c.folderCacheMu.Unlock()
 
 	query := fmt.Sprintf("'%s' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false", parentID)
+
+	parentPath, hasParentPath := c.getPath(parentID)
 
 	var allFolders []*model.Folder
 	pageToken := ""
@@ -276,6 +369,9 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 			}
 
 			allFolders = append(allFolders, folder)
+			if hasParentPath {
+				c.setPath(f.Id, joinPath(parentPath, f.Name))
+			}
 		}
 
 		if fileList.NextPageToken == "" {
@@ -294,8 +390,28 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 	return allFolders, nil
 }
 
-// DownloadFile downloads a file
+// DownloadFile downloads a file. It uses the rclone backend when the file's
+// path (relative to the sync folder) is known, falling back to the direct
+// Drive API by ID otherwise.
 func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
+	ctx := context.Background()
+
+	if f, err := c.ensureFs(ctx); err == nil {
+		if p, ok := c.getPath(fileID); ok {
+			if obj, oerr := f.NewObject(ctx, p); oerr == nil {
+				reader, rerr := obj.Open(ctx)
+				if rerr == nil {
+					defer reader.Close()
+					logger.InfoTagged([]string{"Google", c.user.Email}, "Download stream started for %s (rclone)", fileID)
+					_, cerr := io.Copy(writer, reader)
+					logger.InfoTagged([]string{"Google", c.user.Email}, "Download stream completed for %s (rclone)", fileID)
+					return cerr
+				}
+			}
+			// Object could not be opened via rclone; fall back to direct API.
+		}
+	}
+
 	resp, err := c.service.Files.Get(fileID).Download()
 	if err != nil {
 		return fmt.Errorf("failed to download file: %w", err)
@@ -310,8 +426,62 @@ func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
 	return err
 }
 
-// UploadFile uploads a file
+// UploadFile uploads a file. When the destination folder's path is known and
+// the rclone backend is available, the upload is streamed through rclone;
+// otherwise it falls back to the direct Drive API.
 func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64) (*model.File, error) {
+	ctx := context.Background()
+
+	if f, err := c.ensureFs(ctx); err == nil {
+		if parentPath, ok := c.getPath(folderID); ok {
+			remote := joinPath(parentPath, name)
+			modTime := time.Now()
+			objInfo := object.NewStaticObjectInfo(remote, modTime, size, true, nil, f)
+			obj, putErr := f.Put(ctx, reader, objInfo)
+			if putErr != nil {
+				// The reader may already be partially consumed, so we cannot
+				// safely fall back to the direct API here.
+				return nil, fmt.Errorf("failed to upload file via rclone: %w", putErr)
+			}
+
+			nativeID := ""
+			if ider, ok := obj.(fs.IDer); ok {
+				nativeID = ider.ID()
+			}
+			md5hash, _ := obj.Hash(ctx, hash.MD5)
+			uploadedModTime := obj.ModTime(ctx)
+
+			result := &model.File{
+				ID:             nativeID,
+				Name:           name,
+				Size:           obj.Size(),
+				Path:           "",
+				GoogleDriveMD5: md5hash,
+				ModTime:        uploadedModTime,
+				Status:         "active",
+			}
+
+			replica := &model.Replica{
+				FileID:     "",
+				Path:       "",
+				Name:       name,
+				Size:       obj.Size(),
+				Provider:   model.ProviderGoogle,
+				AccountID:  c.user.Email,
+				NativeID:   nativeID,
+				NativeHash: md5hash,
+				ModTime:    uploadedModTime,
+				Status:     "active",
+				Fragmented: false,
+				Owner:      c.user.Email,
+			}
+			result.Replicas = []*model.Replica{replica}
+
+			c.setPath(nativeID, remote)
+			return result, nil
+		}
+	}
+
 	file := &drive.File{
 		Name:    name,
 		Parents: []string{folderID},
@@ -355,6 +525,10 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 	}
 
 	result.Replicas = []*model.Replica{replica}
+
+	if parentPath, ok := c.getPath(folderID); ok {
+		c.setPath(createdFile.Id, joinPath(parentPath, createdFile.Name))
+	}
 
 	return result, nil
 }
@@ -436,6 +610,10 @@ func (c *Client) CreateFolder(parentID, name string) (*model.Folder, error) {
 
 	if len(createdFolder.Owners) > 0 {
 		result.UserEmail = createdFolder.Owners[0].EmailAddress
+	}
+
+	if parentPath, ok := c.getPath(parentID); ok {
+		c.setPath(createdFolder.Id, joinPath(parentPath, createdFolder.Name))
 	}
 
 	c.folderCacheMu.Lock()
@@ -572,8 +750,31 @@ func (c *Client) VerifyPermissions() error {
 	return nil
 }
 
-// GetQuota returns storage quota information
+// GetQuota returns storage quota information. It prefers the rclone backend's
+// About interface, falling back to the direct Drive API.
 func (c *Client) GetQuota() (*api.QuotaInfo, error) {
+	ctx := context.Background()
+
+	if f, err := c.ensureFs(ctx); err == nil {
+		if abouter, ok := f.(fs.Abouter); ok {
+			if usage, aerr := abouter.About(ctx); aerr == nil && usage != nil {
+				quota := &api.QuotaInfo{}
+				if usage.Total != nil {
+					quota.Total = *usage.Total
+				}
+				if usage.Used != nil {
+					quota.Used = *usage.Used
+				}
+				if usage.Free != nil {
+					quota.Free = *usage.Free
+				} else if quota.Total > 0 {
+					quota.Free = quota.Total - quota.Used
+				}
+				return quota, nil
+			}
+		}
+	}
+
 	about, err := c.service.About.Get().Fields("storageQuota").Do()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get quota: %w", err)
