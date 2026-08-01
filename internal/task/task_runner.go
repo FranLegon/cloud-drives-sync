@@ -132,7 +132,7 @@ func (r *Runner) reconcileLogicalFilePaths() error {
 	}
 
 	for _, file := range files {
-		if file == nil || file.Status != "active" {
+		if file == nil || (file.Status != "active" && file.Status != "soft-deleted") {
 			continue
 		}
 		canonicalReplica := r.chooseCanonicalReplica(file)
@@ -3112,14 +3112,26 @@ func (r *Runner) ProcessHardDeletedFolder() error {
 	for _, file := range files {
 		logger.Info("Hard-deleting %s from all providers", file.Path)
 
+		deleteUsersByKey := make(map[string]*model.User)
+		deleteClientByKey := make(map[string]api.CloudClient)
 		for _, rep := range file.Replicas {
-			if rep.Status == "deleted" || rep.Status == "hard-deleted" {
+			if rep == nil || rep.Status == "deleted" || rep.Status == "hard-deleted" {
 				continue
 			}
 
-			user := r.getUser(rep.Provider, rep.AccountID)
+			deleteAccountID := rep.AccountID
+			if rep.Provider == model.ProviderGoogle && strings.TrimSpace(rep.Owner) != "" {
+				deleteAccountID = rep.Owner
+			}
+
+			user := r.getUser(rep.Provider, deleteAccountID)
 			if user == nil {
-				logger.Warning("[ProcessHardDeletedFolder] No user found for replica %s (%s/%s)", rep.NativeID, rep.Provider, rep.AccountID)
+				logger.Warning("[ProcessHardDeletedFolder] No user found for replica %s (%s/%s owner=%s)", rep.NativeID, rep.Provider, rep.AccountID, rep.Owner)
+				continue
+			}
+
+			key := string(rep.Provider) + "\x00" + rep.NativeID
+			if _, exists := deleteUsersByKey[key]; exists {
 				continue
 			}
 
@@ -3129,20 +3141,66 @@ func (r *Runner) ProcessHardDeletedFolder() error {
 				continue
 			}
 
-			if r.safeMode {
+			deleteUsersByKey[key] = user
+			deleteClientByKey[key] = client
+		}
+
+		if r.safeMode {
+			for _, rep := range file.Replicas {
+				if rep == nil || rep.Status == "deleted" || rep.Status == "hard-deleted" {
+					continue
+				}
 				logger.DryRun("[DRY RUN] Would hard-delete %s from %s (%s)", file.Path, rep.AccountID, rep.Provider)
+			}
+			continue
+		}
+
+		deleteSucceeded := make(map[string]bool)
+		for key, user := range deleteUsersByKey {
+			client := deleteClientByKey[key]
+			parts := strings.SplitN(key, "\x00", 2)
+			nativeID := ""
+			if len(parts) == 2 {
+				nativeID = parts[1]
+			}
+
+			logger.Info("Deleting %s (NativeID=%s) as %s (%s)", file.Path, nativeID, user.GetAccountID(), parts[0])
+			if err := client.DeleteFile(nativeID); err != nil {
+				logger.Warning("[ProcessHardDeletedFolder] Failed to delete %s as %s: %v — continuing", nativeID, user.GetAccountID(), err)
+				continue
+			}
+			deleteSucceeded[key] = true
+		}
+
+		allDeleted := true
+		for _, rep := range file.Replicas {
+			if rep == nil || rep.Status == "deleted" || rep.Status == "hard-deleted" {
 				continue
 			}
 
-			logger.Info("Deleting %s (NativeID=%s) from %s (%s)", file.Path, rep.NativeID, rep.AccountID, rep.Provider)
-			if err := client.DeleteFile(rep.NativeID); err != nil {
-				logger.Warning("[ProcessHardDeletedFolder] Failed to delete %s from %s: %v — continuing", rep.NativeID, rep.AccountID, err)
+			deleteAccountID := rep.AccountID
+			if rep.Provider == model.ProviderGoogle && strings.TrimSpace(rep.Owner) != "" {
+				deleteAccountID = rep.Owner
+			}
+			key := string(rep.Provider) + "\x00" + rep.NativeID
+			if !deleteSucceeded[key] {
+				allDeleted = false
+				continue
 			}
 
-			rep.Status = "deleted"
+			rep.Status = "hard-deleted"
+			if rep.Provider == model.ProviderGoogle && strings.TrimSpace(rep.Owner) != "" {
+				rep.AccountID = deleteAccountID
+			}
 			if err := r.db.UpdateReplica(rep); err != nil {
 				logger.Error("[ProcessHardDeletedFolder] Failed to update replica status: %v", err)
+				allDeleted = false
 			}
+		}
+
+		if !allDeleted {
+			logger.Warning("[ProcessHardDeletedFolder] File %s not fully hard-deleted; leaving DB status as %s", file.Path, file.Status)
+			continue
 		}
 
 		file.Status = "hard-deleted"

@@ -1429,7 +1429,8 @@ func specCase16(r *task.Runner, main *model.User, backups []*model.User) error {
 	if err := runCLISync(r); err != nil {
 		return fmt.Errorf("second sync (soft-delete) failed: %w", err)
 	}
-	if err := verifyFileStatus(db, "/"+fileName, "active", true); err != nil {
+	softPath := "/" + task.AuxFolder + "/soft-deleted/" + fileName
+	if err := verifyFileStatus(db, softPath, "soft-deleted", false); err != nil {
 		return fmt.Errorf("soft-delete not propagated: %w", err)
 	}
 	softFiles, err := mainClient.ListFiles(softFolder.ID)
