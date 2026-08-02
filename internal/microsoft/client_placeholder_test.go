@@ -1,6 +1,11 @@
 package microsoft
 
-import "testing"
+import (
+	"testing"
+	"time"
+
+	"github.com/FranLegon/cloud-drives-sync/internal/model"
+)
 
 func TestBuildAndParseFakeShortcutName(t *testing.T) {
 	name := "report.final.v2.pdf"
@@ -26,5 +31,38 @@ func TestBuildAndParseFakeShortcutName(t *testing.T) {
 func TestParseFakeShortcutNameRejectsLegacySizeFormat(t *testing.T) {
 	if _, _, ok := parseFakeShortcutName("report.pdf.sz-123.placeholder"); ok {
 		t.Fatalf("legacy size placeholder should not match new parser")
+	}
+}
+
+func TestCreateShortcutReplicaMetadataUsesShortcutHash(t *testing.T) {
+	now := time.Unix(1234, 0)
+	file := &model.File{
+		ID:     "shortcut-id",
+		Name:   "report.pdf",
+		Size:   123,
+		Status: "active",
+		Replicas: []*model.Replica{
+			{
+				Name:       "report.pdf",
+				Size:       123,
+				Provider:   model.ProviderMicrosoft,
+				AccountID:  "user@example.com",
+				NativeID:   "shortcut-id",
+				NativeHash: model.NativeHashShortcut,
+				ModTime:    now,
+				Status:     "active",
+				Owner:      "SHARED",
+			},
+		},
+	}
+
+	if len(file.Replicas) != 1 {
+		t.Fatalf("replicas = %d, want 1", len(file.Replicas))
+	}
+	if file.Replicas[0].NativeHash != model.NativeHashShortcut {
+		t.Fatalf("native hash = %q, want %q", file.Replicas[0].NativeHash, model.NativeHashShortcut)
+	}
+	if file.Replicas[0].AccountID != "user@example.com" {
+		t.Fatalf("account id = %q", file.Replicas[0].AccountID)
 	}
 }

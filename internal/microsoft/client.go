@@ -1204,13 +1204,25 @@ func (c *Client) CreateShortcut(parentID, name, targetID, targetDriveID string) 
 	}
 
 	file := &model.File{
-		ID:       *item.GetId(),
-		Name:     *item.GetName(),
-		Size:     size,
-		Path:     "",
-		ModTime:  time.Now(),
-		Status:   "active",
-		Replicas: nil, // Shortcuts don't have physical replicas
+		ID:      *item.GetId(),
+		Name:    *item.GetName(),
+		Size:    size,
+		Path:    "",
+		ModTime: time.Now(),
+		Status:  "active",
+		Replicas: []*model.Replica{
+			{
+				Name:       *item.GetName(),
+				Size:       size,
+				Provider:   model.ProviderMicrosoft,
+				AccountID:  c.user.Email,
+				NativeID:   *item.GetId(),
+				NativeHash: model.NativeHashShortcut,
+				ModTime:    time.Now(),
+				Status:     "active",
+				Owner:      "SHARED",
+			},
+		},
 	}
 
 	return file, nil
