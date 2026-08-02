@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"regexp"
 	"sync"
 	"time"
@@ -23,7 +24,13 @@ import (
 	"github.com/microsoftgraph/msgraph-sdk-go/drives"
 	"github.com/microsoftgraph/msgraph-sdk-go/models"
 	"github.com/microsoftgraph/msgraph-sdk-go/models/odataerrors"
+	onedrivefs "github.com/rclone/rclone/backend/onedrive"
+	"github.com/rclone/rclone/fs"
+	"github.com/rclone/rclone/fs/config/configmap"
+	"github.com/rclone/rclone/fs/object"
 	"golang.org/x/oauth2"
+
+	_ "github.com/rclone/rclone/backend/onedrive"
 )
 
 var syncFolderPrefix = "cloud-drives-sync-root"
@@ -64,9 +71,21 @@ type Client struct {
 	tokenSource   *auth.TokenSource
 	syncFolderID  string
 	driveID       string
+	driveType     string
 	folderCache   map[string][]*model.Folder
 	folderCacheMu sync.Mutex
 	httpClient    *http.Client
+
+	// rclone backend, rooted at the sync folder. Created lazily once the sync
+	// folder ID is known (see ensureFs). Used for file content I/O and quota.
+	f    fs.Fs
+	fsMu sync.Mutex
+
+	// idToPath maps native OneDrive item IDs to their path relative to the
+	// rclone Fs root (the sync folder). Populated during listing so that
+	// path-based rclone operations can be bridged from the ID-based interface.
+	idToPath   map[string]string
+	idToPathMu sync.Mutex
 }
 
 // NewClient creates a new Microsoft OneDrive client
@@ -90,6 +109,7 @@ func NewClient(user *model.User, config *oauth2.Config) (*Client, error) {
 		tokenSource: tokenSource,
 		folderCache: make(map[string][]*model.Folder),
 		httpClient:  api.NewRetryClient(nil),
+		idToPath:    make(map[string]string),
 	}
 
 	if err := client.initializeDrive(); err != nil {
@@ -127,8 +147,75 @@ func (c *Client) initializeDrive() error {
 	}
 
 	c.driveID = *drive.GetId()
-	logger.Info("Initialized OneDrive DriveID: '%s' for %s", c.driveID, c.user.Email)
+	if drive.GetDriveType() != nil {
+		c.driveType = *drive.GetDriveType()
+	}
+	logger.Info("Initialized OneDrive DriveID: '%s' (type: %s) for %s", c.driveID, c.driveType, c.user.Email)
 	return nil
+}
+
+// ensureFs lazily creates the rclone Fs rooted at the sync folder. It requires
+// that the sync folder ID has already been resolved. rclone uses the stored
+// refresh token to obtain access tokens automatically for the session lifetime.
+func (c *Client) ensureFs(ctx context.Context) (fs.Fs, error) {
+	c.fsMu.Lock()
+	defer c.fsMu.Unlock()
+
+	if c.f != nil {
+		return c.f, nil
+	}
+	if c.syncFolderID == "" {
+		return nil, errors.New("sync folder ID not known; run PreFlightCheck first")
+	}
+	if c.driveID == "" || c.driveType == "" {
+		return nil, errors.New("drive ID or drive type not known")
+	}
+
+	refresh := c.tokenSource.GetRefreshToken()
+	tokenJSON := fmt.Sprintf(`{"access_token":"","token_type":"Bearer","refresh_token":%q,"expiry":"0001-01-01T00:00:00Z"}`, refresh)
+
+	m := configmap.Simple{
+		"client_id":      c.config.ClientID,
+		"client_secret":  c.config.ClientSecret,
+		"token":          tokenJSON,
+		"drive_id":       c.driveID,
+		"drive_type":     c.driveType,
+		"root_folder_id": c.syncFolderID,
+	}
+
+	f, err := onedrivefs.NewFs(ctx, "onedrive", "", m)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize rclone onedrive backend: %w", err)
+	}
+	c.f = f
+	return f, nil
+}
+
+// setPath records the path (relative to the rclone Fs root) for a native ID.
+func (c *Client) setPath(id, p string) {
+	if id == "" {
+		return
+	}
+	c.idToPathMu.Lock()
+	c.idToPath[id] = p
+	c.idToPathMu.Unlock()
+}
+
+// getPath returns the recorded path for a native ID.
+func (c *Client) getPath(id string) (string, bool) {
+	c.idToPathMu.Lock()
+	defer c.idToPathMu.Unlock()
+	p, ok := c.idToPath[id]
+	return p, ok
+}
+
+// joinRemotePath joins a parent path (relative to the Fs root) with a child
+// name using rclone's forward-slash convention.
+func joinRemotePath(parent, name string) string {
+	if parent == "" {
+		return name
+	}
+	return path.Join(parent, name)
 }
 
 // PreFlightCheck verifies the sync folder structure
@@ -145,6 +232,7 @@ func (c *Client) PreFlightCheck() error {
 	for _, item := range result.GetValue() {
 		if item.GetName() != nil && *item.GetName() == syncFolderPrefix && item.GetFolder() != nil {
 			c.syncFolderID = *item.GetId()
+			c.setPath(c.syncFolderID, "")
 			found = true
 			break
 		}
@@ -180,6 +268,7 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 	var allFiles []*model.File
 	var allFolders []*model.Folder
+	parentPath, hasParentPath := c.getPath(folderID)
 	err = pageIterator.Iterate(ctx, func(item models.DriveItemable) bool {
 		isFolder := item.GetFolder() != nil
 		isShortcut := item.GetRemoteItem() != nil
@@ -207,9 +296,15 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 				ParentFolderID: folderID,
 			}
 			allFolders = append(allFolders, folder)
+			if hasParentPath {
+				c.setPath(*item.GetId(), joinRemotePath(parentPath, *item.GetName()))
+			}
 			return true // It's a regular folder
 		}
 
+		// rawName is the item's true name on OneDrive (which may be a
+		// placeholder name); it is used for the rclone path mapping.
+		rawName := *item.GetName()
 		itemName := *item.GetName()
 		itemSize := int64(0)
 		if item.GetSize() != nil {
@@ -275,6 +370,9 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 
 		file.Replicas = []*model.Replica{replica}
 		allFiles = append(allFiles, file)
+		if hasParentPath {
+			c.setPath(*item.GetId(), joinRemotePath(parentPath, rawName))
+		}
 		return true
 	})
 
@@ -289,9 +387,27 @@ func (c *Client) ListFiles(folderID string) ([]*model.File, error) {
 	return allFiles, nil
 }
 
-// DownloadFile downloads a file using streaming to avoid buffering large files in memory
+// DownloadFile downloads a file using streaming to avoid buffering large files in memory.
+// It uses the rclone backend when the file's path is known, falling back to the
+// direct Graph API by ID otherwise.
 func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
 	ctx := context.Background()
+
+	if f, ferr := c.ensureFs(ctx); ferr == nil {
+		if p, ok := c.getPath(fileID); ok {
+			if obj, oerr := f.NewObject(ctx, p); oerr == nil {
+				reader, rerr := obj.Open(ctx)
+				if rerr == nil {
+					defer reader.Close()
+					if _, cerr := io.Copy(writer, reader); cerr != nil {
+						return fmt.Errorf("failed to stream download to writer: %w", cerr)
+					}
+					return nil
+				}
+			}
+			// Object could not be opened via rclone; fall back to direct API.
+		}
+	}
 
 	// Get the drive item to obtain the download URL
 	item, err := c.graphClient.Drives().ByDriveId(c.driveID).Items().ByDriveItemId(fileID).Get(ctx, nil)
@@ -334,6 +450,63 @@ func (c *Client) DownloadFile(fileID string, writer io.Writer) error {
 // UploadFile uploads a file
 func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64) (*model.File, error) {
 	ctx := context.Background()
+
+	if f, ferr := c.ensureFs(ctx); ferr == nil {
+		if parentPath, ok := c.getPath(folderID); ok {
+			remote := joinRemotePath(parentPath, name)
+			modTime := time.Now()
+			objInfo := object.NewStaticObjectInfo(remote, modTime, size, true, nil, f)
+			obj, putErr := f.Put(ctx, reader, objInfo)
+			if putErr != nil {
+				// The reader may already be partially consumed, so we cannot
+				// safely fall back to the direct API here.
+				return nil, fmt.Errorf("failed to upload file via rclone: %w", putErr)
+			}
+
+			nativeID := ""
+			if ider, ok := obj.(fs.IDer); ok {
+				nativeID = ider.ID()
+			}
+
+			var nativeHash string
+			for _, ht := range f.Hashes().Array() {
+				if h, herr := obj.Hash(ctx, ht); herr == nil && h != "" {
+					nativeHash = h
+					break
+				}
+			}
+
+			uploadedModTime := obj.ModTime(ctx)
+
+			file := &model.File{
+				ID:      nativeID,
+				Name:    name,
+				Size:    size,
+				Path:    "",
+				ModTime: uploadedModTime,
+				Status:  "active",
+			}
+
+			replica := &model.Replica{
+				FileID:     "",
+				Path:       "",
+				Name:       name,
+				Size:       size,
+				Provider:   model.ProviderMicrosoft,
+				AccountID:  c.user.Email,
+				NativeID:   nativeID,
+				NativeHash: nativeHash,
+				ModTime:    uploadedModTime,
+				Status:     "active",
+				Fragmented: false,
+				Owner:      c.user.Email,
+			}
+			file.Replicas = []*model.Replica{replica}
+
+			c.setPath(nativeID, remote)
+			return file, nil
+		}
+	}
 
 	// 1. Create the file placeholder
 	createRequestBody := models.NewDriveItem()
@@ -467,6 +640,10 @@ func (c *Client) UploadFile(folderID, name string, reader io.Reader, size int64)
 
 	file.Replicas = []*model.Replica{replica}
 
+	if parentPath, ok := c.getPath(folderID); ok {
+		c.setPath(*finalItem.GetId(), joinRemotePath(parentPath, *finalItem.GetName()))
+	}
+
 	return file, nil
 }
 
@@ -564,6 +741,7 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 	}
 
 	var allFolders []*model.Folder
+	parentPath, hasParentPath := c.getPath(parentID)
 	for _, item := range items.GetValue() {
 		if item.GetFolder() == nil {
 			continue
@@ -582,6 +760,9 @@ func (c *Client) ListFolders(parentID string) ([]*model.Folder, error) {
 		}
 
 		allFolders = append(allFolders, folder)
+		if hasParentPath {
+			c.setPath(*item.GetId(), joinRemotePath(parentPath, *item.GetName()))
+		}
 	}
 
 	c.folderCacheMu.Lock()
@@ -614,6 +795,10 @@ func (c *Client) CreateFolder(parentID, name string) (*model.Folder, error) {
 		Provider:       model.ProviderMicrosoft,
 		UserEmail:      c.user.Email,
 		ParentFolderID: parentID,
+	}
+
+	if parentPath, ok := c.getPath(parentID); ok {
+		c.setPath(*item.GetId(), joinRemotePath(parentPath, *item.GetName()))
 	}
 
 	c.folderCacheMu.Lock()
@@ -738,6 +923,7 @@ func (c *Client) CreateSyncFolder(name string) error {
 	}
 
 	c.syncFolderID = folder.ID
+	c.setPath(c.syncFolderID, "")
 	return nil
 }
 
@@ -789,9 +975,31 @@ func (c *Client) VerifyPermissions() error {
 	return nil
 }
 
-// GetQuota returns quota information
+// GetQuota returns quota information. It prefers the rclone backend's About
+// interface, falling back to the direct Graph API.
 func (c *Client) GetQuota() (*api.QuotaInfo, error) {
 	ctx := context.Background()
+
+	if f, err := c.ensureFs(ctx); err == nil {
+		if abouter, ok := f.(fs.Abouter); ok {
+			if usage, aerr := abouter.About(ctx); aerr == nil && usage != nil {
+				quota := &api.QuotaInfo{}
+				if usage.Total != nil {
+					quota.Total = *usage.Total
+				}
+				if usage.Used != nil {
+					quota.Used = *usage.Used
+				}
+				if usage.Free != nil {
+					quota.Free = *usage.Free
+				} else if quota.Total > 0 {
+					quota.Free = quota.Total - quota.Used
+				}
+				return quota, nil
+			}
+		}
+	}
+
 	drive, err := c.graphClient.Drives().ByDriveId(c.driveID).Get(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get drive: %w", err)
