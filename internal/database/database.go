@@ -906,6 +906,28 @@ func (db *DB) UpsertReplicaByNativeID(replica *model.Replica, lastSeenAt int64) 
 		if err := idStmt.QueryRow(string(replica.Provider), replica.AccountID, replica.NativeID).Scan(&replica.ID); err != nil {
 			return fmt.Errorf("failed to load upserted replica id: %w", err)
 		}
+
+		if replica.Provider == model.ProviderMicrosoft && replica.Status == "active" && replica.NativeHash == model.NativeHashShortcut && replica.FileID != "" {
+			cleanupStmt, err := db.txStmt(tx, `
+				UPDATE replicas
+				SET status = 'deleted'
+				WHERE provider = ?
+				  AND account_id = ?
+				  AND file_id = ?
+				  AND native_hash = ?
+				  AND status = 'active'
+				  AND native_id != ?
+				  AND size = 0
+				  AND path != ?
+			`)
+			if err != nil {
+				return fmt.Errorf("failed to prepare microsoft shortcut cleanup statement: %w", err)
+			}
+			defer cleanupStmt.Close()
+			if _, err := cleanupStmt.Exec(string(replica.Provider), replica.AccountID, replica.FileID, model.NativeHashShortcut, replica.NativeID, replica.Path); err != nil {
+				return fmt.Errorf("failed to cleanup stale microsoft shortcut replicas: %w", err)
+			}
+		}
 		return nil
 	})
 }
@@ -1913,12 +1935,26 @@ func (db *DB) GetReplicasByAccount(provider model.Provider, accountID string) ([
 	return replicas, nil
 }
 
-// GetReplicaByNativeID returns a replica by its native ID and provider
+// GetReplicaByNativeID returns the best matching replica by native ID and provider,
+// preferring active rows when historical deleted rows share the same native ID.
 func (db *DB) GetReplicaByNativeID(provider model.Provider, nativeID string) (*model.Replica, error) {
 	query := `
 	SELECT id, file_id, path, name, size, provider, account_id, native_id, native_hash, mod_time, status, fragmented, owner
 	FROM replicas
 	WHERE provider = ? AND native_id = ?
+	ORDER BY CASE status
+		WHEN 'active' THEN 0
+		WHEN 'soft-deleted' THEN 1
+		WHEN 'hard-deleted' THEN 2
+		WHEN 'deleted' THEN 3
+		ELSE 4
+	END,
+	CASE
+		WHEN provider = 'Microsoft' AND native_hash = 'SHORTCUT' AND size = 0 THEN 1
+		ELSE 0
+	END,
+	mod_time DESC, id DESC
+	LIMIT 1
 	`
 	r := &model.Replica{}
 	var providerStr string
